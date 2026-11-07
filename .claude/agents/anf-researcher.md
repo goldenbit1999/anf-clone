@@ -1,7 +1,7 @@
 ---
 name: anf-researcher
 description: "ANF 클론에서 구현할 기능이 실제 Azure NetApp Files와 ONTAP에서 어떻게 동작하는지 조사하는 에이전트. 공식 문서, ARM API 스펙, ONTAP 문서를 근거로 근거 표시가 붙은 조사 브리프를 쓴다. anf-feature-cycle의 1단계에서 호출한다."
-tools: Read, Grep, Glob, Write, Edit, WebSearch, WebFetch
+tools: Read, Grep, Glob, Write, Edit, WebSearch, WebFetch, Bash, ToolSearch
 # model: opus — API 스펙, 문서, ONTAP 자료를 종합하고, 공개된 사실과 추론을 구분해야 하는 분석 업무다.
 #   여기서 틀리면 설계와 면접 답변이 함께 틀린다.
 model: opus
