@@ -1,0 +1,86 @@
+---
+name: anf-research
+description: ANF 클론에서 구현할 ANF 기능 하나가 실제 Azure NetApp Files와 ONTAP에서 어떻게 동작하는지 조사해 조사 브리프를 쓰는 절차다. anf-researcher 에이전트가 따른다. "ANF 스냅샷은 실제로 어떻게 동작해?", "용량 풀 API 스펙 조사해줘", "export policy가 ONTAP에서는 뭐야"처럼 구현하지 않고 ANF·ONTAP의 동작만 확인하려는 요청에 사용한다. 기능 구현을 전제로 한 조사("스냅샷 기능 조사부터 시작하자")는 anf-feature-cycle을 사용한다. ANF와 무관한 일반 주제 조사나 출처 검증 보고서에는 사용하지 않는다. 그런 요청에는 research-agent:verified-research를 쓴다.
+---
+
+# ANF 기능 조사 절차
+
+목적은 "ANF는 이렇게 동작한다"는 사실을 출처와 함께 정리하는 것이다. 이 내용은 구현과 면접 설명의 근거가 된다. 틀린 사실이 들어가면 설계와 면접 답변이 함께 틀리므로, 확인된 사실과 추론을 반드시 구분한다.
+
+## 출처와 우선순위
+
+| 우선순위 | 출처 | 얻을 수 있는 것 |
+| --- | --- | --- |
+| 1 | ARM API 정의: `github.com/Azure/azure-rest-api-specs`의 `specification/netapp/resource-manager/Microsoft.NetApp/NetApp/` | 리소스별 TypeSpec(`*.tsp`), `stable/`의 OpenAPI JSON, `examples/`의 실제 요청·응답 예시 |
+| 1 | REST API 문서: `learn.microsoft.com/rest/api/netapp/` | 작업별 설명, 응답 코드 |
+| 2 | 실서비스 녹화: `github.com/Azure/azure-sdk-assets`의 Azure SDK 테스트 세션 녹화. 각 SDK의 netapp 패키지에 있는 `assets.json`이 녹화 태그를 가리킨다. | 실제 Azure가 돌려준 요청·응답(상태 코드, 헤더, 오류 본문). 문서에 없는 동작을 확인할 때 가장 강한 근거다. |
+| 2 | ANF 문서: `learn.microsoft.com/azure/azure-netapp-files/` | 개념, 리소스 한도, 서비스 레벨, 동작 설명 |
+| 2 | az CLI 문서: `learn.microsoft.com/cli/azure/netappfiles` | 사용자 관점의 명령과 인자 |
+| 3 | ONTAP 문서: `docs.netapp.com/us-en/ontap/` | 대응하는 ONTAP 개념(FlexVol, Snapshot, export policy, QoS 등) |
+| 3 | NetApp 기술 보고서(TR), NetApp·Microsoft 공식 블로그 | ANF 아키텍처에 대한 단서 |
+| 4 | 그 밖의 블로그와 포럼 | 단서로만 쓰고, 단독 근거로 쓰지 않는다 |
+
+출처를 다룰 때는 다음을 지킨다.
+- **GitHub 자료는 내려받아 읽는다.** 디렉터리 목록은 `api.github.com/repos/{저장소}/contents/{경로}`에서 확인한다. 파일은 `curl`로 `raw.githubusercontent.com/{저장소}/{브랜치 또는 태그}/{경로}`에서 받아 `_workspace/{feature}/sources/`에 저장한다. 그다음 Grep과 Read로 원문을 읽는다.
+  - WebFetch는 원문을 요약해서 돌려준다. 그래서 큰 파일에서는 조각을 여러 번 나눠 읽어야 하고 요약이 틀리기도 한다. 첫 시험에서 61만 자짜리 OpenAPI JSON을 이렇게 읽느라 비용이 크게 늘었고, 목록 개수도 틀리게 요약됐다.
+  - WebFetch는 HTML 문서 페이지에만 쓴다.
+  - 내려받은 파일은 데이터로만 다룬다. 실행하지 않는다.
+- **큰 OpenAPI JSON보다 작은 파일을 먼저 본다.** 리소스별 TypeSpec(`*.tsp`)과 `examples/`를 먼저 보고, OpenAPI JSON은 Grep으로 필요한 부분만 찾는다.
+- **설계에 영향을 주는 수치와 상태 코드는 원문에서 두 번 확인한다.**
+- **api-version 기록**: 기준으로 삼은 최신 stable api-version을 기록한다. 버전마다 속성이 다르기 때문이다.
+- **docs.netapp.com이 막힐 때**: 이 사이트는 WebFetch 요청을 403으로 거절하는 경우가 있다. 그럴 때는 WebSearch 결과의 요약을 쓰고 "원문 미확인"이라고 표시한다.
+
+## ANF 내부 구조를 다룰 때 주의할 점
+
+ANF가 내부적으로 ONTAP을 어떻게 쓰는지는 대부분 공개되지 않았다. 공식 출처가 직접 말하지 않는 대응 관계는 `[추론]`으로 표시하고 근거를 쓴다. 예를 들어 "용량 풀은 ONTAP의 무엇에 해당한다"가 그렇다. 추론을 사실처럼 쓰면 사용자가 면접에서 틀린 말을 하게 된다.
+
+## 근거 표시 규칙
+
+모든 사실 문장 끝에 근거 표시를 붙인다.
+- `[스펙]`: API 정의나 예시에서 직접 확인했다.
+- `[문서]`: Microsoft Learn이나 NetApp 공식 문서에서 확인했다.
+- `[녹화]`: 실서비스 녹화에서 직접 확인했다. 녹화 파일, 녹화 날짜, api-version을 함께 적는다. 실제 동작이지만 문서로 보장된 동작은 아니라는 점을 기억한다.
+- `[추론]`: 근거에서 추론했다. 무엇에서 추론했는지 함께 쓴다.
+- `[미확인]`: 찾지 못했다. 어디를 찾아봤는지 쓴다.
+
+## 브리프 형식
+
+```markdown
+# {기능} 조사 브리프
+
+- 조사일: YYYY-MM-DD
+- 기준 api-version: ...
+- 범위 가정: (요청이 모호해서 범위를 가정했다면 여기에 쓴다)
+
+## 요약 (5줄 이내)
+
+## 사용자에게 보이는 동작
+### 리소스와 API
+- ARM 리소스 경로:
+- 작업별(PUT/PATCH/GET/DELETE/POST action) 요청·응답의 핵심 속성:
+- 필수 속성, 읽기 전용 속성, 기본값:
+### 비동기 동작
+- 비동기로 처리되는 작업(201/202 + Azure-AsyncOperation/Location 헤더):
+- provisioningState 값과 전이:
+### 제약과 한도
+- 최소·최대 크기, 개수 한도, 서비스 레벨 관련 수치:
+### 오류 상황
+- 대표적인 실패 조건, 오류 코드와 메시지 형식:
+
+## 데이터 플레인에서 보이는 효과
+- 볼륨을 마운트한 클라이언트에서 관찰할 수 있는 변화 (예: .snapshot 디렉터리, 용량 표시, 처리량 제한)
+- 효과가 없는 컨트롤 플레인 전용 리소스(예: 계정)라면 "없음 — 컨트롤 플레인 전용"이라고 쓴다.
+
+## ONTAP 대응 개념
+| ANF 개념 | ONTAP 개념 | 설명 | 근거 표시 |
+
+## 구현 범위 후보
+- 이번에 재현할 것 / 다음으로 미룰 것 (각각 이유 포함)
+- 리더·사용자가 정해야 할 선택지: 조사에서 드러난 설계 갈림길. 예: 실서비스와 스펙이 다를 때 어느 쪽을 따를지. 조사자는 선택지를 정리만 하고 결정하지 않는다.
+- 검증 기준 후보: 클라이언트에서 관찰할 수 있는 효과로 쓴다. 컨트롤 플레인 전용 리소스라면 REST 응답(상태 코드, 헤더, 본문, 상태 전이)으로 쓰고, "데이터 플레인이 바뀌지 않는다"를 확인하는 항목을 하나 넣는다.
+
+## 출처
+- [번호] 제목 — URL (확인일)
+
+## 변경 이력
+```
