@@ -1,5 +1,6 @@
 # NetApp 계정 (netapp-account) 조사 브리프
 
+- 조사 상태: 완료 (2026-11-07 보완 조사: 공통 LRO 계층 질문 5개. 답하지 못한 부분은 "미확인 목록"에)
 - 조사일: 2026-11-07
 - 기준 api-version: `2026-08-01`. 이 버전이 최신 stable이다 [스펙 2]. 최신 preview는 `2026-08-15-preview`다 [스펙 2]. 아래 녹화 R1~R4는 모두 `2026-08-15-preview`로 호출됐다 [추론] (근거: 녹화 R1~R4의 RequestUri).
 - 범위 가정: 요청받은 범위대로 생성, 조회, 목록, 수정(PATCH), 삭제, 부모·자식 관계, 자식이 남았을 때의 삭제를 조사했다. Active Directory 연결과 암호화(CMK)는 이름과 존재만 적었다. 요청에 언급되지 않은 다른 계정 속성(`nfsV4IDDomain`, `disableShowmount`, `ldapConfiguration` 등)도 조사자가 판단해 같은 수준으로만 다뤘다.
@@ -8,6 +9,7 @@
   - R2 = `NetAppAccountTests/UpdateNetAppAccountAsync.json`
   - R3 = `NetAppAccountTests/UpdateNetAppAccountWithPutAsync.json`
   - R4 = `PoolTests/DeleteAccountWithPoolPresentAsync.json`
+  - 2026-11-07 보완 부분(비동기 동작의 "ARM LRO 공통 규칙" 이하 하위 절)은 새 표시 `[녹화]`를 쓰고, 파일·녹화 날짜·api-version을 함께 적었다. 기존 문장의 `[추론] (녹화 Rn)`은 그대로 두었다.
 
 ## 요약 (5줄 이내)
 
@@ -140,7 +142,120 @@
   - 생성: `Creating` → `Succeeded`
   - PUT 갱신: `Updating` → `Succeeded`
   - PATCH: `Patching` → `Succeeded`, 또는 즉시 `Succeeded`
-- `Deleting`, `Failed` 값이 있는지, 실패했을 때 어떻게 전이하는지는 확인하지 못했다 [미확인] (찾아본 곳: 스펙 3의 AccountProperties, 예시 4, 녹화 R1. 녹화 R1에는 삭제 중에 GET한 기록이 없다).
+- `Deleting`, `Failed` 값이 있는지, 실패했을 때 어떻게 전이하는지는 확인하지 못했다 [미확인] (찾아본 곳: 스펙 3의 AccountProperties, 예시 4, 녹화 R1. 녹화 R1에는 삭제 중에 GET한 기록이 없다). 다른 리소스까지 넓혀 본 결과는 아래 "실패한 작업의 모습"에 있다 (2026-11-07 보완).
+
+#### ARM LRO 공통 규칙 (2026-11-07 보완)
+
+출처 주의: ARM RPC 계약의 공식 저장소(`cloud-and-ai-microsoft/resource-provider-contract`)는 Microsoft 엔터프라이즈 SSO 뒤에 있어 읽지 못했다(302 → SSO). 옛 공개 저장소 `Azure/azure-resource-manager-rpc`는 404다. 아래 `[문서 24]`는 그 공개 저장소의 포크 사본(2022-05-02 커밋)이다. 현재 계약과 다를 수 있다.
+
+**`Azure-AsyncOperation` URL을 GET했을 때 (작업 리소스)**
+- 응답 코드는 진행 중이든 종결이든 항상 200이다. 진행 여부는 본문의 `status`가 알려 준다 [문서 24]. 4xx·5xx는 "상태 읽기"가 실패했다는 뜻이고 작업 자체의 실패가 아니다 [문서 24].
+- 본문 필드 [문서 23, 24]:
+
+| 필드 | 필수 여부 | 내용 |
+| --- | --- | --- |
+| `status` | 필수 | 종결 값은 `Succeeded`, `Failed`, `Canceled`. 그 밖의 값은 RP가 정하며 모두 "진행 중"이다 |
+| `id` | 선택(권장) | 작업 리소스를 GET한 URL과 맞아야 한다 |
+| `name` | 선택(권장) | `id`의 마지막 세그먼트와 같아야 한다. 보통 GUID |
+| `startTime`, `endTime` | 선택 | ISO 8601 |
+| `percentComplete` | 선택 | 0~100 사이 double |
+| `properties` | 선택 | RP가 정한다. `status`가 `Succeeded`일 때만 넣어야 한다 [문서 24] |
+| `error` | `Failed`·`Canceled`이면 필수 | `{code, message}`. common-types의 ErrorResponse 형식(details 등 선택 필드 포함). `code`는 고정된(invariant) 코드, `message`는 사용자가 할 일을 알려 주는 문장 [문서 24] |
+
+- Learn 문서는 "응답 속성은 달라질 수 있지만 항상 status를 포함한다", "error는 Failed나 Canceled일 때 돌아오고 나머지는 모두 선택"이라고 쓴다 [문서 23].
+- 작업 리소스 GET 규칙: 같은 테넌트·구독에서 호출됐는지 확인하고, 그 구독에 없는 작업 ID면 404를 돌려준다. 작업 ID는 상관 ID나 요청 ID와 달라야 한다 [문서 24].
+
+**`Location` URL을 GET했을 때**
+- 진행 중이면 202를 본문 없이 돌려주고, `Location` 헤더를 다시 붙이며 `Retry-After`는 선택이다 [문서 24]. Learn의 저장소 계정 예시도 "진행 중이면 202, 끝나면 200"이다 [문서 23].
+- 끝나면 "작업이 동기로 실행됐다면 돌려줬을 응답과 정확히 같은 응답"을 돌려준다 [문서 24].
+  - PATCH: 성공 응답(본문, 헤더, 상태 코드)을 그대로 돌려준다 [문서 24]. Learn의 저장소 계정 예시는 완료 시 200과 리소스 본문이다 [문서 23].
+  - DELETE: 200 또는 204, 그리고 리소스가 사라져 있어야 한다 [문서 24]. 예시 흐름은 202 → 202 → 204다 [문서 24].
+  - POST 액션: 액션의 성공 응답. 응답할 내용이 없으면 200/204 [문서 24].
+- 작업이 실패했을 때 `Location` URL이 무엇을 돌려주는지(상태 코드와 본문)는 RPC 사본과 Learn 문서 어디에도 명시돼 있지 않았다 [미확인] (찾아본 곳: 문서 23, 24). "동기로 실행됐다면 돌려줬을 응답"이라는 규칙을 실패에도 적용하면 해당 오류 상태 코드와 ErrorResponse 본문이 된다 [추론] (근거: 문서 24의 "exact same response" 문장).
+- URL 위치: 구독 범위(`/subscriptions/{sub}/providers/{ns}/locations/{loc}/operationResults/{id}`)를 권장한다. 리소스 아래에 두면 DELETE가 끝난 뒤 조회할 수 없게 되기 때문이다 [문서 24]. ANF도 구독·리전 범위 경로를 쓴다 [녹화] (아래 표).
+- 202 초기 응답은 본문이 없어야 하고, 202로 "생성"을 수락했다면 완료 전까지 리소스 GET은 404여야 한다. 리소스를 보이게 하려면 201 + `provisioningState` 패턴을 쓴다 [문서 24].
+
+**`Retry-After`**
+- 다음 폴링까지 기다릴 초다 [문서 23]. 정수 초만 허용하고 HTTP 날짜 형식은 지원하지 않는다 [문서 24].
+- `Location` 패턴에서 값은 최소 10초, 최대 10분이다. 헤더가 없으면 클라이언트는 기본 60초를 기다린다 [문서 24]. Learn 문서는 "Retry-After가 없으면 자체 재시도 로직을 구현하라"고만 쓴다 [문서 23]. 두 출처의 기본값 규정이 다르다.
+- 초기 응답: Learn 문서는 `Azure-AsyncOperation`과 `Location` 어느 쪽이든 `Retry-After`가 함께 올 수 있다고 쓴다 [문서 23]. 상태 조회 응답: `Location` 폴링의 202에는 "선택적으로 갱신된 Retry-After"를 붙인다 [문서 24]. `Azure-AsyncOperation` 폴링 응답에 붙는지는 RPC 사본에 규정이 없다 [미확인] (찾아본 곳: 문서 23, 24). Azure 데이터 플레인 가이드라인은 "작업이 끝나지 않았으면 상태 모니터 응답에 retry-after를 넣어라"라고 한다 [문서 25] (ARM이 아닌 `Operation-Location` 패턴의 규칙이다).
+
+**종결 상태와 `provisioningState`의 관계**
+- `provisioningState`와 작업 `status`의 종결 값은 같은 세 가지(`Succeeded`, `Failed`, `Canceled`)다. 그 밖의 값은 RP가 정하는 "진행 중" 값이다 [문서 23, 24]. `provisioningState`가 아예 없으면 `Succeeded`로 간주한다 [문서 23, 24].
+- PUT 흐름: 응답 본문의 `provisioningState`는 비종결 값이어야 하고, 진행 중에 리소스를 GET하면 200과 비종결 값이 나와야 하며, 끝나면 종결 값으로 바뀐다. 갱신이 실패하면 바뀐 속성은 이전 값으로 되돌리는 것이 좋다 [문서 24]. PATCH는 `Updating` 같은 값, DELETE는 `Deleting` 같은 값으로 바뀌어야 한다 [문서 24].
+- 클라이언트가 PUT 본문에 `provisioningState`를 넣으면 읽기 전용 속성으로 다룬다. 서버 값과 같으면 무시하고, 다르면 400으로 거절한다 [문서 24].
+- 작업이 종결됐을 때 작업 `status`와 리소스 `provisioningState`가 반드시 일치해야 한다는 명시적 규정은 찾지 못했다 [미확인] (찾아본 곳: 문서 23, 24). 두 값이 같은 상태 집합을 쓰고 클라이언트가 둘 중 하나로 완료를 판단하므로 일치시키는 것이 자연스럽다 [추론].
+
+**작업 상태 URL의 보존 기간**
+- ARM RPC 사본과 Learn 문서에는 보존 기간 규정이 없다 [미확인] (찾아본 곳: 문서 23, 24). 하루 넘게 걸리는 작업은 상태를 담은 별도 프록시 리소스를 두라는 권고만 있다 [문서 24].
+- Azure REST API 가이드라인(데이터 플레인)은 "작업이 끝난 뒤 공개된 기간(최소 24시간) 동안 상태 모니터를 보존하라"고 한다 [문서 25]. ARM RP에 그대로 적용되는 규칙은 아니다.
+
+#### ANF 작업 상태 조회의 실제 응답 (2026-11-07 보완)
+
+녹화 범위: .NET SDK 녹화 144개(태그 `net/netapp/Azure.ResourceManager.NetApp_1c0dc6690c`)와 Python SDK 녹화 32개(태그 `python/netapp/azure-mgmt-netapp_c350090f50`)를 모두 요약해 훑었다 [출처 21, 27]. 대부분 2026-10-28~31에 `2026-08-15-preview`로 녹화됐고, 실패 사례 두 건만 더 오래된 녹화다.
+
+**초기 응답의 헤더** [녹화]
+- Microsoft.NetApp의 PATCH 202, DELETE 202, POST 액션 202는 `Azure-AsyncOperation`과 `Location`을 둘 다 붙였다. 두 URL은 같은 `operationResults/{id}`를 가리키고, `Location` 쪽에만 `&operationResultResponseType=Location`이 붙는다 (예: 볼륨 DELETE — `.NET VolumeTests/CreateDeleteVolume.json`, 2026-10-30, `2026-08-15-preview`; 백업 정책 PATCH — `.NET ANFBackupPolicyTests/UpdateBackupPolicy.json`, 2026-10-29; 풀 PATCH — `Python test_pool...test_patch_pool.json`, 2026-10-28).
+- PUT 201은 `Azure-AsyncOperation`만 붙였다 (계정·풀 생성 — `Python test_pool...test_patch_pool.json`, 2026-10-28).
+- 두 URL 모두 `api-version` 뒤에 서명 파라미터 `t`, `c`, `s`, `h`가 붙은 절대 URL(`https://management.azure.com/...`)이었다 [녹화] (`.NET SnapshotTests/RevertVolumeToSnapshot.json`, 2026-10-30). 이것은 ARM이 붙이는 것으로 보이며 재현할 대상이 아니다 [추론].
+- POST revert의 202는 `Content-Length: 0`, 본문 없음이었다 [녹화] (같은 파일).
+- **`Retry-After`는 Microsoft.NetApp 응답 어디에도 없었다.** 초기 응답과 상태 조회 응답 모두, 두 SDK 녹화 176개 전체에서 0건이다 [녹화]. 대조로, 같은 녹화의 Microsoft.Network(VNet) PUT 201은 `Retry-After: 3`, 그 상태 조회는 200 + `status: InProgress` + `Retry-After: 10`이었다 [녹화] (`.NET ANFBackupPolicyTests/CreateVolumeWithBackupPolicy.json`, 2026-10-29).
+
+**(a) `Azure-AsyncOperation`으로 폴링** [녹화]
+- 진행 중에도 200이고, `status`에 **작업별 진행 값**이 들어 있었다. `InProgress`는 Microsoft.NetApp 응답에서 한 번도 나오지 않았다. 관찰한 진행 값: `Creating`, `Deleting`, `Patching`, `Updating`, `Reverting`, `RestoreFiles`, `SplitCloneFromParent`, `ChangePool`, `BreakFileLocks`, `BreakReplication`, `ResyncReplication`, `AuthorizeReplication`, `PeerExternalCluster` 등 (전체 녹화 집계).
+- 진행 중 `percentComplete`는 `0.0`, 성공 시 `100.0`이었다. 중간 값은 보지 못했다 [녹화] (예: 볼륨 DELETE는 `Deleting`/`0.0`을 9번 돌려준 뒤 `Succeeded`/`100.0` — `.NET VolumeTests/CreateDeleteVolume.json`, 2026-10-30).
+- 진행 중에도 `properties: {resourceName, action}`이 들어 있었다 [녹화]. RPC 사본의 "properties는 Succeeded일 때만" 권고 [문서 24]와 다르다.
+- 성공 본문 형식은 기존 브리프의 계정 녹화와 같다: `{id, name, status: "Succeeded", startTime, endTime, percentComplete: 100.0, properties: {resourceName, action}}`. `id`는 `/subscriptions/{sub}/providers/Microsoft.NetApp/locations/{loc}/operationResults/{opId}`, `name`은 `{opId}`다 [녹화] (`.NET VolumeTests/CreateExternalMigrationVolumeNoPeering.json`, 2024-10-25, `2024-07-01`).
+
+**(b) `Location`(`operationResultResponseType=Location`)으로 폴링** [녹화]
+- 두 SDK 모두 `Azure-AsyncOperation`이 있으면 그것으로 폴링했고, `Location`은 POST 액션이 성공한 뒤 최종 결과를 받을 때 한 번만 GET했다 (.NET 20건, Python 3건).
+- 그 최종 GET은 200과 **액션 대상 리소스의 본문**을 돌려줬다. 예: POST `revert`가 성공한 뒤 `Location` GET → 200, 볼륨 전체 본문(`provisioningState: Succeeded`) [녹화] (`.NET SnapshotTests/RevertVolumeToSnapshot.json`, 2026-10-30, `2026-08-15-preview`). POST `updateNetworkSiblingSet` 뒤에는 network sibling set 객체를 돌려줬다 [녹화] (`.NET NetAppResource_NetworkSiblingSetTests/UpdateNetworkSiblingSet.json`, 2026-10-29).
+- **DELETE·PATCH 202 뒤에 `Location`을 폴링한 녹화는 없었다.** 진행 중인 `Location`을 GET한 녹화도 없었다 [미확인] (찾아본 곳: .NET 144개, Python 32개 녹화 전체). 그래서 ANF의 `Location` URL이 진행 중에 202를 주는지, DELETE 완료 뒤 200/204 중 무엇을 주는지는 실제로 확인하지 못했다. 스펙은 DELETE·PATCH에 `final-state-via: location`을 선언한다 [스펙 3].
+- PATCH 202가 끝난 뒤 Python SDK는 `Location`이 아니라 리소스 URL을 GET해 최종 상태를 받았다 [녹화] (`Python test_pool...test_patch_pool.json`, 2026-10-28). .NET SDK도 PATCH 뒤 리소스를 다시 GET했다 [녹화] (`.NET ANFBackupPolicyTests/UpdateBackupPolicy.json`).
+
+**PATCH가 동기인지 비동기인지는 리소스마다 달랐다** [녹화]
+- 계정 PATCH(tags만)는 200 동기 완료였다 (`Python test_account...test_patch_account.json`, 2026-10-28; 기존 녹화 R2와 같다).
+- 풀·백업 정책 PATCH는 202 + 두 헤더 + 본문 `provisioningState: Patching`이었고, 상태 조회 `status`는 `Patching` → `Succeeded`였다 (`Python test_pool...test_patch_pool.json`; `.NET ANFBackupPolicyTests/UpdateBackupPolicy.json`).
+- .NET 녹화 전체의 PATCH 40건 중 200이 4건(계정), 202가 36건이었다.
+
+#### 같은 리소스에 진행 중 작업이 있을 때 새 변경 요청 (2026-11-07 보완)
+
+- ARM 일반 규칙: RPC 사본에서 "진행 중 작업이 있으면 409"라는 일반 규정은 찾지 못했다. 409는 리소스 이동(이동 진행 중, 리소스 그룹 잠김 등) 표에만 나온다 [문서 24 — `resource-api-reference.md` 사본]. 데이터 플레인 가이드라인의 409는 같은 `Operation-Id`를 다른 요청에 재사용했을 때다 [문서 25].
+- ANF 오류 문서에 있는 관련 메시지 [문서 12]:
+  - "Volume is being created and cannot be deleted at the moment." (생성 중인 볼륨 삭제)
+  - "Volume is being deleted and cannot be deleted at the moment." (삭제 중인 볼륨 재삭제)
+  - "Volume is being updated and cannot be deleted at the moment." (갱신 중인 볼륨 삭제)
+  - "Active Directory update already in progress" (AD 설정 편집 중 재편집)
+  - "Too many concurrent jobs" (구독에서 스냅샷 생성 3건이 진행 중일 때 4번째)
+  - "Cannot spawn additional jobs. Please wait for the ongoing jobs to finish and try again" (특정 상황의 볼륨 생성·삭제)
+- 위 메시지들의 HTTP 상태 코드와 `error.code` 값은 문서에 없다 [미확인] (찾아본 곳: 문서 12, .NET·Python 녹화 176개에서 "another operation", "in progress", "busy" 등 검색 — 0건).
+- 문서에 있는 것은 "삭제"와 겹치는 경우뿐이다. 같은 리소스에 PATCH가 진행 중일 때 다시 PATCH/PUT하면 어떻게 되는지는 찾지 못했다 [미확인].
+- 메시지 문구("cannot be deleted at the moment", "Wait until ... finished, and then retry")로 보면 ANF는 진행 중 작업과 충돌하는 요청을 대기열에 넣지 않고 즉시 거절한다 [추론] (근거: 문서 12의 "Solution: Wait until the volume creation is finished, and then retry the deletion").
+
+#### 실패한 작업의 모습 (2026-11-07 보완)
+
+- 작업 상태 본문 [녹화] (`.NET VolumeTests/CreateExternalMigrationVolumeNoPeering.json`, 2024-10-25, `2024-07-01`):
+  ```json
+  {"id": ".../providers/Microsoft.NetApp/locations/westus2/operationResults/{opId}", "name": "{opId}",
+   "status": "Failed", "startTime": "...", "endTime": "...", "percentComplete": 100.0,
+   "properties": {"resourceName": "/subscriptions/.../volumes/volumeName-356", "action": "POST"},
+   "error": {"code": "BadRequest", "message": "Cluster peer targeting 'hostname1' can not be found. ...",
+             "details": [{"code": "ExternalClusterPeerMissing", "message": "..."}]}}
+  ```
+  - HTTP는 200이었다. 실패해도 `percentComplete`는 `100.0`이고 `properties`가 들어 있었다.
+  - 최상위 `error.code`는 HTTP 이름 같은 일반 코드(`BadRequest`), 구체 코드는 `error.details[].code`(`ExternalClusterPeerMissing`)에 있었다.
+- 다른 실패 사례 [녹화]:
+  - `error.code: "InternalServerError"`, 메시지 "Something unexpected occurred when performing this action. Please try again, ... provide the CorrelationId '...'" (같은 파일, `PeerExternalCluster` 작업).
+  - `error.code: "Conflict"`, `message`가 JSON 배열 문자열(`[{"FilePath":"/dir1/file1","ResponseMessage":"The specified filePath ... does not exist in the snapshot ..."}]`) (`.NET SnapshotTests/RestoreFilesFromSnapshotFileDoesNotExist.json`, 2023-03-09, `2022-09-01`).
+- 녹화된 실패는 모두 볼륨의 POST 액션이었다. 실패 직후 그 볼륨을 GET한 기록이 없어 리소스 `provisioningState`가 `Failed`가 되는지는 녹화로 확인하지 못했다 [미확인]. PUT·PATCH·DELETE가 비동기로 실패한 녹화는 없었다 [미확인].
+- ANF 오류 문서는 풀이 "failed state"에 있을 수 있다고 쓰고("Check that the capacity pool is created successfully, and that it isn't in a failed state"), 볼륨에 대해서도 "the volume creation has failed"라는 상황을 다룬다 [문서 12]. 생성에 실패한 리소스가 남아 있을 수 있다는 단서다. 그 값이 정확히 `Failed`인지는 [미확인].
+- **`Deleting` 관찰 여부:** 작업 상태 `status: "Deleting"`은 DELETE 폴링에서 관찰됐다(녹화 전체 합계 2,035건. 예: 볼륨 DELETE — `.NET VolumeTests/CreateDeleteVolume.json`, 2026-10-30) [녹화]. 리소스 본문의 `provisioningState: "Deleting"`은 녹화에서 한 번도 보지 못했다(삭제 중에 리소스를 GET한 기록이 없다) [미확인]. 리소스 GET에서 관찰한 `provisioningState` 값은 `Creating`, `Updating`, `Patching`, `Succeeded`, `Accepted`(2024년 백업 녹화)뿐이다 [녹화].
+
+#### api-version 오류 (2026-11-07 보완)
+
+- ANF 오류 문서: "Invalid api-version." — "The API version is either not submitted or contains an invalid value." 형식은 `yyyy-mm-dd`라고 쓴다 [문서 12]. 누락과 잘못된 값을 같은 항목으로 다룬다. HTTP 코드와 `error.code`는 적혀 있지 않다 [미확인].
+- api-version을 빼면 ARM이 400 `MissingApiVersionParameter`, 메시지 "The api-version query parameter (?api-version=) is required for all requests."를 돌려준다는 사용자 보고가 여럿 있다 [미확인 — 포럼 단서만, 출처 28]. ANF 녹화에는 api-version 오류 사례가 없다 (찾아본 곳: 녹화 176개).
+- 지원하지 않는 api-version의 오류 코드(`InvalidApiVersionParameter`, `NoRegisteredProviderFound` 등)는 1차 출처에서 확인하지 못했다 [미확인] (찾아본 곳: 문서 26의 ARM 오류 코드 표 — `NoRegisteredProviderFound`는 "리소스 공급자 등록 상태를 확인하라"로만 설명된다; Learn `error-invalid-api-version` 페이지는 404; 웹 검색 1회). 이 거절은 요청이 ANF에 닿기 전에 ARM이 하는 것으로 보인다 [추론] (근거: ARM이 리소스 공급자의 등록된 api-version 목록으로 라우팅한다는 일반 구조 — 출처 없음).
 
 ### 제약과 한도
 - 구독 하나에 리전마다 NetApp 계정을 기본 100개까지 만들 수 있다. 지원 요청으로 늘릴 수 있다 [문서 11].
@@ -249,6 +364,14 @@
 - **PATCH 응답 방식:** PATCH를 동기 200으로 할지 비동기 202로 할지 정해야 한다. 실서비스는 두 경우를 모두 보여 줬다 [스펙 4][추론] (녹화 R2).
 - **PUT 갱신 응답:** 실서비스처럼 200, `Updating`, `Azure-AsyncOperation`을 돌려줄지 [추론] (녹화 R3), 스펙의 단순한 200을 따를지 정해야 한다.
 - **409 검사의 위치:** 중첩 리소스 검사를 "게이트웨이" 계층에 둘지 리소스 공급자 계층에 둘지 정해야 한다. 실서비스에서는 게이트웨이가 거절했다 [추론] (녹화 R4). 설계 설명(면접)과 연결되는 지점이다.
+- **(2026-11-07 보완) 공통 LRO 계층의 갈림길:**
+  - 작업 `status`의 진행 값: ANF처럼 작업별 값(`Creating`, `Deleting`, `Patching` …)을 쓸지 [녹화], ARM 예시처럼 `InProgress`/`Running`을 쓸지 [문서 23]. 둘 다 "종결 3값이 아니면 진행 중" 규칙에 맞는다 [문서 23, 24].
+  - `Location` URL의 진행 중·완료 응답: RPC 규칙(진행 중 202 무본문, DELETE 완료 200/204, PATCH 완료 = 동기 성공 응답) [문서 24]을 따를지. ANF의 실제 동작은 POST 완료 뒤 200 + 리소스 본문만 확인됐다 [녹화]. 진행 중·DELETE·PATCH는 [미확인]이다.
+  - `Retry-After`: ANF처럼 아예 보내지 않을지 [녹화], RPC 규칙의 범위(10초~10분) [문서 24]로 보낼지. 클론의 작업은 짧으므로 테스트 시간과도 연결된다.
+  - DELETE·PATCH 202에 `Azure-AsyncOperation`도 함께 줄지 [녹화], 스펙대로 `Location`만 줄지 [스펙 3].
+  - 진행 중 작업과 충돌하는 요청의 응답: 즉시 거절은 ANF 문서 문구와 맞지만 [추론], HTTP 코드·오류 코드는 [미확인]이라 클론이 정해야 한다.
+  - 작업 상태의 보존 기간: ARM 규정은 찾지 못했다 [미확인]. 데이터 플레인 가이드라인의 "최소 24시간" [문서 25]을 참고할지.
+  - 지원하지 않는/누락된 api-version의 응답 코드: 1차 출처가 없다 [미확인]. 클론이 정한 값이 실서비스와 다를 수 있음을 개념 문서에 적을지.
 
 ### 검증 기준 후보
 계정은 데이터 플레인 효과가 없으므로 [추론], 기준은 REST 클라이언트가 관찰할 수 있는 응답으로 쓴다.
@@ -262,6 +385,32 @@
 8. DELETE하면 202와 `Location`이 온다. 폴링이 끝난 뒤 GET은 404다. 같은 이름을 다시 DELETE하면 204가 온다.
 9. (용량 풀을 구현한 뒤) 풀이 있는 계정을 DELETE하면 409 `CannotDeleteResource`가 오고, 메시지에 풀의 리소스 ID가 들어 있으며, 풀 GET은 여전히 200이다. 풀을 지운 뒤 계정을 DELETE하면 202가 온다.
 10. 계정을 만들기 전과 지운 뒤 백엔드의 NFS export 목록(예: 서버의 `exportfs -v` 또는 클라이언트의 `showmount -e`)이 바뀌지 않는다. 계정 자체가 데이터 플레인을 건드리지 않는다는 확인이다.
+
+## 미확인 목록
+
+(2026-11-07 작성. 처음 조사 때의 [미확인]은 본문에 그대로 있다. 여기에는 공통 LRO 계층 설계에 걸리는 것만 모았다.)
+
+| 항목 | 설계를 막는가 | 찾아본 곳 |
+| --- | --- | --- |
+| ANF `Location` URL을 진행 중에 GET하면 202인지 | 막지 않음 — RPC 규칙(202 무본문)으로 정할 수 있다 | .NET 144개·Python 32개 녹화(진행 중 Location 폴링 0건), 문서 23·24 |
+| ANF DELETE·PATCH 완료 뒤 `Location` GET의 상태 코드(DELETE 200/204, PATCH 200+본문) | 막지 않음 — RPC 규칙이 있다 | 위 녹화(DELETE·PATCH 뒤 Location 폴링 0건) |
+| 작업이 실패했을 때 `Location` GET의 코드와 본문 | 선택 필요 — 1차 규정 없음 | 문서 23·24, 녹화 |
+| 진행 중 작업과 충돌하는 요청의 HTTP 코드·`error.code` (메시지만 있음) | 선택 필요 | 문서 12, 녹화 176개 문자열 검색, RPC 사본 `resource-api-reference.md` |
+| 같은 리소스에 PATCH 진행 중 PATCH/PUT | 선택 필요 | 문서 12, 녹화 |
+| 비동기 실패 뒤 리소스 `provisioningState`가 `Failed`가 되는지, PUT·PATCH·DELETE의 비동기 실패 사례 | 선택 필요 — RPC는 종결 값 `Failed`를 정의만 한다 | 녹화(실패는 POST 액션뿐, 직후 리소스 GET 없음), 문서 12 |
+| 리소스 본문의 `provisioningState: Deleting` | 막지 않음 — 작업 status `Deleting`은 확인됨 | 녹화 |
+| 작업 종결 시 `status`와 `provisioningState` 일치 규정 | 막지 않음 | 문서 23·24 |
+| `Azure-AsyncOperation` 상태 조회 응답에 `Retry-After`를 붙이는 규정 | 막지 않음 — ANF는 붙이지 않았다 | 문서 23·24 |
+| 작업 상태 URL 보존 기간 (ARM) | 선택 필요 | 문서 23·24, 데이터 플레인 가이드라인(문서 25)만 24시간 |
+| 지원하지 않는·누락된 api-version의 HTTP 코드와 오류 코드 | 선택 필요 | 문서 12·26, Learn `error-invalid-api-version`(404), 웹 검색(포럼 단서만) |
+| 현재 ARM RPC 계약 원문 | 참고 — 2022년 공개 사본으로 대체 | `cloud-and-ai-microsoft/resource-provider-contract`(SSO 필요), `Azure/azure-resource-manager-rpc`(404) |
+
+## 후속 조사 목록
+
+- 나중에 실서비스 구독으로 `Location` URL을 직접 폴링해 보면 위 `Location` 관련 미확인이 풀린다 (클론 범위 밖, 기록만).
+- 볼륨 기능 때: "Volume is being created/deleted/updated and cannot be deleted" 오류의 실제 코드 (볼륨 녹화·문서 재확인).
+- 스냅샷 기능 때: "Too many concurrent jobs"(구독당 동시 스냅샷 생성 3건 한도)를 재현할지.
+- `percentComplete` 중간 값을 쓰는 ANF 작업이 있는지 (녹화에서는 0.0과 100.0만 봤다).
 
 ## 출처
 
@@ -293,7 +442,16 @@
   - `vserver nfs modify`: https://docs.netapp.com/us-en/ontap-cli/vserver-nfs-modify.html (403)
   - `vserver cifs create`와 AD 가입: https://docs.netapp.com/us-en/ontap-cli/vserver-cifs-create.html , https://docs.netapp.com/us-en/ontap/smb-admin/join-svm-active-directory-domain-task.html
   - `vserver delete`: https://docs.netapp.com/us-en/ontap-cli-9131/vserver-delete.html
+- [23] Microsoft Learn — Track asynchronous Azure operations (ms.date 2026-02-27) — https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/async-operations . 받은 사본: `sources/arm-rpc/learn-async-operations.{html,txt}`
+- [24] ARM RPC v1.0 "Asynchronous API Reference"(`v1.0/async-api-reference.md`)와 `resource-api-reference.md` — 공개 포크 `najian/azure-resource-manager-rpc`(부모 `AzureExpert/azure-resource-manager-rpc`), 커밋 `c32a616596b9547d391abdd6a45b6a85e6b3936b`(2022-05-02) — https://raw.githubusercontent.com/najian/azure-resource-manager-rpc/c32a616596b9547d391abdd6a45b6a85e6b3936b/v1.0/async-api-reference.md . 공식 저장소 `cloud-and-ai-microsoft/resource-provider-contract`는 SSO가 필요해 읽지 못했다. 받은 사본: `sources/arm-rpc/async-api-reference.najian.md`, `najian.*.md`
+- [25] Microsoft REST API Guidelines — `azure/Guidelines.md`(Azure 데이터 플레인 가이드라인, `Operation-Location` LRO 패턴), 브랜치 `vNext` 커밋 `1c58ca7f1eb51768cb4e21facd6ce0154ee4db64` — https://github.com/microsoft/api-guidelines/blob/vNext/azure/Guidelines.md . ARM RP 규칙이 아니므로 참고로만 썼다.
+- [26] Microsoft Learn — Troubleshoot common Azure deployment errors (ARM 오류 코드 표) — https://learn.microsoft.com/en-us/azure/azure-resource-manager/troubleshooting/common-deployment-errors
+- [12] (재사용) ANF RP 오류 문서를 다시 받아 동시 작업·api-version 항목을 읽었다. 받은 사본: `sources/arm-rpc/anf-rp-errors.{html,txt}`
+- [21] (재사용) .NET 녹화 태그 `net/netapp/Azure.ResourceManager.NetApp_1c0dc6690c`의 SessionRecords 144개 전체를 받았다. 경로 `net/sdk/netapp/Azure.ResourceManager.NetApp/tests/SessionRecords/{TestClass}/{Test}.json`. 받은 사본: `sources/recordings/net/{TestClass}__{Test}.json`
+- [27] Azure SDK for Python `azure-mgmt-netapp` 녹화 — `assets.json`(azure-sdk-for-python `main`)의 태그 `python/netapp/azure-mgmt-netapp_c350090f50`, 경로 `python/sdk/netapp/azure-mgmt-netapp/tests/recordings/*.json`(32개, 2026-10-28 녹화, 주로 `2026-08-15-preview`) — https://github.com/Azure/azure-sdk-assets/tree/python/netapp/azure-mgmt-netapp_c350090f50 . 받은 사본: `sources/recordings/py/`
+- [28] (단서, 우선순위 4) `MissingApiVersionParameter` 사용자 보고 — https://archive.pulumi.com/t/2448673/hey-folks-i-m-curious-if-anyone-else-has-run-into-this-issue , https://www.servicenow.com/community/itom-forum/azure-capi-call-failing-with-missingapiversionnumber/m-p/2534759 , https://forums.powershell.org/t/get-azureresourcegroupgallerytemplate-error-missing-api-version-query-string/4959
 
 ## 변경 이력
 
 - 2026-11-07: 처음 작성했다.
+- 2026-11-07 (보완): 공통 LRO 계층(FR-01) 질문 5개를 보완했다. 맨 위에 "조사 상태"를 넣었다. "비동기 동작" 아래에 하위 절 5개(ARM LRO 공통 규칙, ANF 작업 상태 조회의 실제 응답, 진행 중 작업과 충돌하는 요청, 실패한 작업의 모습, api-version 오류)를 추가했다. "리더·사용자가 정해야 할 선택지"에 LRO 갈림길을 더했고, "미확인 목록"과 "후속 조사 목록" 절을 새로 만들었다. 출처 [23]~[28]을 추가했다. 기존 계정 API 계약·R1~R4·409 `CannotDeleteResource` 내용은 다시 조사하지 않았다.
