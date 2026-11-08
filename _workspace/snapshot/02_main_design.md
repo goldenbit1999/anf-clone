@@ -196,3 +196,16 @@ stateDiagram-v2
 | AC-13 | agent API | `POST .../snapshots`가 `202` + job, job `success`. 같은 `uuid`·`name`으로 다시 POST → `success`, LV 하나. 같은 `name`에 다른 `uuid` → `failure`, 메시지에 "already exists". `GET ?name=`이 레코드 하나, `GET .../{uuid}`가 `create_time` 포함 레코드, 없는 uuid는 `404`. 없는 uuid DELETE → `success`. 잘못된 `name`(`../x`, `a/b`, `.a`)·uuid → `400`. 없는 볼륨에 POST → job `failure`. |
 | AC-14 | 회귀 | 계정·풀·볼륨 e2e(`test_netapp_account_*_live.py`, `test_capacity_pool_*_live.py`, `test_volume_{contract,data,recovery}_live.py`)와 통합 테스트가 새 코드로 통과한다. 볼륨 인스턴스 코드가 바뀌었으므로 볼륨 e2e는 전체를 돈다. |
 | AC-15 | 데이터 (v4.1 인스턴스 재시작, 결정 1) | (a) v4.1 클라이언트가 마운트를 유지한 채 인스턴스를 `docker stop`·`docker start`(agent 경유 또는 직접): 인스턴스가 준비되고, 그 클라이언트가 다시 마운트 없이 읽고 쓴다(유예 종료 시간 기록). (b) 클라이언트 기록만 남기고(클라이언트 제거) 재시작: 인스턴스가 150초 안에 준비되고 새 클라이언트가 마운트해 쓴다(대기 시간 기록). (c) 인스턴스 안 lease·grace가 30·45다. |
+
+## 9. 구현 중 변경
+
+3단계(구현)에서 설계와 달라졌거나 설계가 정하지 않은 것을 정한 기록이다.
+
+1. **export 줄은 `nfs_instance.py`가 만든다.** §7 표는 줄 계산을 `flexvol.py`에 두었다. NFS export 옵션(`VOLUME_OPTIONS`, `SNAPSHOT_OPTIONS`)은 인스턴스 쪽 지식이라 `NfsInstances.write_exports(볼륨 uuid, token, [(스냅샷 이름, uuid)])`가 줄을 만들고 파일을 쓴다. `flexvol.py`는 어떤 스냅샷이 있는지(LVM 태그)만 넘긴다. 줄은 이름순이다.
+2. **export 파일은 늘 다시 쓰고, 인스턴스가 돌면 늘 `exportfs -ra`를 한다.** 내용이 같아도 건너뛰지 않는다. 파일 쓰기는 됐는데 `exportfs -ra`가 실패한 job을 다시 보내면, 내용이 같다고 건너뛸 경우 스냅샷이 export되지 않은 채 job이 성공한다. 그래서 같은 볼륨 POST를 다시 보내도 "바뀌는 것 없음"이 아니라 "export 파일만 다시 적용"이다.
+3. **`.snapshot`의 immutable은 `lsattr -d`로 확인한다.** "있으면 둔다"만으로는 `mkdir`은 됐고 `chattr +i`가 실패한 볼륨이 영영 +i가 되지 않는다. 그래서 있어도 `lsattr`로 `i` 플래그를 보고 없으면 `chattr +i`를 한다. 마운트 지점을 넣고 빼는 `chattr -i` → 변경 → `chattr +i`는 변경이 실패해도 `finally`로 다시 잠근다.
+4. **오프라인 볼륨에는 스냅샷을 만들지 않는다.** 볼륨이 호스트에 마운트돼 있지 않으면 `.snapshot`이 빈 마운트 지점 디렉터리 아래에 생기므로 job을 실패시킨다("volume ... is offline"). anf-api는 `Succeeded` 볼륨에만 스냅샷 생성을 받으므로 정상 흐름에서는 생기지 않는다.
+5. **인스턴스 시작과 준비 대기를 나눴다** (`NfsInstances.start`, `wait_ready`; `ensure`는 둘을 차례로 부른다). 결정 14의 "모두 띄운 뒤 기다린다"를 위해서다.
+6. **lease 30 s / grace 45 s에서 잰 준비 시간** (통합 테스트 `test_nfs41_instance_restarts_with_client_records`, WSL, 2026-11-08). §3 "아직 확정하지 않은 것"의 첫 항목을 닫는다.
+   - 살아 있는 v4.1 클라이언트 1개가 마운트를 유지한 채 `docker stop -t 30` → `docker start`: **20.1 s** 뒤 준비. 클라이언트는 다시 마운트 없이 이어서 썼다. 20 s는 Linux NFS 클라이언트의 lease 갱신 주기(lease의 2/3 = 20 s)와 맞는다: 클라이언트가 다음 갱신 때 서버 재시작을 알아채고 상태를 되찾자 유예 기간이 바로 끝났다 [추론].
+   - 서버가 멈춘 동안 클라이언트 컨테이너를 지워 기록만 남긴 경우: **47.4 s** 뒤 준비(grace 45 s + 판정 간격). 그 뒤 새 클라이언트가 마운트해 썼다. 기본값(90/90)이던 S4 G3의 100 s에서 줄었고, agent 준비 대기 150 s 안이다.

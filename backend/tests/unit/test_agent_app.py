@@ -1,4 +1,5 @@
-"""storage agent HTTP 앱: ONTAP REST 부분집합의 경로, 입력 검사, job, 시작 검사 (볼륨 설계 §6.1·§6.2, AC-13).
+"""storage agent HTTP 앱: ONTAP REST 부분집합의 경로, 입력 검사, job, 시작 검사 (볼륨 설계 §6.1·§6.2, AC-13,
+스냅샷 설계 §6.1, AC-13).
 
 볼륨 관리자는 가짜다. 실제 볼륨 동작은 test_flexvol.py(명령 순서)와 통합 테스트가 확인한다.
 """
@@ -20,6 +21,9 @@ U1 = "11111111-2222-3333-4444-555555555555"
 NAME1 = "vol_11111111222233334444555555555555"
 RECORD1 = {"uuid": U1, "name": NAME1, "size": GIB, "nas": {"path": "/vol1", "protocols": ["nfs3"]},
            "state": "online", "data_lif": {"ip": {"address": "172.30.0.129"}}}
+S1 = "5a000000-0000-4000-8000-000000000001"
+SNAP1 = {"uuid": S1, "name": "daily.1", "create_time": "2026-11-08T23:07:12Z", "volume": {"uuid": U1}}
+SNAPSHOTS = f"/api/storage/volumes/{U1}/snapshots"
 
 
 class FakeInstances:
@@ -61,6 +65,23 @@ class FakeManager:
 
     def record(self, uuid):
         return self.volumes.get(uuid)
+
+    def create_snapshot(self, *args):
+        self.gate.wait(5)
+        self.calls.append(("create_snapshot", *args))
+        if self.error:
+            raise self.error
+
+    def delete_snapshot(self, *args):
+        self.calls.append(("delete_snapshot", *args))
+
+    def snapshot_records(self, volume_uuid, name=None):
+        if volume_uuid not in self.volumes:
+            return None
+        return [s for s in [SNAP1] if name is None or s["name"] == name]
+
+    def snapshot_record(self, volume_uuid, uuid):
+        return SNAP1 if (volume_uuid, uuid) == (U1, S1) else None
 
 
 @pytest.fixture
@@ -222,6 +243,97 @@ def test_get_volume(client):
 
 def test_unknown_job_is_404(client):
     assert client.get("/api/cluster/jobs/99999999-2222-3333-4444-555555555555").status_code == 404
+
+
+# --- 스냅샷 (스냅샷 설계 §6.1) ---
+
+
+def test_post_snapshot_returns_a_job_that_succeeds(manager, client):
+    r = client.post(SNAPSHOTS, json={"name": "daily.1", "uuid": S1})
+    assert r.status_code == 202
+    job = wait_job(client, r.json()["job"]["_links"]["self"]["href"])
+    assert job["state"] == "success"
+    assert ("create_snapshot", U1, S1, "daily.1") in manager.calls
+
+
+def test_failed_snapshot_is_a_failed_job(manager, client):
+    manager.error = VolumeError("A snapshot with the specified name already exists.")
+    r = client.post(SNAPSHOTS, json={"name": "daily.1", "uuid": S1})
+    job = wait_job(client, r.json()["job"]["_links"]["self"]["href"])
+    assert job["state"] == "failure"
+    assert "already exists" in job["message"]
+
+
+def test_repeated_snapshot_post_while_running_returns_the_same_job(manager, client):
+    # 키는 작업 종류 + 스냅샷 uuid다. 같은 볼륨의 다른 스냅샷이나 볼륨 작업과 섞이지 않는다 (결정 15)
+    manager.gate.clear()
+    first = client.post(SNAPSHOTS, json={"name": "daily.1", "uuid": S1}).json()["job"]["uuid"]
+    second = client.post(SNAPSHOTS, json={"name": "daily.1", "uuid": S1}).json()["job"]["uuid"]
+    other = client.post(SNAPSHOTS, json={"name": "daily.2", "uuid": S1.replace("1", "2")}).json()["job"]["uuid"]
+    deleting = client.delete(f"{SNAPSHOTS}/{S1}").json()["job"]["uuid"]
+    manager.gate.set()
+    assert first == second
+    assert len({first, other, deleting}) == 3
+    wait_job(client, f"/api/cluster/jobs/{deleting}")
+
+
+@pytest.mark.parametrize("name", ["a", "daily.2026-11-08_0010", "A-b_c.d", "1st", "a" * 255])
+def test_snapshot_names_that_are_accepted(manager, client, name):
+    assert client.post(SNAPSHOTS, json={"name": name, "uuid": S1}).status_code == 202
+
+
+@pytest.mark.parametrize("bad", [
+    {"name": "../x"},
+    {"name": "a/b"},
+    {"name": ".a"},
+    {"name": "-a"},
+    {"name": "a b"},
+    {"name": "a;b"},
+    {"name": ""},
+    {"name": "a" * 256},
+    {"name": 1},
+    {"uuid": "not-a-uuid"},
+    {"uuid": S1.upper()},
+    {"extra": 1},
+])
+def test_invalid_snapshot_post_is_rejected_without_a_job(manager, client, bad):
+    r = client.post(SNAPSHOTS, json={"name": "daily.1", "uuid": S1, **bad})
+    assert r.status_code == 400
+    assert r.json()["error"]["message"]
+    assert not any(isinstance(c, tuple) for c in manager.calls)
+
+
+def test_snapshot_post_needs_both_fields(manager, client):
+    assert client.post(SNAPSHOTS, json={"name": "daily.1"}).status_code == 400
+    assert client.post(SNAPSHOTS, content=b"[]", headers={"content-type": "application/json"}).status_code == 400
+
+
+def test_snapshot_routes_check_the_volume_uuid(manager, client):
+    assert client.post("/api/storage/volumes/x/snapshots", json={"name": "a", "uuid": S1}).status_code == 400
+    assert client.delete(f"/api/storage/volumes/x/snapshots/{S1}").status_code == 400
+    assert client.delete(f"{SNAPSHOTS}/x").status_code == 400
+    assert not any(isinstance(c, tuple) for c in manager.calls)
+
+
+def test_delete_snapshot_returns_a_job(manager, client):
+    r = client.delete(f"{SNAPSHOTS}/{S1}")
+    assert r.status_code == 202
+    assert wait_job(client, r.json()["job"]["_links"]["self"]["href"])["state"] == "success"
+    assert ("delete_snapshot", U1, S1) in manager.calls
+
+
+def test_list_snapshots(client):
+    assert client.get(SNAPSHOTS).json() == {"records": [SNAP1], "num_records": 1}
+    assert client.get(SNAPSHOTS, params={"name": "daily.1"}).json()["num_records"] == 1
+    assert client.get(SNAPSHOTS, params={"name": "x"}).json() == {"records": [], "num_records": 0}
+    r = client.get("/api/storage/volumes/99999999-2222-3333-4444-555555555555/snapshots")
+    assert r.status_code == 404
+    assert r.json()["error"]["message"]
+
+
+def test_get_snapshot(client):
+    assert client.get(f"{SNAPSHOTS}/{S1}").json() == SNAP1
+    assert client.get(f"{SNAPSHOTS}/5a000000-0000-4000-8000-000000000009").status_code == 404
 
 
 # --- 상관 ID ---

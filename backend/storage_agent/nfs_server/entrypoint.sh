@@ -1,9 +1,10 @@
 #!/bin/sh
-# 볼륨 NFS 서버 인스턴스의 진입점 (볼륨 설계 결정 7, 16, 17).
+# 볼륨 NFS 서버 인스턴스의 진입점 (볼륨 설계 결정 7, 16, 17, 스냅샷 설계 결정 1, 7).
 # agent가 docker run의 환경 변수로 넘긴다:
-#   ANF_TOKEN  creationToken. export 경로 /<token> (rootdir 아래 /export/<token>)
-#   ANF_FSID   fileSystemId. export의 fsid
+#   ANF_TOKEN  creationToken. 볼륨 경로 /<token> (rootdir 아래 /export/<token>)
 #   ANF_PROTO  nfs3 | nfs4.1. 이 버전만 켠다
+# export 표는 agent가 쓰는 /etc/exports.d/volume.exports다(호스트 <root>/exports/<uuid>/를 읽기 전용 바인드).
+# 볼륨 줄과 스냅샷 줄이 있다. agent는 스냅샷을 넣고 뺄 때 이 파일을 바꾸고 `exportfs -ra`를 부른다
 set -eu
 
 log() { echo "anf-nfs: $*"; }
@@ -14,6 +15,7 @@ READY=/run/anf-ready
 rm -f "$READY"
 
 [ "$(nfsconf --get exports rootdir)" = /export ] || { log "rootdir is not /export" >&2; exit 1; }
+[ -f /etc/exports.d/volume.exports ] || { log "/etc/exports.d/volume.exports is missing" >&2; exit 1; }
 case "$ANF_PROTO" in
   nfs3) versions="-V 3 -N 4" ;;
   nfs4.1) versions="-N 3 -N 4.0 -V 4.1 -N 4.2" ;;
@@ -21,27 +23,56 @@ case "$ANF_PROTO" in
 esac
 
 mount -t nfsd nfsd /proc/fs/nfsd
+# ONTAP 기본값: NFSv4 lease 30초, grace 45초 (knfsd 기본값은 90초·90초). knfsd가 돌기 전에만 바꿀 수 있다.
+# 재시작 뒤 클라이언트가 상태를 되찾는 유예 기간이 짧아진다 (스냅샷 결정 1)
+echo 30 > /proc/fs/nfsd/nfsv4leasetime
+echo 45 > /proc/fs/nfsd/nfsv4gracetime
 mkdir -p /var/lib/nfs/rpc_pipefs /var/lib/nfs/nfsdcld
 mount -t rpc_pipefs rpc_pipefs /var/lib/nfs/rpc_pipefs
 # 컨테이너(init 밖 netns)의 knfsd는 NFSv4 클라이언트 추적에 nfsdcld만 쓸 수 있다. 없으면 추적이 꺼지고
-# 90초 유예 기간이 돌아 그동안 v4.1 OPEN이 막힌다. 있으면 되찾을 클라이언트가 없을 때 유예를 건너뛴다.
-# 기록은 컨테이너 안에만 있다: 인스턴스를 다시 만들면 이전 NFSv4 상태는 되찾을 수 없다.
+# 유예 기간이 돌아 그동안 v4.1 OPEN이 막힌다. 있으면 되찾을 클라이언트가 없을 때 유예를 건너뛴다.
+# 기록은 컨테이너 안에 있다: docker stop·start 사이에는 남고, 인스턴스를 다시 만들면 사라진다.
 nfsdcld
 rpcbind -w
-# ANF 기본 export 규칙: 모든 클라이언트, 읽기·쓰기, root 허용. 클라이언트는 `*`로 쓴다.
-# `0.0.0.0/0`은 어떤 클라이언트와도 맞지 않았다 (mountd "unmatched host", 구현 중 확인).
-# mp: /export/<token>이 마운트 지점이 아니면(호스트 마운트 전) export하지 않는다
-exportfs -o "rw,sync,no_subtree_check,no_root_squash,secure,crossmnt,mp,fsid=$ANF_FSID" "*:/$ANF_TOKEN"
+# mp 옵션: /export/<token>이 마운트 지점이 아니면(호스트 마운트 전) export하지 않는다
+exportfs -ra
 rpc.mountd
-# knfsd가 시작할 때 커널은 nfsdcld가 추적 파이프를 열기를 잠깐(약 1초)만 기다린다. 그 안에 못 열면 추적 없이
-# 90초 유예 기간이 돌고, 그동안 NFSv4 OPEN과 잠금이 막힌다(1회차 검증: 인스턴스 시작의 7~8%).
-# 유예 기간이 끝났는지(v4_end_grace = Y) 확인하고, 아니면 knfsd를 내렸다가 다시 띄운다. NFSv3 인스턴스도 같다:
-# 유예 기간은 같은 netns의 NLM 잠금도 막는다
+
+# nfsdcld가 이번 유예 기간에 되찾게 할 NFSv4 클라이언트 수. nfsdcld는 시대(epoch)마다 기록 표
+# rec-<시대, 16자리 hex>를 두고, grace.recovery는 되찾을 시대다 (0이면 없음)
+DB=/var/lib/nfs/nfsdcld/main.sqlite
+reclaimable() {
+  rec=$(sqlite3 "$DB" "select recovery from grace" 2>/dev/null) || rec=0
+  if [ -z "$rec" ] || [ "$rec" = 0 ]; then echo 0; return; fi
+  sqlite3 "$DB" "select count(*) from \"rec-$(printf %016x "$rec")\"" 2>/dev/null || echo 0
+}
+
+# rpc.nfsd 뒤 유예 기간(v4_end_grace = N)에는 두 경우가 있다.
+# (1) 되찾을 클라이언트 기록이 있다: 재시작 전에 마운트한 NFSv4 클라이언트가 상태를 되찾는 정상 유예 기간이다.
+#     모두 되찾거나 grace 45초가 지나면 끝나므로 기다린다. 죽은 클라이언트 기록이 있으면 끝까지 기다린다.
+# (2) 기록이 없다: knfsd가 시작할 때 nfsdcld가 추적 파이프를 제때(약 1초) 열지 못해 추적 없이 시작했다.
+#     유예 기간 동안 NFSv4 OPEN과 잠금이 막히므로 knfsd를 내렸다가 다시 띄운다(볼륨 1회차 검증: 시작의 7~8%).
+# NFSv3 인스턴스도 같다: 유예 기간은 같은 netns의 NLM 잠금도 막는다
 attempt=1
 while :; do
   # shellcheck disable=SC2086
   rpc.nfsd $versions 4
   [ "$(cat /proc/fs/nfsd/v4_end_grace)" = Y ] && break
+  clients=$(reclaimable)
+  if [ "$clients" -gt 0 ]; then
+    log "grace period: waiting for $clients NFSv4 client(s) to reclaim state"
+    waited=0
+    while [ "$(cat /proc/fs/nfsd/v4_end_grace)" != Y ]; do
+      if [ "$waited" -ge 200 ]; then  # 0.5초 × 200 = 100초. grace 45초보다 넉넉하다
+        log "grace period did not end after 100 s; giving up" >&2
+        exit 1
+      fi
+      sleep 0.5
+      waited=$((waited + 1))
+    done
+    log "grace period ended after $((waited / 2)) s"
+    break
+  fi
   if [ "$attempt" -ge 5 ]; then
     log "NFSv4 client tracking did not start after $attempt attempts; giving up" >&2
     exit 1
@@ -52,9 +83,11 @@ while :; do
   attempt=$((attempt + 1))
 done
 touch "$READY"
-log "serving /$ANF_TOKEN ($ANF_PROTO): versions=$(cat /proc/fs/nfsd/versions) attempts=$attempt"
+log "serving /$ANF_TOKEN ($ANF_PROTO): versions=$(cat /proc/fs/nfsd/versions) attempts=$attempt" \
+  "lease=$(cat /proc/fs/nfsd/nfsv4leasetime) grace=$(cat /proc/fs/nfsd/nfsv4gracetime)"
 
-# docker stop(SIGTERM): NFS 잠금·NFSv4 상태를 풀고 knfsd를 내린다 (결정 10 삭제 1단계)
+# docker stop(SIGTERM): NFS 잠금·NFSv4 상태를 풀고 knfsd를 내린다 (결정 10 삭제 1단계).
+# exportfs -ua는 커널 export만 지운다. 파일은 남아 다음 시작 때 그대로 적용된다
 stop() {
   rm -f "$READY"
   echo "/export/$ANF_TOKEN" > /proc/fs/nfsd/unlock_filesystem || true

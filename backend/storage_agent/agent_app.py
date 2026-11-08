@@ -1,4 +1,4 @@
-"""storage agent FastAPI 앱: ONTAP REST API의 부분집합 (ADR D-06, 볼륨 설계 §6).
+"""storage agent FastAPI 앱: ONTAP REST API의 부분집합 (ADR D-06, 볼륨 설계 §6, 스냅샷 설계 §6.1).
 
 실행 (WSL, root):
     sudo ~/.venvs/anf-clone/bin/python -m uvicorn --factory storage_agent.agent_app:create_app \\
@@ -28,6 +28,8 @@ PROTOCOLS = ("nfs3", "nfs4.1")  # 볼륨 인스턴스가 켤 수 있는 버전 (
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _PATH = re.compile(r"/[a-zA-Z][a-zA-Z0-9_-]{0,79}")  # "/" + creationToken 규칙 (anf_api.volumes)
 _PERMISSIONS = re.compile(r"[0-7]{1,4}")  # ONTAP처럼 8진수 숫자를 그대로 쓴 정수 (770 = 0770)
+# 스냅샷 이름 규칙 (anf_api.arm_rules). 이름이 .snapshot 아래 디렉터리와 export 경로가 된다 (스냅샷 결정 10)
+_SNAPSHOT_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}")
 
 
 class BadRequest(Exception):
@@ -65,6 +67,23 @@ def parse_volume(body) -> tuple[str, str, int, int, str]:
     return uuid, path, size, perms, protocols[0]
 
 
+def parse_snapshot(body) -> tuple[str, str]:
+    """스냅샷 POST 본문 → (uuid, name). uuid는 anf-api가 정한 멱등 키다 (클론 확장, 스냅샷 결정 9)."""
+    if not isinstance(body, dict) or set(body) != {"uuid", "name"}:
+        raise BadRequest("body must have exactly the fields uuid, name")
+    name = body["name"]
+    if not isinstance(name, str) or not _SNAPSHOT_NAME.fullmatch(name):
+        raise BadRequest("name must start with a letter or digit, then up to 254 letters, digits, -, _ or .")
+    return _check_uuid(body["uuid"]), name
+
+
+async def _json(request: Request):
+    try:
+        return json.loads(await request.body())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise BadRequest("body is not valid JSON") from None
+
+
 def _not_found(message: str) -> JSONResponse:
     return JSONResponse({"error": {"message": message}}, status_code=404)
 
@@ -90,22 +109,19 @@ def create_app(manager=None, jobs: JobTable | None = None) -> FastAPI:
     async def bad_request(request: Request, exc: BadRequest):
         return JSONResponse({"error": {"message": str(exc)}}, status_code=400)
 
-    def accepted(action: str, uuid: str, work, request: Request) -> JSONResponse:
-        # 키는 작업 종류 + 볼륨 UUID: 같은 요청을 다시 보내면 진행 중인 그 job을 받는다 (결정 9)
-        job = jobs.submit(f"{action} {uuid}", work, f"{action} /api/storage/volumes/{uuid}")
-        log.info("%s volume %s: job %s (x-ms-correlation-request-id %s)", action, uuid, job["uuid"],
+    def accepted(key: str, description: str, work, request: Request) -> JSONResponse:
+        # 키는 작업 종류 + 대상 UUID: 같은 요청을 다시 보내면 진행 중인 그 job을 받는다 (볼륨 결정 9, 스냅샷 결정 15)
+        job = jobs.submit(key, work, description)
+        log.info("%s: job %s (x-ms-correlation-request-id %s)", description, job["uuid"],
                  request.headers.get("x-ms-correlation-request-id"))
         href = f"/api/cluster/jobs/{job['uuid']}"
         return JSONResponse({"job": {"uuid": job["uuid"], "_links": {"self": {"href": href}}}}, status_code=202)
 
     @app.post("/api/storage/volumes")
     async def post_volume(request: Request):
-        try:
-            body = json.loads(await request.body())
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            raise BadRequest("body is not valid JSON") from None
-        uuid, path, size, perms, protocol = parse_volume(body)
-        return accepted("POST", uuid, lambda: manager.create(uuid, path, size, perms, protocol), request)
+        uuid, path, size, perms, protocol = parse_volume(await _json(request))
+        return accepted(f"POST {uuid}", f"POST /api/storage/volumes/{uuid}",
+                        lambda: manager.create(uuid, path, size, perms, protocol), request)
 
     # 볼륨 관리자를 부르는 경로는 def로 둔다: 커널 명령을 기다리는 동안 이벤트 루프를 막지 않게 스레드에서 돈다
     @app.get("/api/storage/volumes")
@@ -121,7 +137,33 @@ def create_app(manager=None, jobs: JobTable | None = None) -> FastAPI:
     @app.delete("/api/storage/volumes/{uuid}")
     def delete_volume(uuid: str, request: Request):
         _check_uuid(uuid)
-        return accepted("DELETE", uuid, lambda: manager.delete(uuid), request)
+        return accepted(f"DELETE {uuid}", f"DELETE /api/storage/volumes/{uuid}", lambda: manager.delete(uuid), request)
+
+    @app.post("/api/storage/volumes/{volume}/snapshots")
+    async def post_snapshot(volume: str, request: Request):
+        _check_uuid(volume)
+        uuid, name = parse_snapshot(await _json(request))
+        return accepted(f"snapshot-create {uuid}", f"POST /api/storage/volumes/{volume}/snapshots/{uuid}",
+                        lambda: manager.create_snapshot(volume, uuid, name), request)
+
+    @app.get("/api/storage/volumes/{volume}/snapshots")
+    def list_snapshots(volume: str, name: str | None = None):
+        records = manager.snapshot_records(_check_uuid(volume), name=name)
+        if records is None:
+            return _not_found(f"volume {volume} not found")
+        return {"records": records, "num_records": len(records)}
+
+    @app.get("/api/storage/volumes/{volume}/snapshots/{uuid}")
+    def get_snapshot(volume: str, uuid: str):
+        record = manager.snapshot_record(_check_uuid(volume), _check_uuid(uuid))
+        return record if record is not None else _not_found(f"snapshot {uuid} not found")
+
+    @app.delete("/api/storage/volumes/{volume}/snapshots/{uuid}")
+    def delete_snapshot(volume: str, uuid: str, request: Request):
+        _check_uuid(volume)
+        _check_uuid(uuid)
+        return accepted(f"snapshot-delete {uuid}", f"DELETE /api/storage/volumes/{volume}/snapshots/{uuid}",
+                        lambda: manager.delete_snapshot(volume, uuid), request)
 
     @app.get("/api/cluster/jobs/{uuid}")
     def get_job(uuid: str):
