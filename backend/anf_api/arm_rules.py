@@ -10,11 +10,14 @@ API_VERSION = "2026-08-01"
 PROVIDER = "Microsoft.NetApp"
 ACCOUNT_TYPE = f"{PROVIDER}/netAppAccounts"
 POOL_TYPE = f"{ACCOUNT_TYPE}/capacityPools"
+VOLUME_TYPE = f"{POOL_TYPE}/volumes"
 
 # 계정 이름: 영숫자로 시작, 영숫자·`-`·`_`, 1~128자 [스펙 3]
 _ACCOUNT_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9\-_]{0,127}")
 # 풀 이름: 계정과 같은 문자, 1~64자 [풀 브리프, 스펙]
 _POOL_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9\-_]{0,63}")
+# 볼륨 이름: 영문자로 시작, 1~64자 [볼륨 브리프, 스펙 2]
+_VOLUME_NAME = re.compile(r"[a-zA-Z][a-zA-Z0-9\-_]{0,63}")
 # 리소스 그룹 이름: 1~90자, 문자·숫자·`-`·`_`·`.`·`(`·`)` [스펙 8, common-types]
 _RESOURCE_GROUP_NAME = re.compile(r"[-\w._()]{1,90}")
 
@@ -68,6 +71,16 @@ def check_pool_name(name: str) -> None:
         )
 
 
+def check_volume_name(name: str) -> None:
+    if not _VOLUME_NAME.fullmatch(name):
+        raise ArmError(
+            400,
+            "InvalidResourceName",
+            f"The volume name '{name}' is invalid. It must start with a letter, contain only "
+            "alphanumerics, '-' or '_', and be 1 to 64 characters long.",
+        )
+
+
 def check_resource_group_name(name: str) -> None:
     if not _RESOURCE_GROUP_NAME.fullmatch(name):
         raise ArmError(
@@ -87,6 +100,10 @@ def account_id(subscription_id: str, resource_group: str, name: str) -> str:
 
 def pool_id(subscription_id: str, resource_group: str, account: str, name: str) -> str:
     return f"{account_id(subscription_id, resource_group, account)}/capacityPools/{name}"
+
+
+def volume_id(subscription_id: str, resource_group: str, account: str, pool: str, name: str) -> str:
+    return f"{pool_id(subscription_id, resource_group, account, pool)}/volumes/{name}"
 
 
 def invalid_content(message: str) -> ArmError:

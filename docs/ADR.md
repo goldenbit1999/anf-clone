@@ -4,7 +4,7 @@
 | --- | --- |
 | 버전 | 1.0 |
 | 작성일 | 2026-11-07 |
-| 상태 | 기획 확정 (2026-11-07). D-11·D-12는 스파이크 S1·S2에서 정한다. 결정별 상태는 [§11](#11-결정-기록)에 있다 |
+| 상태 | 기획 확정 (2026-11-07). D-11은 스파이크 S1로, D-12는 스파이크 S2로 확정했다 (2026-11-07). 결정별 상태는 [§11](#11-결정-기록)에 있다 |
 | 관련 문서 | [PRD](PRD.md), [CLAUDE.md](../CLAUDE.md), `_workspace/netapp-account/01_researcher_brief.md` |
 
 이 문서는 [PRD](PRD.md)의 요구사항을 **어떻게** 만족시킬지 정한다. 결정에는 상태를 붙인다.
@@ -36,7 +36,7 @@ flowchart LR
     end
     subgraph SP["스토리지 계층 (root)"]
       AG["storage agent<br/>ONTAP REST 부분집합"]
-      K["Linux 커널<br/>btrfs 또는 dm-thin · knfsd · tc/cgroup"]
+      K["Linux 커널<br/>dm-thin + ext4 · knfsd · tc/cgroup"]
     end
     UI["dashboard<br/>React + TypeScript"]
     PR["Prometheus"]
@@ -73,7 +73,7 @@ flowchart LR
 | 관리 API | ARM과 `Microsoft.NetApp` 리소스 공급자 | anf-api가 같은 경로, 속성, 응답 코드를 제공한다 | ARM 스펙 (계정 브리프) |
 | 비동기 처리 | ARM LRO [S2] | SQLite 작업 테이블과 작업 워커 | 외부 계약은 공개. 내부 구현은 클론 고유 |
 | 서비스 → 스토리지 | 비공개 | 워커가 ONTAP REST 모양의 API를 호출한다 | [추론] |
-| 스토리지 OS | ONTAP(WAFL), 베어메탈 [S1] | Linux 커널 기능: btrfs 또는 dm-thin, knfsd, tc 또는 cgroup | 클론 고유 |
+| 스토리지 OS | ONTAP(WAFL), 베어메탈 [S1] | Linux 커널 기능: dm-thin 씬 풀 + 볼륨마다 ext4 (D-11), 볼륨마다 netns 안의 knfsd 인스턴스, 처리량 제한은 tc (D-12) | 클론 고유 |
 | 네트워크 | VNet, 위임 서브넷, 마운트 대상 IP | Docker 사용자 정의 네트워크와 그 네트워크 쪽 호스트 IP | 클론 고유 |
 | 클라이언트 | 고객 VM | 권한 있는 Docker 컨테이너 | — |
 
@@ -85,15 +85,16 @@ ONTAP REST 경로와 필드 이름은 기능마다 조사 단계에서 ONTAP RES
 | --- | --- | --- | --- | --- |
 | NetApp 계정 | 직접 대응 없음. 가장 가까운 것은 SVM이지만 1:1이 아닐 가능성이 크다 | 없음. **계정은 컨트롤 플레인 전용이다** (계정 설계에서 확정, `_workspace/netapp-account/02_main_design.md` 결정 1) | 없음 | [추론]. 계정 브리프의 결론 (1:1 대응 자료 없음, 테넌시는 구독·리전·VNet 기준일 가능성) |
 | 용량 풀 | 직접 대응하는 공개된 객체 없음 [미확인]. 문서상 "용량·처리량 예산이자 과금 단위"이고, 볼륨 처리량 한도는 QoS policy group(Auto는 adaptive QoS)과 닮았다 [추론] | 없음. **풀은 컨트롤 플레인 전용이다** (풀 설계에서 확정, `_workspace/capacity-pool/02_main_design.md` 결정 2) | 없음. S1이 후보 C(dm-thin)를 고르면 볼륨 사이클에서 다시 본다 | 풀 브리프 "ONTAP 대응 개념" |
-| 볼륨 | FlexVol | `/api/storage/volumes` | [§7.2](#72-볼륨스냅샷-저장-방식-보류-d-11)의 후보 A·B·C와 knfsd export | [추론] |
-| 스냅샷 | Snapshot copy (WAFL) | `/api/storage/volumes/{uuid}/snapshots` | btrfs 스냅샷 또는 thin 스냅샷 | 스냅샷 조사에서 확인 |
-| 스냅샷으로 되돌리기 | SnapRestore (볼륨 단위) | 볼륨 PATCH로 복원할 스냅샷 지정 | 서브볼륨이나 LV 교체 | [추론] |
-| 새 볼륨으로 복원, 클론 | FlexClone | 볼륨 POST에 클론 원본 지정 | 쓰기 가능한 스냅샷 | [추론] |
-| 처리량 제한 | QoS policy group (최대 처리량) | `/api/storage/qos/policies` | [§7.3](#73-처리량-제한-방식-보류-d-12)의 후보 T1·T2·T3 | [추론] |
+| 볼륨 | FlexVol. 볼륨이 담기는 물리 공간은 aggregate | `POST`·`GET`·`DELETE /api/storage/volumes`, job은 `/api/cluster/jobs/{uuid}`. 요청의 `uuid`(멱등 키)는 클론 확장이다 (**볼륨 설계에서 확정**, `_workspace/volume/02_main_design.md` §6) | 씬 풀 하나(`anf/aggr0`, aggregate 역할) 위에 볼륨마다 thin LV + ext4(`nodelalloc`). `/var/lib/anf-clone/ns/<creationToken>`에 마운트하고 그 볼륨의 knfsd 인스턴스로 export ([§7.2](#72-볼륨스냅샷-저장-방식-확정-d-11), [§7.4](#74-nfs)) | ONTAP 대응은 [추론] (볼륨 브리프) |
+| 스냅샷 | Snapshot copy (WAFL) | `/api/storage/volumes/{uuid}/snapshots` | thin 스냅샷 LV를 `.snapshot/<이름>`에 읽기 전용으로 마운트하고 자기 `fsid`로 export (S1에서 v3·v4.1 불변 확인) | 스냅샷 조사에서 확인 |
+| 스냅샷으로 되돌리기 | SnapRestore (볼륨 단위) | 볼륨 PATCH로 복원할 스냅샷 지정 | thin 스냅샷 merge(`lvconvert --merge`). 마운트가 열려 있으면 미뤄진다 (S1) | [추론] |
+| 새 볼륨으로 복원, 클론 | FlexClone | 볼륨 POST에 클론 원본 지정 | 스냅샷의 쓰기 가능한 thin 스냅샷 (S1에서 0.13초) | [추론] |
+| 처리량 제한 | QoS policy group (최대 처리량) | `/api/storage/qos/policies` | 볼륨 인스턴스 veth의 tc HTB 클래스 하나 (읽기·쓰기 합산, [§7.3](#73-처리량-제한-방식-확정-d-12)) | [추론] |
 | export policy | export policy와 규칙 | `/api/protocols/nfs/export-policies` | `exportfs`의 클라이언트 규칙 | [추론] |
-| 마운트 대상 IP | data LIF | `/api/network/ip/interfaces` | Docker 네트워크 쪽 호스트 IP | [추론] |
+| 마운트 대상 IP | data LIF | 볼륨 레코드의 클론 확장 필드 `data_lif.ip.address` (볼륨 설계 결정 12·18). `/api/network/ip/interfaces`는 필요해지면 만든다 | 볼륨 인스턴스의 `anf-vnet` 고정 IP(172.30.0.128/25에서 agent가 고름). ANF와 달리 볼륨마다 IP가 하나씩이다 | [추론] |
+| 파일 경로 `creationToken` | SVM 네임스페이스의 junction path. 진입점은 SVM 루트 볼륨 | 볼륨 POST의 `nas.path` | nfs-utils `[exports] rootdir=/var/lib/anf-clone/ns`. export 경로 `/<creationToken>` (볼륨 설계 결정 2) | [추론] (볼륨 브리프) |
 | 스냅샷 정책 | snapshot policy | `/api/storage/snapshot-policies` | 작업 워커의 스케줄러 | [추론] |
-| 지역 간 복제 | SnapMirror [S3] | `/api/snapmirror/relationships` | btrfs send/receive | SnapMirror 사용은 공개. 구현 대응은 [추론] |
+| 지역 간 복제 | SnapMirror [S3] | `/api/snapmirror/relationships` | 미정. D-11로 btrfs send/receive는 후보에서 빠졌다. thin 스냅샷 차이 전송 등을 FR-19에서 정한다 | SnapMirror 사용은 공개. 구현 대응은 [추론] |
 
 ## 3. 아키텍처 요구사항
 
@@ -127,12 +128,16 @@ storage agent가 ARM 개념을 모르게 하는 이유: 실제 ONTAP도 ARM을 �
 
 ## 5. 배치와 권한
 
-- **실행 위치.** 백엔드 프로세스는 모두 WSL2 Ubuntu에서 돈다. knfsd와 btrfs가 커널 기능이기 때문이다. 브라우저는 Windows에서 연다.
+- **실행 위치.** 백엔드 프로세스는 모두 WSL2 Ubuntu에서 돈다. knfsd와 dm-thin이 커널 기능이기 때문이다. 브라우저는 Windows에서 연다.
 - **저장소 위치.** 저장소는 Windows 파일시스템(`C:\Users\mkimh\Projects\ANF-clone`)에 있고, WSL에서는 `/mnt/c/...`로 접근한다 (R-06). WSL 가상환경은 저장소 밖 `~/.venvs/anf-clone`에 둔다 (D-14).
-- **스토리지 루트 (제안).** storage agent가 쓰는 데이터(루프 파일, btrfs, thin 풀)는 WSL ext4 안의 고정 경로 `/var/lib/anf-clone` 아래에 둔다. 저장소처럼 `/mnt/c`(9P) 아래에 두면 느리고, 루프 장치 같은 커널 기능이 제대로 동작하는지 보장되지 않는다 [확인 필요]. agent는 이 루트 아래의 경로만 받고 그 밖의 경로는 거절한다. 경로는 S0·S1에서 확정한다.
-- **바인딩.** 서비스는 localhost에만 바인딩한다. 예외는 NFS다. 컨테이너가 마운트하려면 NFS 서버가 Docker 네트워크 쪽 인터페이스에서도 요청을 받아야 한다.
+- **스토리지 루트 (확정, 볼륨 설계).** storage agent가 쓰는 데이터는 WSL ext4 안의 고정 경로 `/var/lib/anf-clone` 아래에 둔다. 저장소처럼 `/mnt/c`(9P) 아래에 두면 느리다. S0에서 이 경로의 루프 장치와 파일시스템 생성을 확인했다.
+  - `aggr0.img`: 씬 풀(aggregate)을 받치는 희소 파일. 쓴 만큼만 디스크를 쓴다.
+  - `ns/`: NFS 네임스페이스 루트. 볼륨은 `ns/<creationToken>`에 마운트한다. agent가 `ns`를 shared 마운트로 만들고, 볼륨 인스턴스가 이것을 `/export`로 바인드해 `[exports] rootdir=/export`로 쓴다 (§7.4).
+  - agent는 이 루트 아래의 경로만 쓴다. 볼륨 경로는 `creationToken` 패턴으로 다시 검사한다.
+  - 호스트 knfsd에는 export를 두지 않는다. export는 볼륨 인스턴스 안에만 있다 (§7.4, D-12).
+- **바인딩.** 서비스는 localhost에만 바인딩한다. 예외는 NFS다. 볼륨 인스턴스가 `anf-vnet`의 자기 IP에서 요청을 받는다.
 - **root 작업.** root로 도는 것은 storage agent뿐이다. 커널 명령은 셸을 거치지 않고 인자 목록으로 실행한다. 리소스 이름은 anf-api가 ARM 이름 규칙으로 먼저 검증한다(예: 계정 이름 `^[a-zA-Z0-9][a-zA-Z0-9\-_]{0,127}$`, 계정 브리프). agent도 스토리지 루트 아래의 경로만 받는다.
-- **네트워크.** 클라이언트 컨테이너는 사용자 정의 Docker 네트워크(예: `anf-vnet`)에 붙는다. 그 네트워크 쪽 호스트 IP가 볼륨의 마운트 대상 IP가 된다. Docker Engine은 S0 결과에 따라 Ubuntu 안에 둔다 (D-10). 그래야 브리지가 Ubuntu 네트워크에 있고 서버가 컨테이너마다 다른 IP를 본다.
+- **네트워크.** 클라이언트 컨테이너와 볼륨 인스턴스는 사용자 정의 Docker 네트워크 `anf-vnet`(172.30.0.0/24)에 붙는다. 클라이언트는 `--ip-range 172.30.0.0/25`에서 동적으로 IP를 받고, 볼륨 인스턴스는 agent가 172.30.0.128/25에서 고른 고정 IP를 받는다. 그 IP가 볼륨의 마운트 대상 IP다 (볼륨 설계 결정 18). Docker Engine은 S0 결과에 따라 Ubuntu 안에 둔다 (D-10). 그래야 브리지가 Ubuntu 네트워크에 있고 서버가 컨테이너마다 다른 IP를 본다.
 - **메모리.** 컨트롤 플레인과 agent, Prometheus, 클라이언트 컨테이너 몇 개면 WSL 7GB 안에 충분히 들어갈 것으로 본다 [추론]. 실제 사용량은 FR-13 때 재고, Kubernetes를 띄우는 FR-14 때 다시 잰다.
 
 ## 6. 컨트롤 플레인
@@ -153,7 +158,7 @@ storage agent가 ARM 개념을 모르게 하는 이유: 실제 ONTAP도 ARM을 �
   - `Retry-After`는 보내지 않는다(ANF 녹화에 없다).
   - 진행 중 충돌은 `409 AnotherOperationInProgress`다.
   - 세부와 근거는 `_workspace/netapp-account/02_main_design.md` §4에 있다.
-- **작업별 응답 표.** 각 기능의 `02_main_design.md`에 최종 응답 표를 쓴다. 계정(`_workspace/netapp-account/02_main_design.md` §4.1)과 용량 풀(`_workspace/capacity-pool/02_main_design.md` §4.1)이 확정됐다. 스펙과 실서비스 녹화가 다르면 녹화를 따르고 차이를 기록한다 (풀 설계 결정 1). 아래는 계정 설계의 출발점이었다. 이후 기능은 해당하는 행만 정한다.
+- **작업별 응답 표.** 각 기능의 `02_main_design.md`에 최종 응답 표를 쓴다. 계정(`_workspace/netapp-account/02_main_design.md` §4.1), 용량 풀(`_workspace/capacity-pool/02_main_design.md` §4.1), 볼륨(`_workspace/volume/02_main_design.md` §4.1)이 확정됐다. 볼륨은 진행 중 충돌에 녹화 V6의 `409 RequestConflict`를 쓴다 (계정·풀은 `AnotherOperationInProgress`). 스펙과 실서비스 녹화가 다르면 녹화를 따르고 차이를 기록한다 (풀 설계 결정 1). 아래는 계정 설계의 출발점이었다. 이후 기능은 해당하는 행만 정한다.
 
   | 작업 | 설계에서 정할 항목 |
   | --- | --- |
@@ -166,7 +171,7 @@ storage agent가 ARM 개념을 모르게 하는 이유: 실제 ONTAP도 ARM을 �
   | 이후 POST 액션 | 스냅샷 되돌리기 등 각 액션의 초기 응답과 완료 조회 방식 |
 
 - **두 층을 섞지 않는다.** 외부 ARM 작업의 상태·헤더와 내부 storage job의 상태·헤더를 섞지 않는다. 실제 서비스와 다르게 선택한 동작은 설계와 개념 문서에 이유를 남긴다. preview api-version 녹화의 관찰을 stable 계약으로 옮길 때는 버전 차이를 명시한다 (계정 녹화 R1~R4는 `2026-08-15-preview`).
-- **클론에서 의미가 없는 필수 속성.** 실제 ANF 볼륨의 `subnetId`처럼 클론에서 의미가 없는 필수 속성을 어떻게 다룰지는 그 기능의 설계에서 정한다.
+- **클론에서 의미가 없는 필수 속성.** 실제 ANF 볼륨의 `subnetId`처럼 클론에서 의미가 없는 필수 속성을 어떻게 다룰지는 그 기능의 설계에서 정한다. 볼륨의 `subnetId`는 ARM 서브넷 ID 형식만 검사하고 생성 뒤 바꿀 수 없다 (볼륨 설계 결정 16).
 
 ### 6.2 요청 흐름: 볼륨 생성
 
@@ -196,7 +201,7 @@ sequenceDiagram
     A-->>C: status=Succeeded
 ```
 
-볼륨 PUT이 계정과 같은 응답 형식(201과 `Azure-AsyncOperation`)이라는 것은 가정이다. 볼륨 조사에서 확인한다.
+볼륨 PUT이 계정과 같은 응답 형식(201과 `Azure-AsyncOperation`)인 것은 볼륨 조사에서 확인했다 (스펙과 녹화 V1). 워커는 job ID를 저장하지 않고, 볼륨 UUID를 멱등 키로 POST를 다시 보낼 수 있다 (§6.4).
 
 ### 6.3 상태 모델
 
@@ -233,7 +238,7 @@ stateDiagram-v2
 - **한 리소스에는 작업 하나만.** 같은 리소스에 진행 중인 작업이 있으면 새 변경 요청을 `409 AnotherOperationInProgress`로 즉시 거절한다. 실제 ANF의 코드는 [미확인]이고, 이 코드는 ARM 공통 오류 목록에서 가져왔다. SQLite의 부분 유니크 인덱스(`operations.resource_id`, 진행 중인 행만)로 보장한다 (계정 설계 결정 6).
 - **자식이 있으면 삭제를 거절한다.** 자식 리소스가 남아 있으면 부모 삭제는 409다. 계정에서는 `CannotDeleteResource`가 확인됐다 (계정 브리프, 녹화 R4).
 
-**풀·볼륨 설계 전에 확정할 규칙.** 아래는 요구사항이다. 상태 저장소(D-07)와 storage agent(D-06)로 만족시킨다. 용량 예약, 예약 정리, 부모 삭제와 자식 생성의 경합은 풀 설계에서 확정했다 (`_workspace/capacity-pool/02_main_design.md` §6): 모든 검사와 쓰기를 `BEGIN IMMEDIATE` 트랜잭션 하나에서 하고, 볼륨 행 자체가 예약이며(상태 무관하게 합계에 넣는다), 위반은 동기 `400`이다. 작업 식별자와 단계별 복구는 볼륨 설계에서 정한다.
+**풀·볼륨 설계 전에 확정할 규칙.** 아래는 요구사항이다. 상태 저장소(D-07)와 storage agent(D-06)로 만족시킨다. 용량 예약, 예약 정리, 부모 삭제와 자식 생성의 경합은 풀 설계에서 확정했다 (`_workspace/capacity-pool/02_main_design.md` §6): 모든 검사와 쓰기를 `BEGIN IMMEDIATE` 트랜잭션 하나에서 하고, 볼륨 행 자체가 예약이며(상태 무관하게 합계에 넣는다), 위반은 동기 `400`이다. 작업 식별자와 단계별 복구는 볼륨 설계에서 확정했다 (`_workspace/volume/02_main_design.md` 결정 9, 10): 멱등 키는 볼륨 UUID(`fileSystemId`)이고 워커는 job ID를 저장하지 않는다. agent의 생성은 LV → 파일시스템 → 마운트 → 루트 권한 → export 단계마다 실제 상태를 보고 이미 된 것을 건너뛴다. 삭제는 export 제거 → knfsd 상태 해제(`unlock_filesystem`) → 언마운트 → LV 삭제 순서이고 없는 것은 건너뛴다. agent가 시작하면 남은 볼륨을 다시 마운트하고 export한다.
 
 - **용량 예약은 원자적으로.** 풀 잔여 용량 확인·예약과 볼륨 리소스·작업 생성을 하나의 원자적 처리로 묶는다. 생성 중인 볼륨의 예약도 할당량 합계에 넣는다. 잔여 용량이 두 요청을 모두 받을 수 없는 풀에 동시 생성이 와도 할당량을 넘지 않아야 한다.
 - **예약 정리.** 생성 실패·취소·삭제 완료 때 예약과 사용량을 어떻게 정리할지 정한다. 커널 자원 정리가 실패했을 때 용량을 언제 회수하는지도 정한다.
@@ -257,9 +262,17 @@ stateDiagram-v2
 - **다른 점은 표시한다.** 실제 ONTAP과 다르게 만든 필드는 agent API 문서에 표시한다 (R-04).
 - **선택: 충실도 테스트.** 나중에 실제 ONTAP에 접근할 수 있게 되면 같은 호출을 실제 ONTAP에 보내 응답을 비교하는 테스트를 추가할 수 있다. 목표가 아니라 선택이다.
 
-### 7.2 볼륨·스냅샷 저장 방식 (보류, D-11)
+### 7.2 볼륨·스냅샷 저장 방식 (확정, D-11)
 
-볼륨 기능을 설계하기 전에 스파이크 S1에서 세 후보로 같은 시나리오를 돌린다. 시나리오는 마운트, `df`, 할당량 초과 쓰기, 스냅샷, `.snapshot` 읽기, 되돌리기다. 그 결과를 비교해 정한다.
+**결정: C.** 스파이크 S1(`_workspace/spikes/S1.md`)에서 세 후보로 같은 시나리오(마운트, `df`, 할당량 초과 쓰기, 스냅샷, `.snapshot` 읽기, 되돌리기, 새 볼륨 복원)를 돌렸다.
+
+- **A는 실패.** NFSv3로 파일 소유자가 읽기 전용 btrfs 스냅샷의 파일에 덧붙여 썼고, 서버의 스냅샷 내용이 실제로 바뀌었다. 클라이언트 `df`는 풀 전체 크기를 보였다. 스냅샷 루트가 볼륨 루트와 같은 장치·inode 번호로 보였다 (R-02).
+- **B는 C보다 나은 점이 없다.** 스냅샷 구조가 A와 같고, 새 볼륨 복원에 send/receive 복사가 필요하다.
+- **C는 통과.** `df`가 볼륨 크기를 보이고, 넘는 쓰기는 ENOSPC다. 스냅샷은 v3·v4.1 모두 읽기 전용이고 다른 장치로 보인다. 새 볼륨 복원은 즉시다. 볼륨마다 블록 장치가 있다.
+- **C의 조건.** export마다 `fsid`를 명시한다(thin 스냅샷은 ext4 UUID가 같다). ext4는 `nodelalloc`으로 마운트한다(기본 delalloc이면 ENOSPC 뒤 남은 데이터가 원본의 앞부분이 아니었다). 언마운트 전에 knfsd 상태를 해제한다(`/proc/fs/nfsd/unlock_filesystem`).
+- **처음 제안과 다른 점.** 표의 "용량 풀마다 dm-thin 풀" 대신 씬 풀 하나를 aggregate처럼 둔다. 용량 풀은 컨트롤 플레인 예산으로 남는다 (볼륨 설계 결정 5).
+
+아래는 S1 전의 비교 기준이다.
 
 | 기준 | A. btrfs 하나 + 볼륨마다 서브볼륨, 할당량은 qgroup | B. 볼륨마다 btrfs 파일시스템 (희소 루프 파일) | C. 용량 풀마다 dm-thin 풀 + 볼륨마다 thin LV |
 | --- | --- | --- | --- |
@@ -274,28 +287,40 @@ stateDiagram-v2
 
 ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스냅샷 조사에서 확인하고, 그 결과를 이 표의 판단에 반영한다.
 
-### 7.3 처리량 제한 방식 (보류, D-12)
+### 7.3 처리량 제한 방식 (확정, D-12)
 
-처리량 기능을 설계하기 전에 스파이크 S2에서 정한다. 실제 ONTAP은 QoS policy group으로 스토리지 계층에서 처리량을 제한한다 [추론: 조사에서 확인]. 클론의 방식이 이와 다르면 그 차이를 개념 문서에 남긴다.
+S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 계약이다: 한도는 읽기와 쓰기를 합한 값이고, 바꾸면 I/O를 끊지 않고 바로 반영되며, 볼륨마다 따로다. 실제 ONTAP은 QoS policy group으로 스토리지 계층에서 처리량을 제한한다 [추론: 처리량 조사에서 확인]. 클론은 네트워크 경계에서 제한하므로 그 차이를 개념 문서에 남긴다.
 
-| 후보 | 방식 | 장점 | 위험 |
-| --- | --- | --- | --- |
-| T1. 네트워크 제한 (tc) | 볼륨마다 마운트 IP를 따로 주고, 그 IP의 송수신 대역폭을 제한한다 | knfsd와 상관없이 동작한다. 클라이언트가 보는 MiB/s에 직접 효과가 있다. tc 카운터가 볼륨별 처리량 메트릭도 된다 | 스토리지 계층이 아니라 네트워크에서 제한한다. IP를 공유하는 볼륨끼리는 구분할 수 없다 |
-| T2. 블록 I/O 제한 (cgroup v2 `io.max`) | 블록 장치 I/O를 제한한다 | 스토리지 계층의 제한에 더 가깝다 | knfsd는 커널 스레드라 볼륨별 cgroup에 넣기 어려울 가능성이 크다 [확인 필요]. 캐시에서 읽는 I/O는 블록 계층을 거치지 않는다 |
-| T3. 볼륨별 사용자 공간 NFS 서버 | 볼륨마다 NFS-Ganesha 프로세스를 띄우고 각자 cgroup에 넣는다 | `io.max`를 볼륨별로 걸 수 있다 | NFS 서버가 knfsd에서 Ganesha로 바뀐다. 메모리와 구성이 늘어난다 |
+| 후보 | 방식 | S2 결과 |
+| --- | --- | --- |
+| T1. 네트워크 제한 (tc) | 호스트 knfsd 하나, 볼륨마다 마운트 IP, 그 IP의 송수신을 HTB로 제한 | v3만 통과. v4.1 클라이언트는 같은 서버 신원(knfsd 하나)의 IP들을 연결 하나로 합쳐서 볼륨을 구분하지 못한다 (`notrunkdiscovery`로도 안 됨) |
+| T2. 블록 I/O 제한 (cgroup v2 `io.max`) | knfsd 스레드를 cgroup에 넣고 볼륨 장치마다 `io.max` | 실패. WSL 배포판은 자기 PID 네임스페이스에서 돌아 커널 스레드가 보이지 않는다. 걸어도 효과가 없었다 (10 MiB/s 설정에 241 MiB/s) |
+| T3. 볼륨별 사용자 공간 NFS 서버 | 볼륨마다 NFS-Ganesha + `io.max` | 진행하지 않음. `io.max`는 읽기·쓰기를 따로 세고(10+10=20 MiB/s) 캐시 적중 읽기를 제한하지 못한다(4310 MiB/s). 둘 다 ANF 계약과 어긋난다 |
+| **T1n (채택)** | **볼륨마다 knfsd 인스턴스(자기 netns, privileged 컨테이너)와 IP. 인스턴스의 호스트 쪽 veth에 clsact → 양방향을 IFB 하나로 → HTB 클래스 하나** | 통과. v3·v4.1 모두 설정값의 약 95%(10→9.5, 30→28.5 MiB/s, 헤더 바이트 포함), 읽기+쓰기 합산(4.85+4.69=9.53), `tc class change`로 실시간 변경, 같은 클라이언트의 다른 볼륨은 영향 없음 |
+
+- 볼륨 인스턴스와 볼륨별 IP는 볼륨 사이클(FR-04)에서 만든다 (§7.4). tc는 FR-08에서 더한다.
+- 검증 시계: 제한기와 fio가 같은 게스트 시계를 쓰므로 게스트 단조 시계(fio `clock_gettime`)로 판정하고 호스트 시계 값은 참고로 기록한다. WSL 게스트 시계는 호스트의 0.908배 속도다 (S2).
 
 ### 7.4 NFS
 
-- **서버.** knfsd(`nfs-kernel-server`)로 NFSv3와 NFSv4.1을 제공한다 (D-03).
-- **포트.** NFSv3는 rpcbind, mountd, lockd·statd 포트가 필요하다. 컨테이너 네트워크에서 이 포트들이 열려 있어야 한다. NFSv4.1은 2049번 하나만 쓴다.
-- **export 적용과 경로.** 볼륨은 `<마운트 IP>:/<creationToken>`으로 마운트한다. export를 어떻게 적용할지(`/etc/exports.d/` 파일과 `exportfs`)와 NFSv4 pseudo-root 구성은 볼륨 기능 설계에서 정한다.
+- **서버 (D-12와 함께 확정).** 볼륨마다 knfsd 인스턴스 하나가 그 볼륨만 NFSv3 또는 NFSv4.1로 제공한다 (D-03).
+  - 인스턴스는 자기 네트워크 네임스페이스(privileged 컨테이너 `anf-nfs-<uuid>`, 이미지 `anf-nfs-server`)에서 돈다. knfsd의 스레드·export 캐시·서버 신원은 netns마다 따로다.
+  - 호스트 knfsd(`nfs-server`)는 볼륨에 쓰지 않는다. 필요한 것은 nfsd 커널 모듈뿐이다.
+  - 세부는 볼륨 설계 결정 17·18이다.
+- **포트.** NFSv3는 rpcbind, mountd, lockd·statd 포트가 필요하다. 인스턴스가 자기 netns에서 rpcbind와 mountd를 띄운다. NFSv4.1은 2049번 하나만 쓴다.
+- **export 적용과 경로 (볼륨 설계에서 확정).** 볼륨은 `<볼륨 IP>:/<creationToken>`으로 마운트한다.
+  - 볼륨은 호스트 `ns/<creationToken>`에 마운트한다. 인스턴스는 `ns`를 `/export`로 바인드(rslave)하고, 이미지의 nfs-utils `[exports] rootdir=/export`로 export 경로 `/<creationToken>`을 만든다.
+  - WSL의 `/`는 private 마운트라서 agent가 `ns`를 자기 자신에 바인드하고 `--make-rshared`로 만든다.
+  - 인스턴스 안 `rootdir` 방식은 v3에서 확인했다. v4.1은 볼륨 구현 첫 단계에서 확인한다 (볼륨 설계 §3). 호스트 knfsd에서는 같은 `rootdir` 방식이 v3·v4.1 모두 됐다 (2026-11-07). 루트의 심볼릭 링크로는 v3만 됐다 (S1).
+  - 인스턴스가 시작할 때 `exportfs -o rw,sync,no_subtree_check,no_root_squash,secure,crossmnt,mp,fsid=<fileSystemId> '*:/<creationToken>'`으로 적용한다 (ANF 기본 export 규칙). `0.0.0.0/0`은 mountd가 거절해서 `*`를 쓴다. `mp`는 마운트되지 않은 디렉터리의 export를 막는다.
+  - 인스턴스가 `protocolTypes`의 버전만 켠다(`rpc.nfsd -V 3 -N 4` 또는 `-N 3 -N 4.0 -V 4.1 -N 4.2`). 그래서 다른 버전의 마운트는 `Protocol not supported`로 실패한다. 호스트 knfsd 하나로는 export마다 버전을 막지 못했다.
 
 ## 8. 관측성
 
 - **메트릭 (Prometheus 형식).**
   - anf-api: 요청 수와 지연 시간(경로 템플릿, 메서드, 상태 코드별), 작업 수와 소요 시간(종류, 결과별), 진행 중 작업 수
   - storage agent: 볼륨 사용량(파일시스템에서 읽은 실제 값), 스냅샷 수, 볼륨별 처리량과 IOPS, knfsd 전체 통계(`/proc/net/rpc/nfsd`)
-  - 볼륨별 처리량을 어디서 얻을지는 S2와 함께 정한다. T1이면 tc 카운터를 쓸 수 있다.
+  - 볼륨별 처리량은 볼륨 인스턴스 IFB의 tc 카운터(`tc -s class show`의 Sent bytes)에서 얻을 수 있다 (D-12). 헤더 바이트가 포함된다.
   - 메트릭 이름을 ANF의 Azure Monitor 메트릭과 어떻게 대응시킬지는 FR-12 조사에서 정한다.
 - **로그.** JSON 구조 로그를 쓴다. ARM 관례인 `x-ms-request-id`, `x-ms-correlation-request-id` 헤더를 받거나 새로 만든다. 그 값을 워커와 storage agent 호출까지 넘긴다.
 - **대시보드.** 리소스는 anf-api에서, 시계열은 Prometheus 쿼리 API에서 읽는다 (D-08).
@@ -312,7 +337,7 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 | E2E | 컨테이너가 마운트해 PRD 수락 기준의 데이터 효과를 확인한다 | WSL. S3를 통과하면 CI에서도 | 위 조건과 Docker |
 | E2E (컨트롤 플레인) | 실제 uvicorn 프로세스에 HTTP로 API 계약, 상태 전이, 재시작 복구를 확인한다 (계정·풀) | WSL, CI | `ANF_E2E_API_URL`. root·Docker 불필요 |
 
-- 층은 pytest 마커 `integration`, `e2e`로 나눈다. 마커는 루트 `pyproject.toml`에 등록돼 있다 (`--strict-markers`). 조건이 없으면 건너뛰되, 건너뛴 테스트를 통과로 보고하지 않는다. PRD §8의 UNVERIFIED 규칙과 같다. TDD 훅도 수집된 테스트가 모두 skip되면 GREEN이 아니라 SKIPPED로 보고한다.
+- 층은 pytest 마커 `integration`, `e2e`로 나눈다. 마커는 루트 `pyproject.toml`에 등록돼 있다 (`--strict-markers`). root agent·LVM·knfsd가 필요한 테스트에는 `dataplane` 마커를 더 붙이고, 데이터 플레인 CI 작업(S3 뒤)이 생기기 전까지 CI는 `-m "not dataplane"`으로 뺀다 (볼륨 설계 §6.3). 조건이 없으면 건너뛰되, 건너뛴 테스트를 통과로 보고하지 않는다. PRD §8의 UNVERIFIED 규칙과 같다. TDD 훅도 수집된 테스트가 모두 skip되면 GREEN이 아니라 SKIPPED로 보고한다.
 - real-env-verifier는 E2E 층과 같은 기준으로 검증한다. 검증 스크립트는 `backend/tests/e2e/`에 둔다 (TDD 훅의 면제 대상).
 - **결함 주입 (계정 설계에서 확정).** 실제 일이 없어 밀리초 안에 끝나는 작업에서도 진행 중 상태, 실패, 재시작 복구를 실환경에서 재현할 수 있게 한다. anf-api를 띄울 때 `ANF_FAULT_INJECTION`(JSON)으로 `{리소스 종류}/{create|update|patch|delete}`별 지연(`delaySeconds`)과 강제 실패(`fail`)를 켠다 (`patch`는 풀 설계에서 추가). 기본은 꺼짐이고, 켜면 시작할 때 경고 로그를 남긴다. 세부는 `_workspace/netapp-account/02_main_design.md` §6.3에 있다.
 
@@ -326,7 +351,7 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 
 | 작업 | 트리거 | 내용 |
 | --- | --- | --- |
-| backend | push, PR | 린트(ruff 0.14.0 기본 규칙), 단위·계약 테스트, 컨트롤 플레인 라이브 API e2e(테스트가 uvicorn을 직접 띄움, root 불필요), TDD 훅 테스트(`python -m pytest .claude/hooks/tests`). skip이 하나라도 있으면 실패한다. `ubuntu-24.04`, Python 3.12. 구현: `.github/workflows/ci.yml`, 설계: `_workspace/ci/02_main_design.md` |
+| backend | push, PR | 린트(ruff 0.14.0 기본 규칙), 단위·계약 테스트, 컨트롤 플레인 라이브 API e2e(테스트가 uvicorn을 직접 띄움, root 불필요), TDD 훅 테스트(`python -m pytest .claude/hooks/tests`). `dataplane` 마커 테스트는 선택에서 뺀다. skip이 하나라도 있으면 실패한다. `ubuntu-24.04`, Python 3.12. 구현: `.github/workflows/ci.yml`, 설계: `_workspace/ci/02_main_design.md` |
 | frontend | push, PR | 타입 검사, 빌드, 단위 테스트 |
 | data-plane | S3 통과 뒤 추가 | ubuntu 러너에서 모듈을 로드하고 storage agent를 띄운 뒤 통합·E2E 테스트 |
 
@@ -347,8 +372,8 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 
 | ID | 위험 | 영향 | 대응 |
 | --- | --- | --- | --- |
-| R-01 | knfsd는 커널 스레드라 볼륨별 cgroup에 넣기 어렵다. 그래서 `io.max`로는 볼륨별 제한이 안 될 수 있다 [확인 필요] | FR-08 | S2. 대안으로 T1, T3 |
-| R-02 | btrfs 중첩 서브볼륨을 NFS로 내보내면 inode 번호가 겹쳐 `.snapshot`이 이상하게 보일 수 있다 [확인 필요] | FR-05 | S1 |
+| R-01 | knfsd는 커널 스레드라 볼륨별 cgroup에 넣기 어렵다. 그래서 `io.max`로는 볼륨별 제한이 안 될 수 있다. **S2에서 현실화(WSL에서는 커널 스레드가 보이지 않음)** | FR-08 | 해소: D-12 = T1n (네트워크 제한) |
+| R-02 | btrfs 중첩 서브볼륨을 NFS로 내보내면 inode 번호가 겹쳐 `.snapshot`이 이상하게 보일 수 있다. S1에서 확인됐다(같은 dev, 같은 inode). NFSv3로 읽기 전용 스냅샷이 수정되는 문제도 나왔다 | FR-05 | 해소: D-11에서 C를 골라 btrfs 서브볼륨을 쓰지 않는다 |
 | R-03 | 되돌리기를 서브볼륨이나 LV 교체로 구현하면, 이미 마운트한 클라이언트가 stale file handle 오류를 볼 수 있다 | FR-06 | 설계에서 ONTAP SnapRestore의 동작과 대조하고, 클론의 동작을 문서화한다 |
 | R-04 | storage agent API가 실제 ONTAP REST와 어긋나면 면접에서 오해를 줄 수 있다 | G2 | 기능 조사에서 ONTAP 문서로 확인하고 다른 점을 표시한다. 선택적으로 실제 ONTAP으로 충실도 테스트를 한다 |
 | R-05 | WSL 메모리(약 7GB)가 모자랄 수 있다 | NFR-06 | 구성요소별 사용량을 잰다. Kubernetes는 FR-14 때만 띄운다 |
@@ -370,8 +395,8 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 | D-08 | 메트릭은 Prometheus. 대시보드가 Prometheus 쿼리 API로 차트를 그린다 | 확정 (2026-11-07) |
 | D-09 | 작업 워커는 anf-api 프로세스 안에서 돈다. 작업은 SQLite에 저장한다 | 확정 (2026-11-07) |
 | D-10 | Docker Engine은 Ubuntu 안에 둔다 (`docker.io`). Docker Desktop은 서버가 모든 컨테이너를 같은 Windows NAT IP로 봐서 클라이언트를 구분하지 못한다 | 확정 (2026-11-07, S0: `_workspace/spikes/S0.md`) |
-| D-11 | 볼륨·스냅샷 저장 방식 (A, B, C) | 보류 (S1) |
-| D-12 | 처리량 제한 방식 (T1, T2, T3) | 보류 (S2) |
+| D-11 | 볼륨·스냅샷 저장 방식: **C.** 씬 풀 하나(aggregate 역할) 위에 볼륨마다 thin LV + ext4(`nodelalloc`). 스냅샷은 thin 스냅샷. 근거와 버린 대안은 [§7.2](#72-볼륨스냅샷-저장-방식-확정-d-11) | 확정 (2026-11-07, S1: `_workspace/spikes/S1.md`) |
+| D-12 | 처리량 제한 방식 = T1n: 볼륨마다 knfsd 인스턴스(자기 netns)와 IP를 두고, 인스턴스 veth를 tc HTB로 제한한다(읽기·쓰기 합산). 인스턴스와 IP는 볼륨 사이클에서 만든다 | 확정 (2026-11-07, S2: `_workspace/spikes/S2.md`) |
 | D-13 | 인증 없음. anf-api는 `Authorization` 헤더를 검사하지 않고, 서비스는 localhost에만 바인딩한다 (§5). 실제 Azure에서는 토큰 검증과 RBAC를 ARM이 맡고 ANF 리소스 공급자는 그 뒤에서 요청을 받는다. 그래서 구독·RBAC 검사를 생략한 것과 같은 선에서 생략한다. 버린 대안: 고정 Bearer 토큰(모든 클라이언트가 헤더를 보내야 하는데 데이터 플레인 설명에 보탬이 없다), Entra ID 모양 JWT(비용이 가장 크다) | 확정 (2026-11-07) |
 | D-14 | Python 프로젝트 설정은 루트 `pyproject.toml` 하나에 둔다(의존성, pytest 설정). 코드는 `backend/` 아래에 둔다. 가상환경은 OS별로 Windows `.venv-win/`(저장소 안), WSL `~/.venvs/anf-clone`(저장소 밖, `ANF_CLONE_VENV`로 바꿀 수 있음) | 확정 (2026-11-07) |
 
@@ -438,7 +463,7 @@ anf-clone/
 
 ## 13. 미정 사항
 
-- 보류: D-11~D-12 (스파이크 S1~S2)
+- 보류: 없음 (D-12는 S2로 확정, 2026-11-07)
 
 ## 출처
 

@@ -4,8 +4,10 @@
     python -m uvicorn --factory anf_api.arm_app:create_app --app-dir backend --host 127.0.0.1 --port 8080
 
 환경 변수:
-    ANF_API_DB           상태 저장소 파일. 기본값 ~/.local/state/anf-clone/anf-api.db (설계 결정 10)
-    ANF_FAULT_INJECTION  결함 주입 JSON. 기본은 꺼짐 (설계 §6.3)
+    ANF_API_DB               상태 저장소 파일. 기본값 ~/.local/state/anf-clone/anf-api.db (설계 결정 10)
+    ANF_FAULT_INJECTION      결함 주입 JSON. 기본은 꺼짐 (설계 §6.3)
+    ANF_STORAGE_AGENT_URL    storage agent 주소. 기본값 http://127.0.0.1:8090 (볼륨 설계 §6.1)
+    ANF_MIN_VOLUME_SIZE_GIB  최소 볼륨 크기(GiB). 기본은 ANF의 50 GiB. 검증할 때만 낮춘다 (볼륨 설계 결정 3)
 """
 
 import asyncio
@@ -23,9 +25,19 @@ from fastapi.responses import JSONResponse, Response
 
 import anf_api.accounts as accounts
 import anf_api.capacity_pools as pools
-from anf_api.arm_rules import ACCOUNT_TYPE, API_VERSION, POOL_TYPE, ArmError, check_api_version, operation_path
+import anf_api.volumes as volumes
+from anf_api.arm_rules import (
+    ACCOUNT_TYPE,
+    API_VERSION,
+    POOL_TYPE,
+    VOLUME_TYPE,
+    ArmError,
+    check_api_version,
+    operation_path,
+)
 from anf_api.lro import LroWorker, operation_status_body, parse_faults
 from anf_api.state_store import Operation, StateStore
+from anf_api.storage_client import StorageClient
 
 log = logging.getLogger(__name__)
 
@@ -37,14 +49,27 @@ _ACCOUNT = _ACCOUNTS_IN_RG + "/{account_name}"
 _ACCOUNTS_IN_SUB = "/subscriptions/{subscription_id}" + _PROVIDER + "/netAppAccounts"
 _POOLS = _ACCOUNT + "/capacityPools"
 _POOL = _POOLS + "/{pool_name}"
+_VOLUMES = _POOL + "/volumes"
+_VOLUME = _VOLUMES + "/{volume_name}"
 _OPERATION = "/subscriptions/{subscription_id}" + _PROVIDER + "/locations/{location}/operationResults/{operation_id}"
 
 # Location 방식으로 끝난 작업이 돌려줄 리소스 본문 (리소스 종류별)
-_BODIES = {ACCOUNT_TYPE: accounts.account_body, POOL_TYPE: pools.pool_body}
+_BODIES = {ACCOUNT_TYPE: accounts.account_body, POOL_TYPE: pools.pool_body, VOLUME_TYPE: volumes.volume_body}
 
 
 def _default_db_path() -> Path:
     return Path(os.environ.get("ANF_API_DB") or Path.home() / ".local/state/anf-clone/anf-api.db")
+
+
+def _min_volume_size(text: str) -> int:
+    """`ANF_MIN_VOLUME_SIZE_GIB` 값을 바이트로. 비어 있으면 ANF 기본값. 잘못된 값은 ValueError로 시작을 막는다."""
+    if not text:
+        return volumes.DEFAULT_MIN_SIZE
+    if not text.isdigit() or int(text) < 1:
+        raise ValueError(f"ANF_MIN_VOLUME_SIZE_GIB must be a whole number of GiB >= 1, got '{text}'")
+    log.warning("ANF_MIN_VOLUME_SIZE_GIB=%s: volumes may be smaller than the ANF minimum of 50 GiB "
+                "(for verification only)", text)
+    return int(text) * volumes.GIB
 
 
 async def _json_body(request: Request):
@@ -66,12 +91,19 @@ def _tracking_headers(request: Request, op: Operation) -> dict:
     return {"Location": f"{url}&operationResultResponseType=Location", "Azure-AsyncOperation": url}
 
 
-def create_app(db_path: str | Path | None = None, fault_injection: str | None = None) -> FastAPI:
-    """앱 팩토리. 인자가 None이면 환경 변수를 읽는다. 결함 주입 값이 잘못되면 ValueError로 시작을 막는다."""
+def create_app(db_path: str | Path | None = None, fault_injection: str | None = None, storage=None,
+               min_volume_size_gib: str | None = None) -> FastAPI:
+    """앱 팩토리. 인자가 None이면 환경 변수를 읽는다. 결함 주입·최소 크기 값이 잘못되면 ValueError로 시작을 막는다.
+    storage는 agent 클라이언트다. 테스트는 가짜를 넣는다."""
     store = StateStore(db_path or _default_db_path())
     if fault_injection is None:
         fault_injection = os.environ.get("ANF_FAULT_INJECTION")
-    handlers = {**accounts.HANDLERS, **pools.HANDLERS}
+    if min_volume_size_gib is None:
+        min_volume_size_gib = os.environ.get("ANF_MIN_VOLUME_SIZE_GIB", "")
+    min_size = _min_volume_size(min_volume_size_gib)
+    if storage is None:
+        storage = StorageClient(os.environ.get("ANF_STORAGE_AGENT_URL") or "http://127.0.0.1:8090")
+    handlers = {**accounts.HANDLERS, **pools.HANDLERS, **volumes.make_handlers(store, storage)}
     faults = parse_faults(fault_injection, handlers)
     if faults:
         log.warning("Fault injection is enabled (ANF_FAULT_INJECTION): %s", faults)
@@ -203,6 +235,54 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         check_api_version(api_version)
         return {"value": [pools.pool_body(r) for r in
                           pools.list_pools(store, subscription_id, resource_group, account_name)]}
+
+    @app.put(_VOLUME)
+    async def put_volume(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                         volume_name: str, request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        body = await _json_body(request)
+        created, res, op = volumes.put_volume(store, subscription_id, resource_group, account_name, pool_name,
+                                              volume_name, body, request.state.correlation_id, min_size)
+        worker.notify()
+        # 풀과 같다: 생성 201, 갱신 200, 둘 다 Azure-AsyncOperation만 (녹화 V1, V2)
+        return JSONResponse(volumes.volume_body(res), status_code=201 if created else 200,
+                            headers={"Azure-AsyncOperation": _operation_url(request, op)})
+
+    @app.get(_VOLUME)
+    async def get_volume(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                         volume_name: str, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        return volumes.volume_body(volumes.get_volume(
+            store, subscription_id, resource_group, account_name, pool_name, volume_name))
+
+    @app.patch(_VOLUME)
+    async def patch_volume(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                           volume_name: str, request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        body = await _json_body(request)
+        res, op = volumes.patch_volume(store, subscription_id, resource_group, account_name, pool_name,
+                                       volume_name, body, request.state.correlation_id, min_size)
+        worker.notify()
+        # tags만 바꿔도 202 + Patching 본문 + 두 헤더 (녹화 V3)
+        return JSONResponse(volumes.volume_body(res), status_code=202, headers=_tracking_headers(request, op))
+
+    @app.delete(_VOLUME)
+    async def delete_volume(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                            volume_name: str, request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        op = volumes.delete_volume(store, subscription_id, resource_group, account_name, pool_name,
+                                   volume_name, request.state.correlation_id)
+        if op is None:
+            return Response(status_code=204)
+        worker.notify()
+        return Response(status_code=202, headers=_tracking_headers(request, op))
+
+    @app.get(_VOLUMES)
+    async def list_volumes(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                           api_version: ApiVersion = None):
+        check_api_version(api_version)
+        return {"value": [volumes.volume_body(r) for r in volumes.list_volumes(
+            store, subscription_id, resource_group, account_name, pool_name)]}
 
     @app.get(_OPERATION)
     async def operation_result(

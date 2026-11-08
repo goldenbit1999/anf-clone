@@ -36,7 +36,7 @@ _MAX_SIZE = 2048 * TIB  # 2,048 TiB, 지원 요청으로도 늘릴 수 없다 [�
 _VOLUME_TYPE = f"{POOL_TYPE}/volumes"
 
 # 서비스 수준별 처리량 단가 (MiB/s per TiB) [풀 브리프 문서 4]
-_MIBPS_PER_TIB = {"Standard": 16, "Premium": 64, "Ultra": 128}
+MIBPS_PER_TIB = {"Standard": 16, "Premium": 64, "Ultra": 128}
 # 실제 ANF에는 있지만 이 클론이 미룬 서비스 수준 (설계 §2)
 _UNSUPPORTED_LEVELS = {"Flexible", "StandardZRS"}
 _QOS_TYPES = {"Auto", "Manual"}
@@ -61,7 +61,7 @@ def _check_service_level(value) -> str:
     if value in _UNSUPPORTED_LEVELS:
         raise invalid_content(
             f"The value '{value}' of 'properties.serviceLevel' is not supported by this ANF clone.")
-    if value not in _MIBPS_PER_TIB:
+    if value not in MIBPS_PER_TIB:
         raise invalid_content(
             "The 'properties.serviceLevel' property must be one of 'Standard', 'Premium', 'Ultra'.")
     return value
@@ -136,7 +136,7 @@ def parse_patch_body(body) -> tuple[str | None, dict | None, dict]:
 
 def total_throughput_mibps(props: dict) -> float:
     """풀 총 처리량 = 풀 크기(2진 TiB) × 서비스 수준 단가 (설계 결정 10). 4 TiB Premium = 256.0."""
-    return props["size"] / TIB * _MIBPS_PER_TIB[props["serviceLevel"]]
+    return props["size"] / TIB * MIBPS_PER_TIB[props["serviceLevel"]]
 
 
 def pool_body(res: Resource) -> dict:
