@@ -2,5 +2,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
+.venv-win/
 venv/
+*.egg-info/
 .claude/settings.local.json
+.claude/tdd-guard-state/
+# 조사 원문은 커밋하지 않는다. 브리프의 출처에 URL과 커밋 SHA·태그를 적어 다시 받는다.
+_workspace/*/sources/
