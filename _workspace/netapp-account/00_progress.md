@@ -1,11 +1,11 @@
 # netapp-account 진행 기록
 
-- 상태: done
+- 상태: done (용량 풀 사이클의 공통 코드 변경 뒤 재검증·문서 수정을 마치고 복원, 2026-11-07)
 - FR: FR-01 (비동기 작업, 공통 LRO 계층), FR-02 (NetApp 계정)
 - 마지막 완료 단계: 6
-- 재개할 단계: 없음 (다음은 용량 풀 사이클. 이월된 기준: 자식 풀이 남은 계정 DELETE의 409)
-- 검증 대상 코드: 미커밋 (기준 커밋 `b96dbaf`). 제품 코드: `pyproject.toml`, `backend/anf_api/{__init__,accounts,arm_app,arm_rules,lro,state_store}.py`. 이 순서로 이어 붙인 sha256 = `bf4e61d3f5e6f9326985b7009519385eb5706913bfe85877a39bea2284bd01d0` (`cat pyproject.toml backend/anf_api/__init__.py backend/anf_api/accounts.py backend/anf_api/arm_app.py backend/anf_api/arm_rules.py backend/anf_api/lro.py backend/anf_api/state_store.py | sha256sum`). 새 파일이라 `git diff HEAD`에 잡히지 않아 파일 해시로 남긴다
-- verifier 에이전트 ID: adc067e6dfaf099df (1회차, 2026-11-07)
+- 재개할 단계: 없음
+- 검증 대상 코드: 미커밋 공통 코드 (기준 커밋 `e602d11`). 용량 풀 진행 기록과 같은 해시 `a461dbaf36e65c53e3b8a0bb2aee3379fa391f8b9fb5889c08b2247e8a038485` (명령은 `_workspace/capacity-pool/00_progress.md`). 이 코드로 계정 e2e 24개를 통과했다 (`_workspace/capacity-pool/04_verifier_report_r2.md`). AC-01~AC-13 판정은 `f58df82d…`로 한 2회차(`04_verifier_report_r2.md`). 그 전: 커밋 `e602d11` (PR #4) = 파일 해시 `bf4e61d3f5e6f9326985b7009519385eb5706913bfe85877a39bea2284bd01d0`로 1회차
+- verifier 에이전트 ID: adc067e6dfaf099df (1회차), a768b20fddf69bd04 (2회차, 용량 풀 verifier가 함께 맡음)
 - 미해결: 없음
 
 ## 선행 확인 (0단계)
@@ -19,21 +19,23 @@
 
 | 기준 ID | 기준 | 최신 결과 | 근거 보고서 | 검증 대상 코드 |
 | --- | --- | --- | --- | --- |
-| AC-01 | PUT 신규 → 201 Creating + Azure-AsyncOperation → Succeeded | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-02 | PUT 기존 → 200 Updating → Succeeded, tags 교체 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-03 | GET 본문, 404 ResourceNotFound, 대소문자 무시 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-04 | 리소스 그룹·구독 목록 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-05 | PATCH tags 동기 200 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-06 | 이름·api-version·본문·location 검증 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-07 | DELETE 202 → Location 204 → GET 404 → 재DELETE 204 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-08 | 지연 주입 중 진행 상태, Location 202 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-09 | 실패 주입 → Failed, PUT으로 회복, 삭제 실패 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-10 | 진행 중 충돌 409 AnotherOperationInProgress | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-11 | SIGKILL 뒤 재시작 복구 | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-12 | 데이터 플레인 불변 (exportfs 전후 동일) | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
-| AC-13 | x-ms-request-id, 상관 ID | PASS | `04_verifier_report.md` (1회차) | bf4e61d3… |
+| AC-01 | PUT 신규 → 201 Creating + Azure-AsyncOperation → Succeeded | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-02 | PUT 기존 → 200 Updating → Succeeded, tags 교체 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-03 | GET 본문, 404 ResourceNotFound, 대소문자 무시 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-04 | 리소스 그룹·구독 목록 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-05 | PATCH tags 동기 200 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-06 | 이름·api-version·본문·location 검증 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-07 | DELETE 202 → Location 204 → GET 404 → 재DELETE 204 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-08 | 지연 주입 중 진행 상태, Location 202 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-09 | 실패 주입 → Failed, PUT으로 회복, 삭제 실패 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-10 | 진행 중 충돌 409 AnotherOperationInProgress | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-11 | SIGKILL 뒤 재시작 복구 | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-12 | 데이터 플레인 불변 (exportfs 전후 동일) | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
+| AC-13 | x-ms-request-id, 상관 ID | PASS | `04_verifier_report_r2.md` (2회차) | f58df82d… |
 
 용량 풀 사이클로 옮긴 기준: 자식 풀이 남은 계정 DELETE의 `409 CannotDeleteResource` (설계 결정 8).
+
+2회차는 용량 풀 사이클의 공통 코드 변경 뒤 계정 e2e 스크립트로 다시 돌린 회귀다. 옮긴 기준은 풀 사이클의 AC-09에서 PASS했다 (`_workspace/capacity-pool/04_verifier_report.md`). 2회차 뒤 `capacity_pools.py`의 풀 전용 오류 메시지 두 줄이 바뀌어 해시가 `a461dbaf…`가 됐다. 계정 코드 경로는 이 메시지를 쓰지 않으며, 풀 2회차에서 계정 e2e를 새 코드로 다시 돌린다.
 
 ## 이력
 
@@ -49,3 +51,8 @@
 - 2026-11-07 단계 5 시작 — concept-explainer에 개념 문서를 맡겼다.
 - 2026-11-07 단계 5 완료 — `docs/concepts/netapp-account.md` (면접 Q&A 8개). 리더가 검토하면서 "실제 ANF와 다른 점" 표의 `Location` 행과 부록 한 줄을 고쳤다: ANF의 진행 중 `Location` 응답도 [미확인]인데 확인된 것처럼 읽혔다.
 - 2026-11-07 단계 6 완료 — PRD §8의 완료 정의를 모두 충족해 `done`으로 기록했다. 검증 대상 코드 해시는 검증 뒤에도 그대로다(`bf4e61d3…`). 제품 코드는 아직 커밋하지 않았다.
+- 2026-11-07 커밋·merge — 브랜치 커밋 `ca95839`을 PR #4로 main에 squash merge했다(`e602d11`, 트리 동일). 커밋 직전 제품 코드 해시가 검증 때와 같았다(`bf4e61d3…`). 테스트 141 passed, 24 skipped (Windows).
+- 2026-11-07 무효화 — 용량 풀 사이클(3단계)이 계정이 쓰는 공통 코드를 바꿨다: `accounts.py`(오류·본문 검사 함수를 `arm_rules.py`로, 자식 검사를 `Tx.ensure_no_children`으로 옮김. 동작 변화 없음), `lro.py`(PATCH 작업, 결함 키를 처리기에서 만듦), `state_store.py`, `arm_app.py`(풀 라우트, 종류별 본문). 계정 단위·계약 테스트는 모두 통과하지만, 검증 대상 코드 해시가 `bf4e61d3…`에서 `f58df82d…`로 바뀌어 AC-01~AC-13의 실환경 결과는 다시 확인하기 전까지 유효하지 않다. 개념 문서의 코드 인용(`accounts.py` 줄 번호, 자식 검사 위치 `accounts.py:192-200`)도 낡았다.
+- 2026-11-07 단계 4 2회차 완료 — 용량 풀 verifier(a768b20fddf69bd04)가 계정 e2e 회귀를 새 공통 코드(`f58df82d…`)로 돌렸다: PASS 13 / FAIL 0 / UNVERIFIED 0 (`04_verifier_report_r2.md`). 남은 일: 5단계(개념 문서의 낡은 코드 인용 고치기) 뒤 `done`으로 복원.
+- 2026-11-07 단계 5 완료 (문서만 수정) — concept-explainer가 `docs/concepts/netapp-account.md`의 코드 인용 약 50곳을 현재 코드에 맞췄다. 자식 검사 위치(`Tx.ensure_no_children`), 결함 키를 처리기에서 만드는 방식, `_finish`의 UPDATE·PATCH 되돌리기, 자식 409의 실환경 PASS(풀 AC-09), 2회차 보고서를 반영했다. 면접 Q&A 8개 유지, Q7 한 문장만 고침. 리더가 인용 일부(`accounts.py:164`, `state_store.py:152-164`, `lro.py:147`, `arm_rules.py:22·35·107`, `state_store.py:260`)를 코드와 대조했다. 수락 기준은 그대로다. 남은 일: 풀 2회차의 계정 e2e 회귀(`a461dbaf…`) 결과를 받으면 `done`으로 복원.
+- 2026-11-07 단계 6 완료 — `done` 복원. 용량 풀 2회차에서 계정 e2e(`test_netapp_account_live.py` 16, `test_netapp_account_lro_faults_live.py` 8)를 새 코드 `a461dbaf…`로 두 번 돌려 모두 통과했다. `f58df82d…` → `a461dbaf…` 사이에 바뀐 것은 풀 전용 오류 메시지 두 줄뿐이라 계정 AC 판정(2회차)은 그대로 유효하다. 커밋하면 검증 대상 코드를 커밋 SHA로 바꾼다.

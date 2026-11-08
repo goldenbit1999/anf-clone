@@ -70,6 +70,47 @@ def test_child_ids_returns_resources_with_parent(store):
         assert tx.child_ids(ACC.upper()) == [pool]
 
 
+def make_pool(name, state="Succeeded", type=TYPE + "/capacityPools"):
+    return Resource(
+        id=f"{ACC}/capacityPools/{name}", type=type, subscription_id="s1", resource_group="rg1",
+        name=name, location="westus2", tags={}, properties={}, provisioning_state=state,
+        parent_id=ACC,
+    )
+
+
+def test_list_children_filters_by_parent_and_type(store):
+    with store.transaction() as tx:
+        tx.put_resource(make_account())
+        tx.put_resource(make_pool("p2"))
+        tx.put_resource(make_pool("p1", state="Creating"))
+        tx.put_resource(make_pool("x", type="Other/type"))
+    assert [r.name for r in store.list_children(ACC.upper(), TYPE + "/capacityPools")] == ["p1", "p2"]
+    with store.transaction() as tx:
+        assert [r.name for r in tx.list_children(ACC, "Other/type")] == ["x"]
+    assert store.list_children(ACC + "x", TYPE + "/capacityPools") == []
+
+
+def test_ensure_no_children_passes_without_children(store):
+    with store.transaction() as tx:
+        tx.put_resource(make_account())
+        tx.ensure_no_children(ACC)
+
+
+def test_ensure_no_children_is_409_cannot_delete_resource_with_nested_ids(store):
+    """녹화 R4·N5의 메시지 형식: 경로의 `/providers/` 뒤만 따옴표로 묶어 나열한다. 상태와 무관하다."""
+    with store.transaction() as tx:
+        tx.put_resource(make_account())
+        tx.put_resource(make_pool("p1", state="Deleting"))
+    with pytest.raises(ArmError) as e, store.transaction() as tx:
+        tx.ensure_no_children(ACC)
+    assert (e.value.status, e.value.code) == (409, "CannotDeleteResource")
+    assert e.value.message == (
+        "Cannot delete resource while nested resources exist. Some existing nested resource IDs "
+        "include: 'Microsoft.NetApp/netAppAccounts/acc1/capacityPools/p1'. Please delete all "
+        "nested resources before deleting this resource."
+    )
+
+
 def test_delete_resource(store):
     with store.transaction() as tx:
         tx.put_resource(make_account())

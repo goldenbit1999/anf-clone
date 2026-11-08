@@ -6,6 +6,7 @@
 
 | 기능 | FR | 상태 | 마지막 완료 단계 | 검증 대상 코드 | 검증 보고서 | 갱신일 | 개념 문서 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| netapp-account | FR-01, FR-02 | done | 6 | 미커밋 (기준 `b96dbaf`, 파일 해시는 00_progress.md) | `_workspace/netapp-account/04_verifier_report.md` (1회차, 13/13 PASS) | 2026-11-07 | [netapp-account.md](concepts/netapp-account.md) |
+| netapp-account | FR-01, FR-02 | done | 6 | `e602d11` (#4) + 미커밋 공통 코드 (파일 해시 `a461dbaf…`, 00_progress.md) | `_workspace/netapp-account/04_verifier_report_r2.md` (2회차, 13/13 PASS) + 풀 2회차의 계정 e2e 회귀 | 2026-11-07 | [netapp-account.md](concepts/netapp-account.md) |
+| capacity-pool | FR-03 | done | 6 | 미커밋 (파일 해시 `a461dbaf…`, 00_progress.md) | `_workspace/capacity-pool/04_verifier_report.md` (1회차), `04_verifier_report_r2.md` (2회차), 13/13 PASS | 2026-11-07 | [capacity-pool.md](concepts/capacity-pool.md) |
 
-이월된 수락 기준: 자식 용량 풀이 남은 계정 DELETE의 `409 CannotDeleteResource` 실환경 검증은 용량 풀(`capacity-pool`) 사이클에서 한다 (계정 설계 결정 8, PRD FR-02).
+이월된 수락 기준: 자식 용량 풀이 남은 계정 DELETE의 `409 CannotDeleteResource` 실환경 검증은 용량 풀(`capacity-pool`) 사이클의 AC-09로 옮겼고 1회차에서 PASS했다 (계정 설계 결정 8, PRD FR-02).

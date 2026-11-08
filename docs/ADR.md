@@ -84,7 +84,7 @@ ONTAP REST 경로와 필드 이름은 기능마다 조사 단계에서 ONTAP RES
 | ANF 리소스·기능 | 닮은 ONTAP 개념 | storage agent API (후보) | Linux 구현 후보 | 근거 |
 | --- | --- | --- | --- | --- |
 | NetApp 계정 | 직접 대응 없음. 가장 가까운 것은 SVM이지만 1:1이 아닐 가능성이 크다 | 없음. **계정은 컨트롤 플레인 전용이다** (계정 설계에서 확정, `_workspace/netapp-account/02_main_design.md` 결정 1) | 없음 | [추론]. 계정 브리프의 결론 (1:1 대응 자료 없음, 테넌시는 구독·리전·VNet 기준일 가능성) |
-| 용량 풀 | 직접 대응이 없어 보임. 용량과 성능의 예산 | 없음. 컨트롤 플레인만 다룬다 | 후보 C라면 dm-thin 풀 | [추론] |
+| 용량 풀 | 직접 대응하는 공개된 객체 없음 [미확인]. 문서상 "용량·처리량 예산이자 과금 단위"이고, 볼륨 처리량 한도는 QoS policy group(Auto는 adaptive QoS)과 닮았다 [추론] | 없음. **풀은 컨트롤 플레인 전용이다** (풀 설계에서 확정, `_workspace/capacity-pool/02_main_design.md` 결정 2) | 없음. S1이 후보 C(dm-thin)를 고르면 볼륨 사이클에서 다시 본다 | 풀 브리프 "ONTAP 대응 개념" |
 | 볼륨 | FlexVol | `/api/storage/volumes` | [§7.2](#72-볼륨스냅샷-저장-방식-보류-d-11)의 후보 A·B·C와 knfsd export | [추론] |
 | 스냅샷 | Snapshot copy (WAFL) | `/api/storage/volumes/{uuid}/snapshots` | btrfs 스냅샷 또는 thin 스냅샷 | 스냅샷 조사에서 확인 |
 | 스냅샷으로 되돌리기 | SnapRestore (볼륨 단위) | 볼륨 PATCH로 복원할 스냅샷 지정 | 서브볼륨이나 LV 교체 | [추론] |
@@ -153,7 +153,7 @@ storage agent가 ARM 개념을 모르게 하는 이유: 실제 ONTAP도 ARM을 �
   - `Retry-After`는 보내지 않는다(ANF 녹화에 없다).
   - 진행 중 충돌은 `409 AnotherOperationInProgress`다.
   - 세부와 근거는 `_workspace/netapp-account/02_main_design.md` §4에 있다.
-- **작업별 응답 표.** 각 기능의 `02_main_design.md`에 최종 응답 표를 쓴다. 계정은 확정됐다 (`_workspace/netapp-account/02_main_design.md` §4.1). 아래는 계정 설계의 출발점이었다. 이후 기능은 해당하는 행만 정한다.
+- **작업별 응답 표.** 각 기능의 `02_main_design.md`에 최종 응답 표를 쓴다. 계정(`_workspace/netapp-account/02_main_design.md` §4.1)과 용량 풀(`_workspace/capacity-pool/02_main_design.md` §4.1)이 확정됐다. 스펙과 실서비스 녹화가 다르면 녹화를 따르고 차이를 기록한다 (풀 설계 결정 1). 아래는 계정 설계의 출발점이었다. 이후 기능은 해당하는 행만 정한다.
 
   | 작업 | 설계에서 정할 항목 |
   | --- | --- |
@@ -222,7 +222,7 @@ stateDiagram-v2
 ```
 
 - 작업(operation) 상태는 진행 중 값에서 시작해 `Succeeded`, `Failed`, `Canceled` 중 하나로 끝난다 [S2]. ARM 예시는 진행 중 값으로 `InProgress`를 쓰지만, ANF 녹화는 작업별 값(`Creating`, `Updating`, `Deleting`, `Patching` 등)을 썼다. 클론은 ANF를 따른다 (계정 설계 결정 4).
-- 계정 설계에서 확인: PATCH는 리소스마다 다르다. 계정 PATCH(tags)는 동기 `200`이고 `provisioningState`를 바꾸지 않는다. 풀 PATCH는 녹화에서 `202`와 `Patching`이었다. 풀 설계에서 정한다.
+- PATCH는 리소스마다 다르다. 계정 PATCH(tags)는 동기 `200`이고 `provisioningState`를 바꾸지 않는다. 풀 PATCH는 tags만 바꿔도 비동기 `202`와 `Patching`이고, 작업의 `action`은 `PATCH`다 (녹화, 풀 설계 결정 1에서 확정).
 - storage agent의 job 상태 이름은 ONTAP job 모델을 따른다. 정확한 값은 조사에서 확인한다.
 
 ### 6.4 내구성, 멱등성, 동시성
@@ -233,7 +233,7 @@ stateDiagram-v2
 - **한 리소스에는 작업 하나만.** 같은 리소스에 진행 중인 작업이 있으면 새 변경 요청을 `409 AnotherOperationInProgress`로 즉시 거절한다. 실제 ANF의 코드는 [미확인]이고, 이 코드는 ARM 공통 오류 목록에서 가져왔다. SQLite의 부분 유니크 인덱스(`operations.resource_id`, 진행 중인 행만)로 보장한다 (계정 설계 결정 6).
 - **자식이 있으면 삭제를 거절한다.** 자식 리소스가 남아 있으면 부모 삭제는 409다. 계정에서는 `CannotDeleteResource`가 확인됐다 (계정 브리프, 녹화 R4).
 
-**풀·볼륨 설계 전에 확정할 규칙 (보류).** 아래는 요구사항이다. 상태 저장소(D-07)와 storage agent(D-06)로 만족시킨다. 세부는 용량 풀·볼륨의 `02_main_design.md`에서 정한다.
+**풀·볼륨 설계 전에 확정할 규칙.** 아래는 요구사항이다. 상태 저장소(D-07)와 storage agent(D-06)로 만족시킨다. 용량 예약, 예약 정리, 부모 삭제와 자식 생성의 경합은 풀 설계에서 확정했다 (`_workspace/capacity-pool/02_main_design.md` §6): 모든 검사와 쓰기를 `BEGIN IMMEDIATE` 트랜잭션 하나에서 하고, 볼륨 행 자체가 예약이며(상태 무관하게 합계에 넣는다), 위반은 동기 `400`이다. 작업 식별자와 단계별 복구는 볼륨 설계에서 정한다.
 
 - **용량 예약은 원자적으로.** 풀 잔여 용량 확인·예약과 볼륨 리소스·작업 생성을 하나의 원자적 처리로 묶는다. 생성 중인 볼륨의 예약도 할당량 합계에 넣는다. 잔여 용량이 두 요청을 모두 받을 수 없는 풀에 동시 생성이 와도 할당량을 넘지 않아야 한다.
 - **예약 정리.** 생성 실패·취소·삭제 완료 때 예약과 사용량을 어떻게 정리할지 정한다. 커널 자원 정리가 실패했을 때 용량을 언제 회수하는지도 정한다.
@@ -313,7 +313,7 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 
 - 층은 pytest 마커 `integration`, `e2e`로 나눈다. 마커는 루트 `pyproject.toml`에 등록돼 있다 (`--strict-markers`). 조건이 없으면 건너뛰되, 건너뛴 테스트를 통과로 보고하지 않는다. PRD §8의 UNVERIFIED 규칙과 같다. TDD 훅도 수집된 테스트가 모두 skip되면 GREEN이 아니라 SKIPPED로 보고한다.
 - real-env-verifier는 E2E 층과 같은 기준으로 검증한다. 검증 스크립트는 `backend/tests/e2e/`에 둔다 (TDD 훅의 면제 대상).
-- **결함 주입 (계정 설계에서 확정).** 실제 일이 없어 밀리초 안에 끝나는 작업에서도 진행 중 상태, 실패, 재시작 복구를 실환경에서 재현할 수 있게 한다. anf-api를 띄울 때 `ANF_FAULT_INJECTION`(JSON)으로 `{리소스 종류}/{create|update|delete}`별 지연(`delaySeconds`)과 강제 실패(`fail`)를 켠다. 기본은 꺼짐이고, 켜면 시작할 때 경고 로그를 남긴다. 세부는 `_workspace/netapp-account/02_main_design.md` §6.3에 있다.
+- **결함 주입 (계정 설계에서 확정).** 실제 일이 없어 밀리초 안에 끝나는 작업에서도 진행 중 상태, 실패, 재시작 복구를 실환경에서 재현할 수 있게 한다. anf-api를 띄울 때 `ANF_FAULT_INJECTION`(JSON)으로 `{리소스 종류}/{create|update|patch|delete}`별 지연(`delaySeconds`)과 강제 실패(`fail`)를 켠다 (`patch`는 풀 설계에서 추가). 기본은 꺼짐이고, 켜면 시작할 때 경고 로그를 남긴다. 세부는 `_workspace/netapp-account/02_main_design.md` §6.3에 있다.
 
 ### 9.2 TDD 훅에 맞추기
 
@@ -339,7 +339,7 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 | --- | --- | --- | --- |
 | S0 | 환경을 확인한다. `nfsd`, `btrfs`, `dm-thin` 모듈이 로드되는가? `nfs-kernel-server`가 뜨는가(systemd)? 컨테이너가 knfsd를 NFSv3와 NFSv4.1로 마운트하는가? 서버가 보는 클라이언트 IP가 컨테이너마다 다른가(export policy의 전제)? Docker Engine과 Docker Desktop 중 어느 쪽이 이 조건을 만족하는가? 스토리지 루트(§5)에서 루프 장치와 파일시스템 생성이 동작하는가? NFS LOCALIO 설정 값은 무엇인가(`CONFIG_NFS_LOCALIO`, R-08)? 지금 커널은 꺼져 있다. 커스텀 커널을 쓰게 되어 켜져 있으면 빌드에서 끄거나 `nfs` 모듈 파라미터 `localio_enabled`를 `N`으로 둔다 | 첫 데이터 플레인 기능(볼륨) 전. 계정과 용량 풀은 S0 없이 진행할 수 있다 | 모듈 문제면 WSL 커스텀 커널을 쓰거나 스토리지 방식을 재검토한다 |
 | S1 | §7.2의 후보 A·B·C를 비교한다 | 볼륨 설계 전 | — |
-| S2 | §7.3의 후보 중 볼륨별 제한이 클라이언트 측정으로 드러나는 것을 찾는다 (`fio`로 측정). 측정 조건(제안): 페이지 캐시 효과를 줄이려고 `fio --direct=1`을 쓰고 측정 전에 캐시를 비운다(클라이언트와 서버가 같은 커널이라 서버 쪽 캐시도 함께 영향을 받는다, R-08). 조건마다 5회 이상 반복하고 각 값과 중앙값을 남긴다 | 처리량 설계 전 | — |
+| S2 | §7.3의 후보 중 볼륨별 제한이 클라이언트 측정으로 드러나는 것을 찾는다 (`fio`로 측정). 측정 조건(제안): 페이지 캐시 효과를 줄이려고 `fio --direct=1`을 쓰고 측정 전에 캐시를 비운다(클라이언트와 서버가 같은 커널이라 서버 쪽 캐시도 함께 영향을 받는다, R-08). 조건마다 5회 이상 반복하고 각 값과 중앙값을 남긴다. 시계(2026-11-07 관찰): WSL 게스트 단조 시계가 호스트 시계보다 약 10% 느리고, 게스트 벽시계는 약 33초마다 약 3.3초 앞으로 건너뛴다 (`_workspace/capacity-pool/04_verifier_report.md` 추가 관찰 2). 그래서 게스트 안에서 잰 MiB/s와 호스트 실시간 기준 처리량이 다를 수 있다. 어느 시계를 기준으로 잴지 S2에서 정하고, 구간은 벽시계가 아니라 단조 시계로 잰다 | 처리량 설계 전 | — |
 | S3 | GitHub 호스트 러너에서 btrfs·nfsd 모듈을 로드하고 privileged 컨테이너로 마운트할 수 있는가 | CI 기능 전 | 데이터 플레인 테스트는 로컬(또는 self-hosted 러너)에서만 돌리고, 그 사실을 문서에 적는다 |
 
 ### 위험

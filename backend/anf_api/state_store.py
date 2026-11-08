@@ -142,6 +142,27 @@ class Tx:
         ).fetchall()
         return [r["id"] for r in rows]
 
+    def list_children(self, parent_id: str, type: str) -> list[Resource]:
+        rows = self._conn.execute(
+            "SELECT * FROM resources WHERE parent_id = ? AND type = ? ORDER BY name COLLATE NOCASE",
+            (parent_id, type),
+        ).fetchall()
+        return [_resource(r) for r in rows]
+
+    def ensure_no_children(self, resource_id: str) -> None:
+        """자식이 남은 리소스의 DELETE를 409로 거절한다 (계정 녹화 R4, 풀 녹화 N5).
+        실서비스에서는 ARM 게이트웨이가 하는 검사다. 클론은 DELETE 트랜잭션 안에서 해서,
+        검사와 삭제 사이에 자식이 생기는 경합을 막는다 (ADR §6.4). 자식의 상태와는 무관하다."""
+        children = self.child_ids(resource_id)
+        if children:
+            nested = ", ".join(f"'{c.split('/providers/', 1)[1]}'" for c in children)
+            raise ArmError(
+                409, "CannotDeleteResource",
+                "Cannot delete resource while nested resources exist. Some existing nested "
+                f"resource IDs include: {nested}. Please delete all nested resources before "
+                "deleting this resource.",
+            )
+
     def put_resource(self, res: Resource) -> None:
         now = utc_now()
         self._conn.execute(
@@ -255,6 +276,10 @@ class StateStore:
                        resource_group: str | None = None) -> list[Resource]:
         with self._read() as conn:
             return Tx(conn).list_resources(type, subscription_id, resource_group)
+
+    def list_children(self, parent_id: str, type: str) -> list[Resource]:
+        with self._read() as conn:
+            return Tx(conn).list_children(parent_id, type)
 
     def get_operation(self, operation_id: str) -> Operation | None:
         with self._read() as conn:

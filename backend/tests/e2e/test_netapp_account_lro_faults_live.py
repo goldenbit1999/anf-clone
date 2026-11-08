@@ -204,12 +204,15 @@ def test_ac11_operation_resumes_after_sigkill_restart(start_server, tmp_path, re
 def test_s63_fault_injection_startup_guard_and_warning(start_server, tmp_path):
     """설계 §6.3 (수락 기준 밖, 추가 관찰): 잘못된 값이면 서버가 뜨지 않고, 켜면 경고 로그를 남긴다."""
     for raw in ('{"netAppAccounts/create": {"delaySeconds": 5}',  # JSON 아님
-                '{"netAppAccounts/resize": {"fail": true}}'):     # 모르는 키
+                '{"netAppAccounts/resize": {"fail": true}}',      # 모르는 키
+                '{"netAppAccounts/patch": {"fail": true}}'):      # 계정 PATCH는 동기라 처리기가 없다 (풀 설계 "구현 중 변경")
         srv = start_server(db_path=tmp_path / f"bad-{uuid.uuid4().hex[:6]}.db", raw_faults=raw, wait=False)
         rc = srv.proc.wait(30)
         assert rc != 0, srv.output()
         assert "ANF_FAULT_INJECTION" in srv.output() or "fault key" in srv.output()
         assert not port_open()
+        if "netAppAccounts/patch" in raw:
+            assert "Unknown fault key 'netAppAccounts/patch'" in srv.output(), srv.output()
 
     ok = start_server(faults=DELAYS)
     assert "Fault injection is enabled" in ok.output()

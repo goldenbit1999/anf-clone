@@ -19,8 +19,6 @@ log = logging.getLogger(__name__)
 
 Handler = Callable[[Operation], Awaitable[None]]
 
-_FAULT_ACTIONS = ("create", "update", "delete")
-
 
 @dataclass(frozen=True)
 class Fault:
@@ -28,10 +26,15 @@ class Fault:
     fail: bool = False
 
 
-def parse_faults(text: str | None, resource_types: Iterable[str]) -> dict[str, Fault]:
+def _key(resource_type: str, action: str) -> str:
+    return f"{resource_type.rsplit('/', 1)[-1]}/{action.lower()}"
+
+
+def parse_faults(text: str | None, handler_keys: Iterable[tuple[str, str]]) -> dict[str, Fault]:
     """`ANF_FAULT_INJECTION` 값을 읽는다. 잘못된 값은 ValueError로 거절해 서버가 뜨지 않게 한다.
 
-    형식: {"netAppAccounts/create": {"delaySeconds": 5}, "netAppAccounts/delete": {"fail": true}}
+    형식: {"netAppAccounts/create": {"delaySeconds": 5}, "capacityPools/patch": {"fail": true}}
+    받는 키는 등록된 처리기의 (리소스 종류, 작업)에서 만든다. 계정 PATCH처럼 작업이 없는 것은 거절한다.
     """
     if not text:
         return {}
@@ -41,15 +44,11 @@ def parse_faults(text: str | None, resource_types: Iterable[str]) -> dict[str, F
         raise ValueError(f"ANF_FAULT_INJECTION is not valid JSON: {e}") from None
     if not isinstance(raw, dict):
         raise ValueError("ANF_FAULT_INJECTION must be a JSON object")
-    short_types = {t.rsplit("/", 1)[-1] for t in resource_types}
+    valid_keys = {_key(t, a) for t, a in handler_keys}
     faults = {}
     for key, spec in raw.items():
-        type_name, _, action = key.partition("/")
-        if type_name not in short_types or action not in _FAULT_ACTIONS:
-            raise ValueError(
-                f"Unknown fault key '{key}'. Use '{{type}}/{{{'|'.join(_FAULT_ACTIONS)}}}' "
-                f"with type in {sorted(short_types)}"
-            )
+        if key not in valid_keys:
+            raise ValueError(f"Unknown fault key '{key}'. Use one of {sorted(valid_keys)}")
         if not isinstance(spec, dict) or set(spec) - {"delaySeconds", "fail"}:
             raise ValueError(f"Fault '{key}' may only have 'delaySeconds' and 'fail'")
         delay = spec.get("delaySeconds", 0)
@@ -63,7 +62,7 @@ def parse_faults(text: str | None, resource_types: Iterable[str]) -> dict[str, F
 
 
 def _fault_key(op: Operation) -> str:
-    return f"{op.resource_type.rsplit('/', 1)[-1]}/{op.action.lower()}"
+    return _key(op.resource_type, op.action)
 
 
 class LroWorker:
@@ -142,7 +141,7 @@ class LroWorker:
             if error is None and op.action == "DELETE":
                 tx.delete_resource(op.resource_id)
             elif res is not None:
-                if error is not None and op.action == "UPDATE" and op.previous is not None:
+                if error is not None and op.action in ("UPDATE", "PATCH") and op.previous is not None:
                     res.tags = op.previous["tags"]
                     res.properties = op.previous["properties"]
                 res.provisioning_state = "Succeeded" if error is None else "Failed"
