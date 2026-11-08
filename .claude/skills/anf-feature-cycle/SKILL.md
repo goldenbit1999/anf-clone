@@ -208,9 +208,9 @@ Agent 도구의 `name` 인자는 에이전트 팀을 켠 세션에서만 쓸 수
 6. 5단계: `docs/concepts/snapshot.md`를 쓴다.
 7. 6단계: snapshot을 done으로 기록한다.
 
-**오류 흐름: "QoS 구현해줘"인데 Docker Desktop이 꺼져 있음**
+**오류 흐름: "QoS 구현해줘"인데 Ubuntu의 Docker Engine을 띄울 수 없음**
 1. 4단계에서 verifier의 환경 사전 점검이 실패하고, 처리량 항목이 UNVERIFIED가 된다.
-2. 메인은 이를 PASS로 처리하지 않는다. `00_progress.md`에 원인과 재개할 단계(4단계)를 적고, 사용자에게 Docker Desktop을 켜 달라고 요청한다.
+2. 메인은 이를 PASS로 처리하지 않는다. `00_progress.md`에 원인과 재개할 단계(4단계)를 적고, 원인(예: Docker Desktop의 Ubuntu 연동이 다시 켜짐)과 필요한 조치를 사용자에게 알린다.
 3. 켜진 뒤 기록한 ID로 `SendMessage`해 그 항목만 재검증한다. 세션이 바뀌어 ID로 이어 갈 수 없으면 새 verifier에게 이전 보고서를 넘긴다.
 
 **부분 재실행: "스냅샷 개념 문서만 다시 써줘, 면접 질문은 더 어렵게"**

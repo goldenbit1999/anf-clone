@@ -18,7 +18,7 @@ description: ANF 클론에 구현한 기능이 WSL2·Docker 실환경에서 실�
 | 컨트롤 플레인 서비스 | 모든 기능 | 서비스가 떠 있는지 확인한다. 명령은 아래 "스택별 명령"을 쓴다 |
 | WSL 배포판 | WSL에서 실행하는 모든 항목 | `wsl -l -v`에서 Ubuntu가 실행 중인지 확인한다 |
 | 커널 모듈 | 볼륨 이후의 데이터 플레인 기능 | 필요한 모듈(nfsd, btrfs 등)이 로드됐는지 `wsl -d Ubuntu -- lsmod`로 확인한다 |
-| Docker | 클라이언트 컨테이너로 마운트하는 항목 | `docker version`이 서버 버전을 돌려주는지 확인한다. 꺼져 있으면 사용자에게 켜 달라고 요청해야 한다고 리더에게 보고한다. 지금 명령은 Docker Desktop을 전제한다. Docker Engine 위치(ADR D-10)가 정해지면 이 점검을 고친다 |
+| Docker | 클라이언트 컨테이너로 마운트하는 항목 | Ubuntu 안 Docker Engine을 쓴다 (ADR D-10). `wsl -d Ubuntu -- docker version`이 서버 버전과 `Os=linux`를 돌려주고, `wsl -d Ubuntu -- readlink /usr/bin/docker`가 비어 있는지(Docker Desktop 연동 링크가 아닌지) 확인한다. 엔진이 멈춰 있으면 `wsl -d Ubuntu -u root -- systemctl start docker`로 띄운다. 그래도 안 되거나 Desktop 연동이 다시 켜져 있으면 리더에게 보고한다 |
 
 ## 1. 검증 항목 만들기
 
