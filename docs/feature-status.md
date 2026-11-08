@@ -6,10 +6,10 @@
 
 | 기능 | FR | 상태 | 마지막 완료 단계 | 검증 대상 코드 | 검증 보고서 | 갱신일 | 개념 문서 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| netapp-account | FR-01, FR-02 | in_progress (볼륨 사이클의 공통 코드 변경으로 재검증 대기, 볼륨 AC-14) | 6 | `41f863d` (#5, 내용 해시 `f2b70558…`) | `_workspace/netapp-account/04_verifier_report_r2.md` (2회차, 13/13 PASS) + 풀 2회차의 계정 e2e 회귀 | 2026-11-07 | [netapp-account.md](concepts/netapp-account.md) |
-| capacity-pool | FR-03 | in_progress (볼륨 사이클의 공통 코드 변경으로 재검증 대기, 볼륨 AC-14) | 6 | `41f863d` (#5, 내용 해시 `f2b70558…`) | `_workspace/capacity-pool/04_verifier_report.md` (1회차), `04_verifier_report_r2.md` (2회차), 13/13 PASS | 2026-11-07 | [capacity-pool.md](concepts/capacity-pool.md) |
-| volume | FR-04 | in_progress (4단계 PASS, 5단계 개념 문서 대기) | 4 | 내용 해시 `8bb57d91…` (PR로 merge) | `_workspace/volume/04_verifier_report.md` (1회차, AC-03 FAIL), `04_verifier_report_r2.md` (2회차, 15/15 PASS) | 2026-11-07 | — |
-| ci | FR-11 | in_progress (볼륨 사이클에서 워크플로에 `-m "not dataplane"`을 더해 재검증 대기) | 6 | `3fd6511` (#6, 워크플로. 제품 코드 내용 해시 `f2b70558…` 유지) | `_workspace/ci/04_verifier_report.md` (1회차), `04_verifier_report_r2.md` (2회차), 8/8 PASS | 2026-11-07 | [ci.md](concepts/ci.md) |
+| netapp-account | FR-01, FR-02 | done | 6 | `8a4002d` (#7, 내용 해시 `8bb57d91…`) | `_workspace/netapp-account/04_verifier_report_r2.md` (2회차, 13/13 PASS) + 볼륨 2회차 AC-14(계정 e2e 회귀 PASS) | 2026-11-07 | [netapp-account.md](concepts/netapp-account.md) |
+| capacity-pool | FR-03 | done | 6 | `8a4002d` (#7, 내용 해시 `8bb57d91…`) | `_workspace/capacity-pool/04_verifier_report.md` (1회차), `04_verifier_report_r2.md` (2회차), 13/13 PASS + 볼륨 2회차 AC-14(풀 e2e 회귀 PASS) | 2026-11-07 | [capacity-pool.md](concepts/capacity-pool.md) |
+| volume | FR-04 | in_progress (4단계 PASS, 5단계 개념 문서 대기) | 4 | `8a4002d` (#7, 내용 해시 `8bb57d91…`) | `_workspace/volume/04_verifier_report.md` (1회차, AC-03 FAIL), `04_verifier_report_r2.md` (2회차, 15/15 PASS), PR #7 Actions PASS | 2026-11-07 | — |
+| ci | FR-11 | partial | 6 | `8a4002d` (#7, 워크플로에 `-m "not dataplane"` 추가) | `_workspace/ci/04_verifier_report.md` (1회차), `04_verifier_report_r2.md` (2회차), 8/8 PASS + PR #7 Actions 실행 PASS(579 passed, 25 deselected, skip 0) | 2026-11-07 | [ci.md](concepts/ci.md) |
 
 ci가 `partial`인 이유: UNVERIFIED 항목은 없다. 이번 범위(backend 작업)는 수락 기준을 모두 통과했지만, FR-11의 frontend 작업(대시보드 FR-09 뒤)과 data-plane 작업(스파이크 S3 뒤)이 남아 있다.
 

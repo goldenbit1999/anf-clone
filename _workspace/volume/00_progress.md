@@ -2,8 +2,8 @@
 
 - 상태: in_progress
 - FR: FR-04 (볼륨, NFS). 용량 풀 사이클에서 옮겨 온 기준: CV-1~CV-3 (`_workspace/capacity-pool/02_main_design.md` §8), 볼륨 생성이 풀 크기를 넘으면 거절 (FR-03)
-- 마지막 완료 단계: 4 (2회차 AC-01~AC-15 PASS. GitHub Actions 실행은 PR에서 확인)
-- 재개할 단계: 5 (개념 문서). 그 전에 사용자 지시대로 commit·push·PR·merge
+- 마지막 완료 단계: 4 (2회차 AC-01~AC-15 PASS, PR #7의 GitHub Actions PASS, merge `8a4002d`)
+- 재개할 단계: 5 (개념 문서)
 - 검증 대상 코드: 제품 코드 내용 해시 `8bb57d912a0124580af7a8c3a58340667e54bb0dee349acdf4d5b4e017e5d77e` (미커밋, AC-03 수정 뒤. 1회차는 `443df94c…`). 변경 파일:
   - 제품 코드(해시 범위): `pyproject.toml`(`dataplane` 마커), `backend/anf_api/{arm_app,arm_rules,capacity_pools,state_store}.py`(수정), `backend/anf_api/{volumes,storage_client}.py`(새), `backend/storage_agent/`(새: `agent_app.py`, `flexvol.py`, `nfs_instance.py`, `jobs.py`, `runner.py`, `nfs_server/{Dockerfile,entrypoint.sh,nfs.conf}`)
   - 해시 범위 밖: `scripts/setup-wsl-dataplane.sh`(새), `.github/workflows/ci.yml`(`-m "not dataplane"`), `.gitattributes`(새), 테스트(`backend/tests/unit/test_{volumes,storage_client,agent_app,flexvol,nfs_instance,jobs,runner,arm_rules,state_store}.py`, `backend/tests/contract/test_volumes_api.py`, `backend/tests/integration/test_flexvol_linux.py`)
@@ -50,7 +50,7 @@
 | AC-14 | 계정·풀 e2e 회귀 | PASS (1회차 63 passed. anf-api 코드는 2회차에 바뀌지 않았고, 2회차 CI 재현에서도 63개 통과) | `04_verifier_report.md`, r2 | `443df94c…`, `8bb57d91…` |
 | AC-15 | 볼륨별 서버(IP·연결 분리) | PASS | r2 | `8bb57d91…` |
 | (추가) | 통합 테스트, CI 로컬 재현(579 passed, 25 deselected, skip 0) | PASS | r2 | `8bb57d91…` |
-| (추가) | GitHub Actions 실행 | UNVERIFIED → PR에서 확인 | — | — |
+| (추가) | GitHub Actions 실행 | PASS (PR #7 push·PR 실행 둘 다: 579 passed, 25 deselected, skip 0, 훅 25 passed) | run 42459588700, 42459573873 | `501d699` (= merge `8a4002d`, 해시 `8bb57d91…`) |
 
 ## 이력
 
@@ -72,3 +72,5 @@
 - 2026-11-07 단계 4 FAIL (1회차) — `04_verifier_report.md`: PASS 14, FAIL 1(AC-03 불안정), CI 로컬 재현 PASS(576 passed, 25 deselected, skip 0), GitHub Actions UNVERIFIED(push 대기). 제품 코드 해시 그대로 `443df94c…`. verifier가 `backend/tests/e2e/test_volume_live.py`(약 1310줄)를 만들었다. 사용자 요청으로 이 파일을 공용 도우미와 2~3개 파일로 나누는 일을 2회차에 함께 맡긴다. 재개: 3단계 수정.
 - 2026-11-07 단계 3 수정 (AC-03) — `nfs_instance.py` 준비 대기(`READY_FILE`, `InstanceError`, 단위 18 GREEN), 진입점의 유예 종료 확인·knfsd 재시작·준비 표시, `flexvol.py`가 sleep을 넘김. 이미지를 다시 빌드했다. 인스턴스 45번 시작에서 3번 재시도, 모두 `Y`(생성 평균 1.36 s, 최대 4.26 s). 통합 4 PASS(42.7 s), 전체 516 passed, ruff 통과. 제품 코드 해시 `8bb57d91…`. 수정이 인스턴스 시작 경로 전체에 걸려 2회차는 볼륨 e2e 전체를 다시 맡긴다.
 - 2026-11-07 단계 4 완료 (2회차) — `04_verifier_report_r2.md`: AC-01~AC-15 PASS 15. 볼륨 e2e 21 passed(530.55 s), 반복 시험 20회. knfsd 시작 64회 중 5회 재시작, 모두 두 번째 시도에 회복. 90 s 대기 0회. 통합 4 PASS(32.51 s). CI 로컬 재현: 579 passed, 25 deselected, skip 0, 훅 25 passed. 제품 코드 해시 `8bb57d91…` 그대로. e2e를 `dataplane_live.py`(도우미 531줄)와 `test_volume_{contract,data,recovery}_live.py`(463·272·202줄)로 나눴다(본문은 그대로 옮김, 첫 쓰기 한도는 10 s로 좁힘). 사용자 지시로 commit·push·PR·merge를 진행한다.
+- 2026-11-07 merge — 브랜치 `feature/volume` 커밋 `501d699`(커밋 내용 해시 `8bb57d91…` = 검증한 값) → PR #7. GitHub Actions push·PR 실행 모두 PASS(579 passed, 25 deselected, skip 0, 훅 25 passed). squash merge → `main` `8a4002d`, merge 뒤 해시도 `8bb57d91…`. ci 기능의 재검증 대기(`-m "not dataplane"`)도 이 실행으로 끝났다. `docs/feature-status.md`: netapp-account·capacity-pool은 AC-14 회귀 PASS로 done 복귀, ci는 partial 복귀(frontend·data-plane 작업이 남음).
+- 2026-11-07 단계 5 시작 — concept-explainer에게 `docs/concepts/volume.md` 작성을 맡김 (대상 코드 `8a4002d`).
