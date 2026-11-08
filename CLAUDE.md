@@ -23,25 +23,29 @@ That role owns the ANF **data plane**. Its posting stresses Python test automati
 
 ## Decided (2026-11-07)
 
-- Backend: Python with FastAPI. Dashboard: React + TypeScript. The TDD hook assumes Python + pytest.
+- Backend: Python 3.12 (CI too) with FastAPI. Dashboard: React + TypeScript, built with Vite. The TDD hook assumes Python + pytest.
 - Protocols: NFSv3 and NFSv4.1. SMB comes later.
 - Verification clients mount from Docker containers.
+- Storage layer (D-06): a storage agent on Linux primitives that serves a subset of the ONTAP REST API. The ONTAP Simulator is an optional later target. State store SQLite (D-07), metrics Prometheus (D-08), LRO worker inside the anf-api process (D-09).
+- No authentication (D-13): anf-api binds to localhost and does not check `Authorization`. In real Azure, ARM validates tokens and RBAC before a request reaches the ANF resource provider, so the clone skips it the same way it skips subscription checks.
+- Done means FR-01 to FR-13 are `done` (`docs/PRD.md` §9); the CSI driver (FR-14) is optional. No target dates: work through the stages in order, as fast as possible.
 - Python project layout (D-14): one `pyproject.toml` at the repo root holds dependencies and pytest settings; code lives under `backend/`. Virtual environments are per OS: `.venv-win/` in the repo for Windows, `~/.venvs/anf-clone` inside WSL (outside `/mnt/c` to avoid 9P slowness; override with `ANF_CLONE_VENV`).
 - Requirements are in `docs/PRD.md`. Architecture and the decision log are in `docs/ADR.md` (Architecture Design Requirement; its decisions are numbered `D-nn`).
 
 ## Not decided yet
 
-Ask the user before assuming any of these:
+Planning is closed. These are decided later, at the point named, and not before:
 
-- Storage backend. `docs/ADR.md` D-06 proposes a storage agent on Linux primitives that serves a subset of the ONTAP REST API, with the ONTAP Simulator as an optional later target. The user has not confirmed it.
-- The other proposals in `docs/ADR.md` §11 (D-07 to D-09), authentication, and timeline.
+- Volume and snapshot storage layout (D-11): spike S1, before the volume design.
+- Throughput limit method (D-12): spike S2, before the throughput design.
+- Per-operation API response tables and the pool/volume concurrency rules (`docs/ADR.md` §6.1, §6.4): in each feature's design.
 
 ## Environment
 
-- **Host**: Windows 11 Home. Windows has no built-in NFS server, so data-plane work runs in **WSL2 Ubuntu 24.04** (kernel 6.18). The distro is `Ubuntu` (the default), but `kali-linux` and `docker-desktop` also exist, so name it: `wsl -d Ubuntu -- <cmd>`.
-- **Kernel**: per `/proc/config.gz`, `nfsd` (`CONFIG_NFSD=m`, NFSv4 built in), `btrfs`, and `dm-thin` are modules; blk-cgroup I/O throttling is built in (`CONFIG_BLK_DEV_THROTTLING=y`); NFS LOCALIO is off (`# CONFIG_NFS_LOCALIO is not set`). Nobody has checked yet that the modules load (spike S0).
+- **Host**: Windows 11 Home. Windows has no built-in NFS server, so data-plane work runs in **WSL2 Ubuntu 24.04** (kernel 6.18). The distro is `Ubuntu` (the default), but `kali-linux` and `docker-desktop` also exist, so name it: `wsl -d Ubuntu -- <cmd>`. For scripts use `wsl -d Ubuntu -e bash -c '...'`: `--` re-parses the command through the login shell, so `$vars` expand twice. From Git Bash also set `MSYS_NO_PATHCONV=1`.
+- **Kernel**: per `/proc/config.gz`, `nfsd` (`CONFIG_NFSD=m`, NFSv4 built in), `btrfs`, and `dm-thin` are modules; blk-cgroup I/O throttling is built in (`CONFIG_BLK_DEV_THROTTLING=y`); NFS LOCALIO is off (`# CONFIG_NFS_LOCALIO is not set`). Spike S0 (`_workspace/spikes/S0.md`) confirmed the modules load, systemd is on, and `nfs-kernel-server` and `btrfs-progs` are installed (NFS versions 3, 4, 4.1, 4.2).
 - **WSL limits**: about 7 GB RAM.
-- **Docker Desktop**: installed, but it is not always running. Start it before using `docker`.
+- **Docker (D-10)**: data-plane work uses Docker Engine inside Ubuntu (`docker.io`, systemd service `docker`, usable without root), not Docker Desktop. Its bridge lives in the Ubuntu network, so knfsd sees each container's own IP and the default `secure` export works (S0). Docker Desktop is still installed on Windows, but its WSL integration for Ubuntu is off, including "Enable integration with my default WSL distro". Keep it off: when on, Desktop takes over `/usr/bin/docker` and `/var/run/docker.sock`, and containers reach knfsd only through Windows NAT as one IP (`172.21.160.1`).
 - **Repository**: private GitHub repo `goldenbit1999/anf-clone` (default branch `main`).
 
 ## Commands and architecture
