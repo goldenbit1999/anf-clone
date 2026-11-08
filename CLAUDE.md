@@ -50,8 +50,8 @@ Planning is closed. These are decided later, at the point named, and not before:
 
 ## Commands and architecture
 
-There is no application code yet. The stack is decided (D-01 to D-04); add run commands and an architecture overview when the account feature is implemented.
-
+- **Run anf-api (WSL)**: from the repo, `~/.venvs/anf-clone/bin/python -m uvicorn --factory anf_api.arm_app:create_app --app-dir backend --host 127.0.0.1 --port 8080`. State lives in SQLite at `ANF_API_DB` (default `~/.local/state/anf-clone/anf-api.db`; keep it off `/mnt/c`). `ANF_FAULT_INJECTION` (JSON, off by default) adds per-operation delays or forced failures for verification, e.g. `'{"netAppAccounts/create": {"delaySeconds": 5}}'`.
+- **Architecture (`backend/anf_api/`)**: `arm_app.py` is the FastAPI app (ARM routes, operation status URL, error format, correlation headers; the lifespan runs the worker). `accounts.py` holds the account body rules and PUT/PATCH/DELETE flows. `lro.py` is the shared LRO worker (asyncio, same process, D-09), fault injection, and operation status body. `state_store.py` is SQLite (`resources`, `operations`; one active operation per resource). `arm_rules.py` covers api-version, name rules, resource IDs, and `ArmError`. A write stores the resource state and the operation in one transaction, responds, and the worker finishes the operation; on restart it re-runs unfinished operations. The storage agent does not exist yet; volumes add it.
 - **Setup (Windows)**: `python -m venv .venv-win`, then `.venv-win\Scripts\python -m pip install -e ".[dev]"`.
 - **Setup (WSL)**: `python3 -m venv ~/.venvs/anf-clone`, then from the repo `~/.venvs/anf-clone/bin/pip install -e ".[dev]"`.
 - **Tests**: from the repo root, run `python -m pytest` with the venv's Python (e.g. `.venv-win\Scripts\python -m pytest`). `testpaths`, `pythonpath = ["backend"]`, the `integration`/`e2e` markers, and `addopts` come from the root `pyproject.toml`, so the hook, manual runs, and CI share them. Single test: `python -m pytest path/to/test_x.py::test_name`.

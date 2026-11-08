@@ -83,7 +83,7 @@ ONTAP REST 경로와 필드 이름은 기능마다 조사 단계에서 ONTAP RES
 
 | ANF 리소스·기능 | 닮은 ONTAP 개념 | storage agent API (후보) | Linux 구현 후보 | 근거 |
 | --- | --- | --- | --- | --- |
-| NetApp 계정 | 직접 대응 없음. 가장 가까운 것은 SVM이지만 1:1이 아닐 가능성이 크다 | **계정 설계에서 정할 선택지.** `/api/svm/svms`에 대응시키거나, 백엔드에 아무것도 만들지 않는다 | 선택에 따름 | [추론]. 계정 브리프의 결론 (1:1 대응 자료 없음, 테넌시는 구독·리전·VNet 기준일 가능성) |
+| NetApp 계정 | 직접 대응 없음. 가장 가까운 것은 SVM이지만 1:1이 아닐 가능성이 크다 | 없음. **계정은 컨트롤 플레인 전용이다** (계정 설계에서 확정, `_workspace/netapp-account/02_main_design.md` 결정 1) | 없음 | [추론]. 계정 브리프의 결론 (1:1 대응 자료 없음, 테넌시는 구독·리전·VNet 기준일 가능성) |
 | 용량 풀 | 직접 대응이 없어 보임. 용량과 성능의 예산 | 없음. 컨트롤 플레인만 다룬다 | 후보 C라면 dm-thin 풀 | [추론] |
 | 볼륨 | FlexVol | `/api/storage/volumes` | [§7.2](#72-볼륨스냅샷-저장-방식-보류-d-11)의 후보 A·B·C와 knfsd export | [추론] |
 | 스냅샷 | Snapshot copy (WAFL) | `/api/storage/volumes/{uuid}/snapshots` | btrfs 스냅샷 또는 thin 스냅샷 | 스냅샷 조사에서 확인 |
@@ -147,7 +147,13 @@ storage agent가 ARM 개념을 모르게 하는 이유: 실제 ONTAP도 ARM을 �
   - PUT: 201과 `Azure-AsyncOperation`
   - PATCH: 200, 또는 202와 `Location`
   - DELETE: 202와 `Location`, 또는 204
-- **작업별 응답 표.** 각 기능의 `02_main_design.md`에 최종 응답 표를 쓴다. 아래는 계정 설계의 출발점이다. 이후 기능은 해당하는 행만 정한다.
+- **작업 상태 URL (계정 설계에서 확정).** `/subscriptions/{sub}/providers/Microsoft.NetApp/locations/{location}/operationResults/{operationId}` 하나를 모든 기능이 쓴다.
+  - `Azure-AsyncOperation` 방식으로 조회하면 항상 `200`과 작업 본문을 준다.
+  - `&operationResultResponseType=Location`을 붙이면 `Location` 방식이다. 진행 중에는 본문 없는 `202`, 끝나면 동기로 실행했을 때와 같은 응답을 준다.
+  - `Retry-After`는 보내지 않는다(ANF 녹화에 없다).
+  - 진행 중 충돌은 `409 AnotherOperationInProgress`다.
+  - 세부와 근거는 `_workspace/netapp-account/02_main_design.md` §4에 있다.
+- **작업별 응답 표.** 각 기능의 `02_main_design.md`에 최종 응답 표를 쓴다. 계정은 확정됐다 (`_workspace/netapp-account/02_main_design.md` §4.1). 아래는 계정 설계의 출발점이었다. 이후 기능은 해당하는 행만 정한다.
 
   | 작업 | 설계에서 정할 항목 |
   | --- | --- |
@@ -215,7 +221,8 @@ stateDiagram-v2
     Deleting --> Failed
 ```
 
-- 작업(operation) 상태는 `InProgress`에서 시작해 `Succeeded`, `Failed`, `Canceled` 중 하나로 끝난다 [S2].
+- 작업(operation) 상태는 진행 중 값에서 시작해 `Succeeded`, `Failed`, `Canceled` 중 하나로 끝난다 [S2]. ARM 예시는 진행 중 값으로 `InProgress`를 쓰지만, ANF 녹화는 작업별 값(`Creating`, `Updating`, `Deleting`, `Patching` 등)을 썼다. 클론은 ANF를 따른다 (계정 설계 결정 4).
+- 계정 설계에서 확인: PATCH는 리소스마다 다르다. 계정 PATCH(tags)는 동기 `200`이고 `provisioningState`를 바꾸지 않는다. 풀 PATCH는 녹화에서 `202`와 `Patching`이었다. 풀 설계에서 정한다.
 - storage agent의 job 상태 이름은 ONTAP job 모델을 따른다. 정확한 값은 조사에서 확인한다.
 
 ### 6.4 내구성, 멱등성, 동시성
@@ -223,7 +230,7 @@ stateDiagram-v2
 - **저장한 뒤 응답한다.** 리소스 상태와 작업 기록을 한 트랜잭션으로 저장하고 나서 응답한다. 저장 전에 실패하면 아무것도 남지 않는다.
 - **재시작하면 조정한다.** 워커가 재시작되면 `InProgress` 작업을 다시 가져온다. storage agent의 실제 상태를 이름으로 조회해 대조한 뒤, 작업을 이어 가거나 `Failed`로 정리한다.
 - **agent 작업은 재시도에 안전하다.** 이미 있는 볼륨을 다시 만들라고 하면 같은 설정일 때는 성공으로, 다른 설정일 때는 오류로 답한다.
-- **한 리소스에는 작업 하나만.** 같은 리소스에 진행 중인 작업이 있으면 새 변경 요청을 거절한다. 실제 ANF의 오류 코드는 조사에서 확인한다.
+- **한 리소스에는 작업 하나만.** 같은 리소스에 진행 중인 작업이 있으면 새 변경 요청을 `409 AnotherOperationInProgress`로 즉시 거절한다. 실제 ANF의 코드는 [미확인]이고, 이 코드는 ARM 공통 오류 목록에서 가져왔다. SQLite의 부분 유니크 인덱스(`operations.resource_id`, 진행 중인 행만)로 보장한다 (계정 설계 결정 6).
 - **자식이 있으면 삭제를 거절한다.** 자식 리소스가 남아 있으면 부모 삭제는 409다. 계정에서는 `CannotDeleteResource`가 확인됐다 (계정 브리프, 녹화 R4).
 
 **풀·볼륨 설계 전에 확정할 규칙 (보류).** 아래는 요구사항이다. 상태 저장소(D-07)와 storage agent(D-06)로 만족시킨다. 세부는 용량 풀·볼륨의 `02_main_design.md`에서 정한다.
@@ -239,7 +246,7 @@ stateDiagram-v2
 - `resources`: ARM 리소스 ID(기본 키), 종류, 부모 ID, 이름, `location`, `properties`(JSON), `provisioningState`, 생성·수정 시각
 - `operations`: 작업 ID(UUID), 리소스 ID, 종류(생성·수정·삭제), 상태, 오류, storage job ID, 시작·종료 시각, 상관 ID
 
-스키마는 첫 기능(계정)을 구현할 때 확정한다.
+계정 설계에서 확정한 스키마는 `_workspace/netapp-account/02_main_design.md` §6.1에 있다. 구현은 `backend/anf_api/state_store.py`다.
 
 ## 7. 스토리지 계층
 
@@ -306,6 +313,7 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 
 - 층은 pytest 마커 `integration`, `e2e`로 나눈다. 마커는 루트 `pyproject.toml`에 등록돼 있다 (`--strict-markers`). 조건이 없으면 건너뛰되, 건너뛴 테스트를 통과로 보고하지 않는다. PRD §8의 UNVERIFIED 규칙과 같다. TDD 훅도 수집된 테스트가 모두 skip되면 GREEN이 아니라 SKIPPED로 보고한다.
 - real-env-verifier는 E2E 층과 같은 기준으로 검증한다. 검증 스크립트는 `backend/tests/e2e/`에 둔다 (TDD 훅의 면제 대상).
+- **결함 주입 (계정 설계에서 확정).** 실제 일이 없어 밀리초 안에 끝나는 작업에서도 진행 중 상태, 실패, 재시작 복구를 실환경에서 재현할 수 있게 한다. anf-api를 띄울 때 `ANF_FAULT_INJECTION`(JSON)으로 `{리소스 종류}/{create|update|delete}`별 지연(`delaySeconds`)과 강제 실패(`fail`)를 켠다. 기본은 꺼짐이고, 켜면 시작할 때 경고 로그를 남긴다. 세부는 `_workspace/netapp-account/02_main_design.md` §6.3에 있다.
 
 ### 9.2 TDD 훅에 맞추기
 
