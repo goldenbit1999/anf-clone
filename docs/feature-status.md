@@ -8,6 +8,8 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | netapp-account | FR-01, FR-02 | done | 6 | `41f863d` (#5, 내용 해시 `f2b70558…`) | `_workspace/netapp-account/04_verifier_report_r2.md` (2회차, 13/13 PASS) + 풀 2회차의 계정 e2e 회귀 | 2026-11-07 | [netapp-account.md](concepts/netapp-account.md) |
 | capacity-pool | FR-03 | done | 6 | `41f863d` (#5, 내용 해시 `f2b70558…`) | `_workspace/capacity-pool/04_verifier_report.md` (1회차), `04_verifier_report_r2.md` (2회차), 13/13 PASS | 2026-11-07 | [capacity-pool.md](concepts/capacity-pool.md) |
-| ci | FR-11 | in_progress | 3 | 워크플로만 (제품 코드 내용 해시 `f2b70558…` 유지) | 없음 | 2026-11-07 | 없음 |
+| ci | FR-11 | partial | 6 | `3fd6511` (#6, 워크플로. 제품 코드 내용 해시 `f2b70558…` 유지) | `_workspace/ci/04_verifier_report.md` (1회차), `04_verifier_report_r2.md` (2회차), 8/8 PASS | 2026-11-07 | [ci.md](concepts/ci.md) |
+
+ci가 `partial`인 이유: UNVERIFIED 항목은 없다. 이번 범위(backend 작업)는 수락 기준을 모두 통과했지만, FR-11의 frontend 작업(대시보드 FR-09 뒤)과 data-plane 작업(스파이크 S3 뒤)이 남아 있다.
 
 이월된 수락 기준: 자식 용량 풀이 남은 계정 DELETE의 `409 CannotDeleteResource` 실환경 검증은 용량 풀(`capacity-pool`) 사이클의 AC-09로 옮겼고 1회차에서 PASS했다 (계정 설계 결정 8, PRD FR-02).
