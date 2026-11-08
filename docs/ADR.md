@@ -310,6 +310,7 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 | API 계약 | ARM 경로, 응답 코드, 헤더, LRO 흐름. storage agent는 가짜로 둔다 | Windows, WSL, CI | 없음 |
 | 통합 | storage agent가 실제 커널로 볼륨, 스냅샷, export를 만든다 | WSL. S3를 통과하면 CI에서도 | Linux, root, 커널 모듈 |
 | E2E | 컨테이너가 마운트해 PRD 수락 기준의 데이터 효과를 확인한다 | WSL. S3를 통과하면 CI에서도 | 위 조건과 Docker |
+| E2E (컨트롤 플레인) | 실제 uvicorn 프로세스에 HTTP로 API 계약, 상태 전이, 재시작 복구를 확인한다 (계정·풀) | WSL, CI | `ANF_E2E_API_URL`. root·Docker 불필요 |
 
 - 층은 pytest 마커 `integration`, `e2e`로 나눈다. 마커는 루트 `pyproject.toml`에 등록돼 있다 (`--strict-markers`). 조건이 없으면 건너뛰되, 건너뛴 테스트를 통과로 보고하지 않는다. PRD §8의 UNVERIFIED 규칙과 같다. TDD 훅도 수집된 테스트가 모두 skip되면 GREEN이 아니라 SKIPPED로 보고한다.
 - real-env-verifier는 E2E 층과 같은 기준으로 검증한다. 검증 스크립트는 `backend/tests/e2e/`에 둔다 (TDD 훅의 면제 대상).
@@ -325,7 +326,7 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 
 | 작업 | 트리거 | 내용 |
 | --- | --- | --- |
-| backend | push, PR | 단위 테스트, 계약 테스트, 린트 (도구는 첫 구현 때 정한다). TDD 훅 테스트(`python -m pytest .claude/hooks/tests`)도 돈다 |
+| backend | push, PR | 린트(ruff 0.14.0 기본 규칙), 단위·계약 테스트, 컨트롤 플레인 라이브 API e2e(테스트가 uvicorn을 직접 띄움, root 불필요), TDD 훅 테스트(`python -m pytest .claude/hooks/tests`). skip이 하나라도 있으면 실패한다. `ubuntu-24.04`, Python 3.12. 구현: `.github/workflows/ci.yml`, 설계: `_workspace/ci/02_main_design.md` |
 | frontend | push, PR | 타입 검사, 빌드, 단위 테스트 |
 | data-plane | S3 통과 뒤 추가 | ubuntu 러너에서 모듈을 로드하고 storage agent를 띄운 뒤 통합·E2E 테스트 |
 

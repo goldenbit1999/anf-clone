@@ -56,6 +56,8 @@ Planning is closed. These are decided later, at the point named, and not before:
 - **Setup (WSL)**: `python3 -m venv ~/.venvs/anf-clone`, then from the repo `~/.venvs/anf-clone/bin/pip install -e ".[dev]"`.
 - **Tests**: from the repo root, run `python -m pytest` with the venv's Python (e.g. `.venv-win\Scripts\python -m pytest`). `testpaths`, `pythonpath = ["backend"]`, the `integration`/`e2e` markers, and `addopts` come from the root `pyproject.toml`, so the hook, manual runs, and CI share them. Single test: `python -m pytest path/to/test_x.py::test_name`.
 - **Hook tests**: `python -m pytest .claude/hooks/tests`. They take about 25 s on Windows, so they are not in the default `testpaths`; run them after changing the hook.
+- **Lint**: `ruff check backend .claude/hooks` with ruff 0.14.0 and default rules, e.g. `uvx ruff@0.14.0 check backend .claude/hooks`. Ruff is not a dev dependency, because `pyproject.toml` is part of the product-code hash.
+- **CI** (`.github/workflows/ci.yml`): runs on every push and on PRs to `main` (ubuntu-24.04, Python 3.12). It runs lint, then `python -m pytest` with `ANF_E2E_API_URL` set, so the live API e2e runs too. Any skipped test fails the job. Last come the hook tests. The frontend job comes with the dashboard; the data-plane job comes after spike S3.
 - Frontend type-check and build commands get added when the dashboard project is created. A Python GREEN never stands in for them.
 
 ### TDD hook

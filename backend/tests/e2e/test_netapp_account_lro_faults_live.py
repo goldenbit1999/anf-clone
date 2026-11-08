@@ -34,7 +34,7 @@ def ops_for(db, name):
 
 
 def test_ac08_in_progress_states_with_injected_delay(start_server):
-    srv = start_server(faults=DELAYS)
+    start_server(faults=DELAYS)
     name = "e2e-ac08"
 
     put = call("PUT", account_url(name), {"location": LOC, "tags": {"k": "v"}})

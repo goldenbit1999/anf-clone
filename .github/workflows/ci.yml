@@ -1,0 +1,63 @@
+# FR-11 CI: backend 작업 (설계 _workspace/ci/02_main_design.md).
+# frontend 작업은 대시보드(FR-09) 뒤, data-plane 작업은 스파이크 S3 뒤에 더한다 (ADR §9.3).
+name: ci
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-24.04  # WSL Ubuntu 24.04와 같게 고정 (설계 결정 3)
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"  # D-01
+
+      # CLAUDE.md의 WSL 설정 명령 그대로. TDD 훅도 Linux에서 이 venv를 찾는다 (설계 결정 5)
+      - name: Install
+        run: |
+          python -m venv ~/.venvs/anf-clone
+          ~/.venvs/anf-clone/bin/pip install -e ".[dev]"
+          echo "$HOME/.venvs/anf-clone/bin" >> "$GITHUB_PATH"
+
+      # pyproject.toml은 제품 코드 해시에 들어가므로 ruff는 여기서만 버전을 고정해 설치한다 (설계 결정 4)
+      - name: Lint
+        run: |
+          pip install ruff==0.14.0
+          ruff check backend .claude/hooks
+
+      # 단위·계약 테스트와 라이브 API e2e. e2e는 테스트가 uvicorn을 직접 띄운다 (설계 결정 1)
+      - name: Test
+        env:
+          ANF_E2E_API_URL: http://127.0.0.1:8080
+        run: python -m pytest --junitxml=pytest-results.xml
+
+      # pytest는 skip이 있어도 성공으로 끝난다. skip은 PASS가 아니다 (ADR §9.1, 설계 결정 6)
+      - name: Fail on skipped tests
+        run: |
+          python - <<'EOF'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse("pytest-results.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          tests, skipped = int(suite.get("tests")), int(suite.get("skipped"))
+          print(f"collected {tests}, skipped {skipped}")
+          if tests == 0 or skipped:
+              sys.exit("Skipped tests are not passes. Run them here or deselect them by marker on purpose.")
+          EOF
+
+      - name: Hook tests
+        run: python -m pytest .claude/hooks/tests
