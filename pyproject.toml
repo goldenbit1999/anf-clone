@@ -1,0 +1,29 @@
+# Python 프로젝트 설정의 단일 기준 (ADR D-14). 코드는 backend/ 아래에 둔다.
+# TDD 훅, 수동 실행, CI가 모두 저장소 루트에서 `python -m pytest`로 이 설정을 읽는다.
+
+[project]
+name = "anf-clone"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=9.2"]
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+# 배포 패키지가 아니다. 설치는 의존성만 받는다. backend/의 import 경로는 아래 pythonpath가 잡는다.
+[tool.setuptools]
+packages = []
+
+[tool.pytest.ini_options]
+# 훅 자체의 테스트(.claude/hooks/tests)는 약 25초 걸려 기본 실행에서 뺀다. 훅을 고칠 때와 CI에서 경로를 지정해 돌린다.
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+addopts = ["-rfEs", "--strict-markers"]
+markers = [
+    "integration: Linux 커널과 root가 필요하다. WSL에서 실행한다 (ADR §9.1)",
+    "e2e: Docker 클라이언트 컨테이너로 마운트한다. WSL에서 실행한다 (ADR §9.1)",
+]
