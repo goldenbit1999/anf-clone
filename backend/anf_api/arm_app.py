@@ -22,7 +22,8 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 import anf_api.accounts as accounts
-from anf_api.arm_rules import ACCOUNT_TYPE, API_VERSION, ArmError, check_api_version, operation_path
+import anf_api.capacity_pools as pools
+from anf_api.arm_rules import ACCOUNT_TYPE, API_VERSION, POOL_TYPE, ArmError, check_api_version, operation_path
 from anf_api.lro import LroWorker, operation_status_body, parse_faults
 from anf_api.state_store import Operation, StateStore
 
@@ -34,7 +35,12 @@ _PROVIDER = "/providers/Microsoft.NetApp"
 _ACCOUNTS_IN_RG = "/subscriptions/{subscription_id}/resourceGroups/{resource_group}" + _PROVIDER + "/netAppAccounts"
 _ACCOUNT = _ACCOUNTS_IN_RG + "/{account_name}"
 _ACCOUNTS_IN_SUB = "/subscriptions/{subscription_id}" + _PROVIDER + "/netAppAccounts"
+_POOLS = _ACCOUNT + "/capacityPools"
+_POOL = _POOLS + "/{pool_name}"
 _OPERATION = "/subscriptions/{subscription_id}" + _PROVIDER + "/locations/{location}/operationResults/{operation_id}"
+
+# Location 방식으로 끝난 작업이 돌려줄 리소스 본문 (리소스 종류별)
+_BODIES = {ACCOUNT_TYPE: accounts.account_body, POOL_TYPE: pools.pool_body}
 
 
 def _default_db_path() -> Path:
@@ -54,13 +60,19 @@ def _operation_url(request: Request, op: Operation) -> str:
     return f"{str(request.base_url).rstrip('/')}{path}?api-version={API_VERSION}"
 
 
+def _tracking_headers(request: Request, op: Operation) -> dict:
+    """PATCH·DELETE의 202에 붙이는 두 헤더. ANF는 둘 다 붙인다 (녹화)."""
+    url = _operation_url(request, op)
+    return {"Location": f"{url}&operationResultResponseType=Location", "Azure-AsyncOperation": url}
+
+
 def create_app(db_path: str | Path | None = None, fault_injection: str | None = None) -> FastAPI:
     """앱 팩토리. 인자가 None이면 환경 변수를 읽는다. 결함 주입 값이 잘못되면 ValueError로 시작을 막는다."""
     store = StateStore(db_path or _default_db_path())
     if fault_injection is None:
         fault_injection = os.environ.get("ANF_FAULT_INJECTION")
-    handlers = dict(accounts.HANDLERS)
-    faults = parse_faults(fault_injection, {resource_type for resource_type, _ in handlers})
+    handlers = {**accounts.HANDLERS, **pools.HANDLERS}
+    faults = parse_faults(fault_injection, handlers)
     if faults:
         log.warning("Fault injection is enabled (ANF_FAULT_INJECTION): %s", faults)
     worker = LroWorker(store, handlers, faults)
@@ -127,12 +139,8 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         if op is None:
             return Response(status_code=204)  # 없는 리소스 [스펙 3, 8]
         worker.notify()
-        url = _operation_url(request, op)
         # ANF는 202에 두 헤더를 다 붙인다 (녹화). 본문은 없다.
-        return Response(status_code=202, headers={
-            "Location": f"{url}&operationResultResponseType=Location",
-            "Azure-AsyncOperation": url,
-        })
+        return Response(status_code=202, headers=_tracking_headers(request, op))
 
     @app.get(_ACCOUNTS_IN_RG)
     async def list_accounts_in_resource_group(subscription_id: str, resource_group: str,
@@ -146,6 +154,55 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         check_api_version(api_version)
         return {"value": [accounts.account_body(r)
                           for r in accounts.list_accounts(store, subscription_id)]}
+
+    @app.put(_POOL)
+    async def put_pool(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                       request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        body = await _json_body(request)
+        created, res, op = pools.put_pool(store, subscription_id, resource_group, account_name,
+                                          pool_name, body, request.state.correlation_id)
+        worker.notify()
+        # 계정과 같다: 생성 201, 갱신 200, 둘 다 Azure-AsyncOperation만 (녹화 N1, N3, 풀 설계 결정 1)
+        return JSONResponse(pools.pool_body(res), status_code=201 if created else 200,
+                            headers={"Azure-AsyncOperation": _operation_url(request, op)})
+
+    @app.get(_POOL)
+    async def get_pool(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                       api_version: ApiVersion = None):
+        check_api_version(api_version)
+        return pools.pool_body(
+            pools.get_pool(store, subscription_id, resource_group, account_name, pool_name))
+
+    @app.patch(_POOL)
+    async def patch_pool(subscription_id: str, resource_group: str, account_name: str,
+                         pool_name: str, request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        body = await _json_body(request)
+        res, op = pools.patch_pool(store, subscription_id, resource_group, account_name, pool_name,
+                                   body, request.state.correlation_id)
+        worker.notify()
+        # 계정 PATCH(동기 200)와 달리 풀 PATCH는 202 + Patching 본문 + 두 헤더다 (녹화 N2, P1)
+        return JSONResponse(pools.pool_body(res), status_code=202,
+                            headers=_tracking_headers(request, op))
+
+    @app.delete(_POOL)
+    async def delete_pool(subscription_id: str, resource_group: str, account_name: str,
+                          pool_name: str, request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        op = pools.delete_pool(store, subscription_id, resource_group, account_name, pool_name,
+                               request.state.correlation_id)
+        if op is None:
+            return Response(status_code=204)
+        worker.notify()
+        return Response(status_code=202, headers=_tracking_headers(request, op))
+
+    @app.get(_POOLS)
+    async def list_pools(subscription_id: str, resource_group: str, account_name: str,
+                         api_version: ApiVersion = None):
+        check_api_version(api_version)
+        return {"value": [pools.pool_body(r) for r in
+                          pools.list_pools(store, subscription_id, resource_group, account_name)]}
 
     @app.get(_OPERATION)
     async def operation_result(
@@ -174,7 +231,6 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         if res is None:
             raise ArmError(404, "ResourceNotFound",
                            f"The resource with identifier '{op.resource_id}' is not found.")
-        assert res.type == ACCOUNT_TYPE  # 리소스 종류가 늘면 종류별 본문 함수를 고른다
-        return accounts.account_body(res)
+        return _BODIES[res.type](res)
 
     return app

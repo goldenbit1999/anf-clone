@@ -1,4 +1,4 @@
-"""공통 LRO 계층: 작업 워커, 결함 주입, 작업 상태 본문 (계정 설계 §4.2, §6.2, §6.3)."""
+"""공통 LRO 계층: 작업 워커, 결함 주입, 작업 상태 본문 (계정 설계 §4.2, §6.2, §6.3, 풀 설계 §3·§7의 PATCH)."""
 
 import asyncio
 import time
@@ -9,7 +9,11 @@ from anf_api.lro import Fault, LroWorker, operation_status_body, parse_faults
 from anf_api.state_store import Resource, StateStore
 
 TYPE = "Microsoft.NetApp/netAppAccounts"
+POOL_TYPE = "Microsoft.NetApp/netAppAccounts/capacityPools"
 ACC = "/subscriptions/s1/resourceGroups/rg1/providers/Microsoft.NetApp/netAppAccounts/acc1"
+# 등록된 처리기의 (리소스 종류, 작업). 결함 주입 키는 이 목록에서 만든다.
+ACCOUNT_KEYS = [(TYPE, a) for a in ("CREATE", "UPDATE", "DELETE")]
+POOL_KEYS = [(POOL_TYPE, a) for a in ("CREATE", "UPDATE", "PATCH", "DELETE")]
 
 
 @pytest.fixture
@@ -58,13 +62,13 @@ def drain(worker):
 
 @pytest.mark.parametrize("text", [None, ""])
 def test_no_fault_injection_by_default(text):
-    assert parse_faults(text, [TYPE]) == {}
+    assert parse_faults(text, ACCOUNT_KEYS) == {}
 
 
 def test_parse_faults_reads_delay_and_fail():
     faults = parse_faults(
         '{"netAppAccounts/create": {"delaySeconds": 2.5}, "netAppAccounts/delete": {"fail": true}}',
-        [TYPE],
+        ACCOUNT_KEYS,
     )
     assert faults == {
         "netAppAccounts/create": Fault(delay_seconds=2.5),
@@ -83,8 +87,14 @@ def test_parse_faults_reads_delay_and_fail():
     '{"netAppAccounts/create": {"fail": "yes"}}',
 ])
 def test_invalid_fault_injection_is_rejected(text):
+    """계정에는 PATCH 작업이 없어서(계정 PATCH는 동기) `netAppAccounts/patch`는 받지 않는다."""
     with pytest.raises(ValueError):
-        parse_faults(text, [TYPE])
+        parse_faults(text, ACCOUNT_KEYS)
+
+
+def test_patch_fault_key_is_accepted_for_resource_with_patch_operation():
+    faults = parse_faults('{"capacityPools/patch": {"delaySeconds": 3}}', ACCOUNT_KEYS + POOL_KEYS)
+    assert faults == {"capacityPools/patch": Fault(delay_seconds=3.0)}
 
 
 # --- 워커 ---
@@ -128,6 +138,27 @@ def test_failed_update_restores_previous_values(store):
     res = store.get_resource(ACC)
     assert res.provisioning_state == "Failed"
     assert res.tags == {"old": "1"}
+    assert store.get_operation(op.id).status == "Failed"
+
+
+def test_patch_succeeds_and_resource_becomes_succeeded(store):
+    op = start(store, "PATCH", "Patching")
+    rec = Recorder()
+    drain(LroWorker(store, {(TYPE, "PATCH"): rec}))
+    assert rec.calls == [op.id]
+    assert store.get_operation(op.id).status == "Succeeded"
+    assert store.get_resource(ACC).provisioning_state == "Succeeded"
+
+
+def test_failed_patch_restores_previous_values(store):
+    """PATCH는 PUT 갱신처럼 새 값을 바로 쓰고, 실패하면 되돌린다 (풀 설계 결정 9)."""
+    op = start(store, "PATCH", "Patching", tags={"new": "1"},
+               previous={"tags": {"old": "1"}, "properties": {"size": 1}})
+    drain(LroWorker(store, {(TYPE, "PATCH"): Recorder()}, {"netAppAccounts/patch": Fault(fail=True)}))
+    res = store.get_resource(ACC)
+    assert res.provisioning_state == "Failed"
+    assert res.tags == {"old": "1"}
+    assert res.properties == {"size": 1}
     assert store.get_operation(op.id).status == "Failed"
 
 

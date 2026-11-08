@@ -49,6 +49,8 @@ RG = "rg-e2e"
 OTHER_RG = "rg-e2e-other"
 LOC = "westus2"
 ACCOUNT_TYPE = "Microsoft.NetApp/netAppAccounts"
+POOL_TYPE = f"{ACCOUNT_TYPE}/capacityPools"
+TIB = 1 << 40
 TERMINAL = ("Succeeded", "Failed", "Canceled")
 UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 
@@ -161,6 +163,42 @@ def create_account(name: str, tags: dict | None = None, rg: str = RG) -> dict:
     g = call("GET", account_url(name, rg))
     assert g.status == 200, g.raw
     return g.json()
+
+
+def pool_path(account: str, name: str, rg: str = RG, sub: str = SUB) -> str:
+    return f"{account_path(account, rg, sub)}/capacityPools/{name}"
+
+
+def pool_url(account: str, name: str, rg: str = RG, sub: str = SUB) -> str:
+    return f"{pool_path(account, name, rg, sub)}?{V}"
+
+
+def pool_list_url(account: str, rg: str = RG, sub: str = SUB) -> str:
+    return f"{account_path(account, rg, sub)}/capacityPools?{V}"
+
+
+def create_pool(account: str, name: str, size: int = 4 * TIB, service_level: str = "Premium",
+                tags: dict | None = None, timeout: float = POLL_TIMEOUT) -> dict:
+    """새 풀을 PUT하고 작업이 Succeeded가 될 때까지 기다린다. 반환: GET 본문."""
+    body = {"location": LOC, "properties": {"size": size, "serviceLevel": service_level}}
+    if tags is not None:
+        body["tags"] = tags
+    r = call("PUT", pool_url(account, name), body)
+    assert r.status == 201, r.raw
+    final, _ = poll(r.headers["azure-asyncoperation"], timeout)
+    assert final["status"] == "Succeeded", final
+    g = call("GET", pool_url(account, name))
+    assert g.status == 200, g.raw
+    return g.json()
+
+
+def db_resources(db_path: Path) -> list[dict]:
+    """상태 저장소의 리소스 행 (보조 증거: 리소스가 생기거나 지워졌는지 확인할 때 쓴다)."""
+    with closing(sqlite3.connect(db_path, timeout=5)) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, type, parent_id, provisioning_state FROM resources ORDER BY id").fetchall()
+    return [dict(r) for r in rows]
 
 
 def db_operations(db_path: Path) -> list[dict]:
