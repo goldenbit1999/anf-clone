@@ -106,7 +106,16 @@ FR마다 거칠 단계는 PRD §8의 "FR별 사이클 단계" 표를 따른다. 
    3. 예상한 RED를 확인한 뒤에 구현을 쓴다. 훅은 짝 테스트에 지금 내용의 실행 근거가 없으면 구현 파일 수정을 거절한다. 다만 GREEN인 테스트로도 수정을 허용하므로(리팩터링을 위해), 새 동작을 RED 없이 구현하지 않는 것은 이 절차로 지킨다.
    4. 통과시키는 최소한의 코드를 쓰고(GREEN) 정리한다. 동작을 바꾸지 않는 리팩터링은 기존 테스트와 직전 GREEN으로 진행한다.
    - 훅의 보장 범위와 한계는 `CLAUDE.md`의 TDD hook 절에 있다. Linux 전용 테스트가 Windows에서 skip되는 것은 허용하지만, skip은 실환경 PASS가 아니다.
-4. 구현을 마치면 검증 대상 코드를 `00_progress.md`에 적는다. 커밋 SHA를 쓰고, 미커밋 변경이 있으면 변경 파일 목록과 `git diff HEAD -- <제품 코드 경로> | sha256sum` 값을 함께 쓴다.
+4. 구현을 마치면 검증 대상 코드를 `00_progress.md`에 적는다. 제품 코드(`pyproject.toml`과 `backend/`에서 `backend/tests/`를 뺀 것)의 내용 해시를 아래 명령으로 계산해 쓴다. 커밋했으면 커밋 SHA를, 미커밋이면 변경 파일 목록을 함께 쓴다.
+   ```bash
+   # 작업 트리 (미커밋 변경과 새 파일 포함)
+   git ls-files -co --exclude-standard -- pyproject.toml backend ':!backend/tests' | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | tr -d '\r' | sha256sum
+   # 커밋 (SHA=<커밋>)
+   git ls-tree -r --name-only "$SHA" -- pyproject.toml backend | grep -v '^backend/tests/' | LC_ALL=C sort | while IFS= read -r f; do git show "$SHA:$f"; done | tr -d '\r' | sha256sum
+   ```
+   - 내용이 같으면 두 명령의 값이 같다. 그래서 미커밋 상태에서 검증한 해시를 merge 뒤의 커밋과 비교할 수 있다. Git Bash와 WSL에서도 같은 값이 나온다.
+   - CR을 지우는 이유: `core.autocrlf=true`라서 git이 체크아웃한 파일은 CRLF이고 도구로 새로 쓴 파일은 LF다. 그대로 계산하면 같은 코드도 줄 끝 때문에 해시가 달라진다. 용량 풀 merge 뒤에 실제로 그랬다.
+   - `git diff HEAD`를 쓰지 않는 이유: 새 파일(untracked)을 잡지 못하고, 값이 HEAD에 따라 달라 merge 뒤에 다시 계산할 수 없다.
 
 ## 4단계: 실환경 검증
 
@@ -150,7 +159,7 @@ Agent 도구의 `name` 인자는 에이전트 팀을 켠 세션에서만 쓸 수
 - FR: FR-nn
 - 마지막 완료 단계: n
 - 재개할 단계: n (이유)
-- 검증 대상 코드: 커밋 SHA (미커밋이면 변경 파일 목록과 diff 해시)
+- 검증 대상 코드: 제품 코드 내용 해시 (3단계 4번의 명령)와 커밋 SHA. 미커밋이면 커밋 SHA 대신 변경 파일 목록
 - verifier 에이전트 ID:
 - 미해결: (멈춘 원인, 사용자에게 물은 것)
 

@@ -4,7 +4,7 @@
 - FR: FR-03 (용량 풀). 계정 사이클에서 옮겨 온 기준: 자식 풀이 남은 계정 DELETE의 `409 CannotDeleteResource` (FR-02, 계정 설계 결정 8)
 - 마지막 완료 단계: 6
 - 재개할 단계: 없음. 볼륨 사이클에서 CV-1~CV-3(용량 검사 실환경)을 검증한다
-- 검증 대상 코드: 미커밋 (기준 커밋 `e602d11`). 제품 코드 `pyproject.toml`, `backend/anf_api/{__init__,accounts,arm_app,arm_rules,capacity_pools,lro,state_store}.py`를 이 순서로 이어 붙인 sha256 = `a461dbaf36e65c53e3b8a0bb2aee3379fa391f8b9fb5889c08b2247e8a038485` (`cat pyproject.toml backend/anf_api/__init__.py backend/anf_api/accounts.py backend/anf_api/arm_app.py backend/anf_api/arm_rules.py backend/anf_api/capacity_pools.py backend/anf_api/lro.py backend/anf_api/state_store.py | sha256sum`, Git Bash와 WSL 값 같음). `capacity_pools.py`가 새 파일이라 `git diff HEAD`에 잡히지 않아 파일 해시로 남긴다. 1회차 검증 대상은 `f58df82db294ebb8061950d4af80ca8e83996e297df8c3a7775952f4bd154723`였고, 그 뒤 바뀐 것은 `capacity_pools.py`의 오류 메시지 두 줄뿐이다 (`02_main_design.md` "구현 중 변경")
+- 검증 대상 코드: 커밋 `41f863d` (main, PR #5 squash merge, 2026-11-07). 제품 코드 내용 해시 `f2b70558c8189ab44ba210081d30ed52978c8e56f529ddba84edeb12656bc955` (`anf-feature-cycle` 3단계 4번의 명령, 줄 끝 무관). 검증은 미커밋 상태에서 옛 방식 해시 `a461dbaf…`로 했다. 옛 방식은 파일 8개를 그대로 이어 붙여 줄 끝에 따라 값이 달라진다. `41f863d`의 내용을 검증 당시의 줄 끝(`capacity_pools.py`만 LF, 나머지 7개 CRLF)으로 재구성하면 `a461dbaf…`가 정확히 나오므로, 검증한 코드와 커밋된 코드는 같다
 - verifier 에이전트 ID: a768b20fddf69bd04 (1회차·2회차, 2026-11-07. 계정 회귀 재검증도 함께 맡김)
 - 미해결: 없음
 
@@ -54,4 +54,5 @@ AC-06 외의 1회차 PASS를 유지하는 근거: 1회차 뒤의 변경은 `_che
 - 2026-11-07 단계 4 2회차 완료 — PASS 13 / FAIL 0 / UNVERIFIED 0 (`04_verifier_report_r2.md`). AC-06을 실환경에서 다시 판정했다: Flexible·StandardZRS·Double의 새 메시지, 나머지 경우는 1회차와 글자 단위로 같음, 거절 뒤 작업·상태 변화 없음. e2e 회귀 63 passed × 2회(풀 30+9, 계정 16+8). 해시는 시작·끝, Git Bash·WSL 모두 `a461dbaf…`. verifier가 `test_capacity_pool_live.py`에 StandardZRS 경우를 더하고 미룬 기능 다섯 경우를 메시지 전체로 비교하게 바꿨다(Windows 전체 279 passed, 63 skipped). 검증 시작 때 8080에 이 검증과 무관한 anf-api(pid 8387, `manual-test.db`, 지연 주입 켜짐)가 떠 있어 verifier는 8081을 썼다. 리더가 확인했을 때는 이미 꺼져 있었다.
 - 2026-11-07 단계 5 시작 — concept-explainer에 `docs/concepts/capacity-pool.md`를 맡겼다 (01·02·04·04_r2·00_progress, 변경 파일 목록 전달).
 - 2026-11-07 단계 5 완료 — `docs/concepts/capacity-pool.md` (344줄, 면접 Q&A 9개). 리더가 `capacity_pools.py` 인용 범위를 함수 경계와, 계약 테스트 수(43개 수집)를 실행으로 대조했다. 브리프에 없어 쓰지 못한 것(풀에 대응하는 ONTAP 객체, 클론이 정한 오류 코드의 실서비스 값 등)은 문서 부록에 있다.
-- 2026-11-07 단계 6 완료 — `done`. 검증 대상 코드 `a461dbaf…`(미커밋). 커밋하면 커밋 SHA로 바꾼다.
+- 2026-11-07 단계 6 완료 — `done`. 검증 대상 코드 `a461dbaf…`(미커밋).
+- 2026-11-07 기록 정리 — PR #5 squash merge(`41f863d`) 뒤 옛 방식으로 다시 계산한 해시가 `9510fb90…`로 달라 보였다. 원인은 줄 끝이다: merge 뒤 체크아웃으로 모든 파일이 CRLF가 됐다. 커밋 내용을 검증 당시 줄 끝으로 재구성하면 `a461dbaf…`가 나온다. 검증 대상 코드를 커밋 `41f863d`와 줄 끝에 무관한 내용 해시 `f2b70558…`로 바꾸고, 해시 절차를 고쳤다(`anf-feature-cycle` 3단계 4번, `real-env-verify` 보고서 형식, `real-env-verifier` 입력). 판정은 그대로다.

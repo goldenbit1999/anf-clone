@@ -4,7 +4,7 @@
 - FR: FR-01 (비동기 작업, 공통 LRO 계층), FR-02 (NetApp 계정)
 - 마지막 완료 단계: 6
 - 재개할 단계: 없음
-- 검증 대상 코드: 미커밋 공통 코드 (기준 커밋 `e602d11`). 용량 풀 진행 기록과 같은 해시 `a461dbaf36e65c53e3b8a0bb2aee3379fa391f8b9fb5889c08b2247e8a038485` (명령은 `_workspace/capacity-pool/00_progress.md`). 이 코드로 계정 e2e 24개를 통과했다 (`_workspace/capacity-pool/04_verifier_report_r2.md`). AC-01~AC-13 판정은 `f58df82d…`로 한 2회차(`04_verifier_report_r2.md`). 그 전: 커밋 `e602d11` (PR #4) = 파일 해시 `bf4e61d3f5e6f9326985b7009519385eb5706913bfe85877a39bea2284bd01d0`로 1회차
+- 검증 대상 코드: 커밋 `41f863d` (main, PR #5 squash merge, 2026-11-07). 제품 코드 내용 해시 `f2b70558c8189ab44ba210081d30ed52978c8e56f529ddba84edeb12656bc955` (`anf-feature-cycle` 3단계 4번의 명령, 줄 끝 무관). 검증은 미커밋 상태에서 옛 방식 해시 `a461dbaf…`로 했다. 옛 방식은 파일 8개를 그대로 이어 붙여 줄 끝에 따라 값이 달라진다. `41f863d`의 내용을 검증 당시의 줄 끝(`capacity_pools.py`만 LF, 나머지 7개 CRLF)으로 재구성하면 `a461dbaf…`가 정확히 나오므로, 검증한 코드와 커밋된 코드는 같다
 - verifier 에이전트 ID: adc067e6dfaf099df (1회차), a768b20fddf69bd04 (2회차, 용량 풀 verifier가 함께 맡음)
 - 미해결: 없음
 
@@ -55,4 +55,5 @@
 - 2026-11-07 무효화 — 용량 풀 사이클(3단계)이 계정이 쓰는 공통 코드를 바꿨다: `accounts.py`(오류·본문 검사 함수를 `arm_rules.py`로, 자식 검사를 `Tx.ensure_no_children`으로 옮김. 동작 변화 없음), `lro.py`(PATCH 작업, 결함 키를 처리기에서 만듦), `state_store.py`, `arm_app.py`(풀 라우트, 종류별 본문). 계정 단위·계약 테스트는 모두 통과하지만, 검증 대상 코드 해시가 `bf4e61d3…`에서 `f58df82d…`로 바뀌어 AC-01~AC-13의 실환경 결과는 다시 확인하기 전까지 유효하지 않다. 개념 문서의 코드 인용(`accounts.py` 줄 번호, 자식 검사 위치 `accounts.py:192-200`)도 낡았다.
 - 2026-11-07 단계 4 2회차 완료 — 용량 풀 verifier(a768b20fddf69bd04)가 계정 e2e 회귀를 새 공통 코드(`f58df82d…`)로 돌렸다: PASS 13 / FAIL 0 / UNVERIFIED 0 (`04_verifier_report_r2.md`). 남은 일: 5단계(개념 문서의 낡은 코드 인용 고치기) 뒤 `done`으로 복원.
 - 2026-11-07 단계 5 완료 (문서만 수정) — concept-explainer가 `docs/concepts/netapp-account.md`의 코드 인용 약 50곳을 현재 코드에 맞췄다. 자식 검사 위치(`Tx.ensure_no_children`), 결함 키를 처리기에서 만드는 방식, `_finish`의 UPDATE·PATCH 되돌리기, 자식 409의 실환경 PASS(풀 AC-09), 2회차 보고서를 반영했다. 면접 Q&A 8개 유지, Q7 한 문장만 고침. 리더가 인용 일부(`accounts.py:164`, `state_store.py:152-164`, `lro.py:147`, `arm_rules.py:22·35·107`, `state_store.py:260`)를 코드와 대조했다. 수락 기준은 그대로다. 남은 일: 풀 2회차의 계정 e2e 회귀(`a461dbaf…`) 결과를 받으면 `done`으로 복원.
-- 2026-11-07 단계 6 완료 — `done` 복원. 용량 풀 2회차에서 계정 e2e(`test_netapp_account_live.py` 16, `test_netapp_account_lro_faults_live.py` 8)를 새 코드 `a461dbaf…`로 두 번 돌려 모두 통과했다. `f58df82d…` → `a461dbaf…` 사이에 바뀐 것은 풀 전용 오류 메시지 두 줄뿐이라 계정 AC 판정(2회차)은 그대로 유효하다. 커밋하면 검증 대상 코드를 커밋 SHA로 바꾼다.
+- 2026-11-07 단계 6 완료 — `done` 복원. 용량 풀 2회차에서 계정 e2e(`test_netapp_account_live.py` 16, `test_netapp_account_lro_faults_live.py` 8)를 새 코드 `a461dbaf…`로 두 번 돌려 모두 통과했다. `f58df82d…` → `a461dbaf…` 사이에 바뀐 것은 풀 전용 오류 메시지 두 줄뿐이라 계정 AC 판정(2회차)은 그대로 유효하다.
+- 2026-11-07 기록 정리 — 공통 코드가 PR #5로 merge됐다(`41f863d`). 검증 대상 코드를 그 커밋과 줄 끝에 무관한 내용 해시 `f2b70558…`로 바꿨다. 이유는 용량 풀 진행 기록의 같은 날 "기록 정리" 항목에 있다. 판정은 그대로다.

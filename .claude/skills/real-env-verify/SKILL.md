@@ -79,7 +79,8 @@ TDD 훅(`.claude/hooks/tdd_guard.py`)은 서브에이전트의 Write·Edit 호�
 # {기능} 검증 보고서 — {회차}회차
 
 - 검증일:
-- 검증 대상 코드: 커밋 SHA (`git rev-parse HEAD`). 미커밋 변경이 있으면 변경 파일 목록과 `git diff HEAD -- <제품 코드 경로> | sha256sum` 값
+- 검증 대상 코드: 제품 코드 내용 해시(검증 시작과 끝에 계산한 값), 커밋 SHA (`git rev-parse HEAD`), 미커밋 변경 파일 목록. 해시 명령은 아래와 같다. 줄 끝(CRLF/LF)과 새 파일에 상관없이 내용이 같으면 같은 값이 나온다 (`anf-feature-cycle` 3단계 4번):
+  `git ls-files -co --exclude-standard -- pyproject.toml backend ':!backend/tests' | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | tr -d '\r' | sha256sum`
 - 이번 회차 범위: 전체 | 재검증(항목 ID 목록과, 수정의 영향을 받아 다시 실행한 항목)
 
 ## 환경 사전 점검

@@ -30,7 +30,7 @@ model: opus
 - **입력**: 리더가 프롬프트로 넘긴다.
   - `_workspace/{feature}/01_researcher_brief.md`
   - `_workspace/{feature}/02_main_design.md`
-  - 검증 대상 코드 (커밋 SHA, 미커밋이면 diff 해시)
+  - 검증 대상 코드 (제품 코드 내용 해시와 커밋 SHA. 해시 명령은 `real-env-verify` 스킬의 보고서 형식에 있다)
   - 변경된 코드 위치
   - 출력 경로
   - 이전 보고서 경로 (재검증이거나, 이전 verifier를 이어 갈 수 없어 새로 띄운 경우)
