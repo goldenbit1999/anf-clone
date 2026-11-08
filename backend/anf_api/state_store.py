@@ -136,6 +136,13 @@ class Tx:
         rows = self._conn.execute(sql + " ORDER BY name COLLATE NOCASE", args).fetchall()
         return [_resource(r) for r in rows]
 
+    def all_of_type(self, type: str) -> list[Resource]:
+        """모든 구독에서 한 종류의 리소스. 클론 전체에서 유일해야 하는 값을 검사할 때 쓴다."""
+        rows = self._conn.execute(
+            "SELECT * FROM resources WHERE type = ? ORDER BY id COLLATE NOCASE", (type,)
+        ).fetchall()
+        return [_resource(r) for r in rows]
+
     def child_ids(self, parent_id: str, limit: int = 5) -> list[str]:
         rows = self._conn.execute(
             "SELECT id FROM resources WHERE parent_id = ? ORDER BY id LIMIT ?", (parent_id, limit)

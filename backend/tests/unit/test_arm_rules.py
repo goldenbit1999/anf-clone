@@ -6,6 +6,7 @@ from anf_api.arm_rules import (
     ACCOUNT_TYPE,
     API_VERSION,
     POOL_TYPE,
+    VOLUME_TYPE,
     ArmError,
     account_id,
     check_account_name,
@@ -13,6 +14,7 @@ from anf_api.arm_rules import (
     check_pool_name,
     check_resource_group_name,
     check_tags,
+    check_volume_name,
     invalid_content,
     location_conflict,
     not_found,
@@ -20,6 +22,7 @@ from anf_api.arm_rules import (
     pool_id,
     unknown_property,
     unsupported_property,
+    volume_id,
 )
 
 
@@ -104,6 +107,30 @@ def test_pool_id_nests_under_account():
     assert pool_id("sub1", "rg1", "acc1", "pool1") == (
         "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.NetApp/netAppAccounts/acc1"
         "/capacityPools/pool1"
+    )
+
+
+# --- 볼륨 (볼륨 설계 §4.3) ---
+
+@pytest.mark.parametrize("name", ["v", "vol1", "my-vol_01", "V" * 64])
+def test_valid_volume_names_pass(name):
+    check_volume_name(name)
+
+
+# 볼륨 이름은 풀과 달리 영문자로 시작해야 한다 [볼륨 브리프, 스펙 2]
+@pytest.mark.parametrize("name", ["", "1vol", "-v", "_v", "a.b", "a b", "V" * 65])
+def test_invalid_volume_names_are_400_invalid_resource_name(name):
+    with pytest.raises(ArmError) as e:
+        check_volume_name(name)
+    assert (e.value.status, e.value.code) == (400, "InvalidResourceName")
+    assert "volume" in e.value.message
+
+
+def test_volume_id_nests_under_pool():
+    assert VOLUME_TYPE == "Microsoft.NetApp/netAppAccounts/capacityPools/volumes"
+    assert volume_id("sub1", "rg1", "acc1", "pool1", "vol1") == (
+        "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.NetApp/netAppAccounts/acc1"
+        "/capacityPools/pool1/volumes/vol1"
     )
 
 

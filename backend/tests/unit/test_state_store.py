@@ -57,6 +57,18 @@ def test_list_filters_by_type_subscription_and_resource_group(store):
     assert store.list_resources(TYPE, "s2") == []
 
 
+def test_all_of_type_spans_subscriptions(store):
+    # 볼륨 경로(creationToken)는 클론 전체에서 유일하다 (볼륨 설계 결정 15)
+    other = ACC.replace("s1", "s2").replace("acc1", "acc2")
+    with store.transaction() as tx:
+        tx.put_resource(make_account())
+        tx.put_resource(Resource(
+            id=other, type=TYPE, subscription_id="s2", resource_group="rg1", name="acc2",
+            location="westus2", tags={}, properties={}, provisioning_state="Succeeded"))
+        assert [r.id for r in tx.all_of_type(TYPE)] == [ACC, other]
+        assert tx.all_of_type(TYPE + "/capacityPools") == []
+
+
 def test_child_ids_returns_resources_with_parent(store):
     pool = ACC + "/capacityPools/p1"
     with store.transaction() as tx:

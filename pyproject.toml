@@ -27,4 +27,5 @@ addopts = ["-rfEs", "--strict-markers"]
 markers = [
     "integration: Linux 커널과 root가 필요하다. WSL에서 실행한다 (ADR §9.1)",
     "e2e: Docker 클라이언트 컨테이너로 마운트한다. WSL에서 실행한다 (ADR §9.1)",
+    "dataplane: WSL 데이터 플레인(root, LVM, knfsd, Docker)이 필요하다. CI는 선택에서 뺀다 (볼륨 설계 §6.3)",
 ]

@@ -2,6 +2,9 @@ import pytest
 
 from live_api import Server
 
+# 볼륨 e2e(test_volume_*_live.py)의 픽스처. 도우미 모듈에 두고 여기서 등록한다
+from dataplane_live import agent, api, clients  # noqa: F401
+
 
 @pytest.fixture
 def start_server(tmp_path):

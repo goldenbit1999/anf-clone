@@ -1,0 +1,4 @@
+# WSL과 컨테이너 안에서 실행하는 파일은 Windows 체크아웃(core.autocrlf=true)에서도 LF로 둔다.
+# CRLF이면 /bin/sh가 스크립트를 읽지 못하고, nfs.conf 값 끝에 \r이 붙는다.
+*.sh text eol=lf
+backend/storage_agent/nfs_server/** text eol=lf
