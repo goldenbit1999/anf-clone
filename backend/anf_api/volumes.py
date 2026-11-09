@@ -162,10 +162,9 @@ def _check_property(key: str, value, min_size: int):
         if not isinstance(value, dict):
             raise invalid_content("The 'properties.exportPolicy' property must be an object.")
         return value
-    if key == "throughputMibps":  # 소수를 받고 받은 값을 그대로 저장한다 (처리량 결정 3)
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not 1 <= value <= _MAX_THROUGHPUT):
-            raise invalid_content("The 'properties.throughputMibps' property must be a number from 1 to 4500.")
+    if key == "throughputMibps":  # 소수를 받고 받은 값을 그대로 저장한다 (처리량 결정 3). 범위는 _check_throughput_range
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _throughput_range()
         return float(value)
     if key == "snapshotId":  # 스냅샷의 ARM 리소스 ID (format: arm-id) [복원 브리프 스펙 1·2]
         if not isinstance(value, str) or not _SNAPSHOT_ID.fullmatch(value):
@@ -178,6 +177,28 @@ def _check_property(key: str, value, min_size: int):
     if not isinstance(value, str):
         raise invalid_content("The 'properties.fileSystemId' property must be a string.")
     return value
+
+
+def _throughput_range() -> ArmError:
+    return invalid_content("The 'properties.throughputMibps' property must be a number from 1 to 4500.")
+
+
+def _check_throughput_range(changes: dict) -> None:
+    """새 값의 범위 1~4,500 (처리량 결정 3). 생성은 늘 보고, 갱신은 값을 바꿀 때만 본다 (_settle_throughput)."""
+    mibps = changes.get("throughputMibps")
+    if mibps is not None and not 1 <= mibps <= _MAX_THROUGHPUT:  # nan도 여기서 거절된다
+        raise _throughput_range()
+
+
+def _settle_throughput(props: dict, changes: dict) -> dict:
+    """갱신: 저장된 값과 소수 셋째 자리까지 같으면 바꾸지 않는 것으로 보고 저장된 값을 둔다. 그때는 범위를 보지
+    않는다. Auto → Manual 전환이 채운 값은 1 미만일 수 있어(Standard 50 GiB = 0.781) GET 본문 재PUT이 되게
+    하려는 것이다 (처리량 설계 §9-5)."""
+    mibps, old = changes.get("throughputMibps"), props.get("throughputMibps")
+    if mibps is not None and old is not None and round(mibps, 3) == round(old, 3):
+        return {**changes, "throughputMibps": old}
+    _check_throughput_range(changes)
+    return changes
 
 
 def _check_properties(props, min_size: int) -> dict:
@@ -482,6 +503,7 @@ def put_volume(store: StateStore, subscription_id: str, resource_group: str, acc
     with store.transaction() as tx:
         existing = tx.get_resource(rid)
         if existing is None:
+            _check_throughput_range(changes)  # 본문 검사라 풀 검사보다 먼저다
             res = _new_volume(tx, rid, parent_id, subscription_id, resource_group, name, location,
                               tags, changes)
             op = tx.create_operation(res, "CREATE", "Creating", correlation_id=correlation_id)
@@ -491,6 +513,7 @@ def put_volume(store: StateStore, subscription_id: str, resource_group: str, acc
         if existing.location.lower() != location.lower():
             raise location_conflict(existing.name, existing.resource_group, existing.location, location)
         # 빠진 속성은 기존 값을 유지한다 (풀 결정 8과 같음)
+        changes = _settle_throughput(existing.properties, changes)
         properties = _apply_update(existing.properties, changes)
         _check_throughput_change(tx, existing, changes)
         previous = {"tags": existing.tags, "properties": existing.properties}
@@ -516,6 +539,7 @@ def patch_volume(store: StateStore, subscription_id: str, resource_group: str, a
         _ensure_terminal(tx, res)
         if location is not None and res.location.lower() != location.lower():
             raise location_conflict(res.name, res.resource_group, res.location, location)
+        changes = _settle_throughput(res.properties, changes)
         properties = _apply_update(res.properties, changes)
         _check_throughput_change(tx, res, changes)
         previous = {"tags": res.tags, "properties": res.properties}

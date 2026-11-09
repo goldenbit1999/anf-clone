@@ -594,6 +594,46 @@ def test_lowering_or_resending_a_limit_skips_the_budget(store):
     mpatch(store, {"properties": {"throughputMibps": 20}}, "v2")
 
 
+def set_throughput(store, name, mibps):
+    """Auto → Manual 전환이 채운 값처럼 행에 직접 쓴다 (결정 6). 반올림한 Auto 값은 1 미만일 수 있다."""
+    with store.transaction() as tx:
+        v = tx.get_resource(MANUAL + "/volumes/" + name)
+        v.properties = {**v.properties, "throughputMibps": mibps}
+        tx.put_resource(v)
+
+
+def test_resending_a_stored_limit_below_1_skips_the_range(store):
+    # 갱신에서 저장된 값과 같은 값(소수 셋째 자리)은 1~4,500을 보지 않고 그대로 둔다. 바꾸는 값만 본다 (§9-5)
+    manual_pool(store)
+    mcreate(store, "v1", 10)
+    set_throughput(store, "v1", 0.125)
+    b = volumes.volume_body(store.get_resource(MANUAL + "/volumes/v1"))
+    created, res, op = put(store, b, "v1", "manual")
+    assert (created, op.action, res.properties["throughputMibps"]) == (False, "UPDATE", 0.125)
+    finish(store, op)
+    res, op = mpatch(store, {"properties": {"throughputMibps": 0.1254}}, "v1")  # 셋째 자리까지 같다
+    assert (op.action, res.properties["throughputMibps"]) == ("PATCH", 0.125)
+    finish(store, op)
+    for fn, b in ((mpatch, {"properties": {"throughputMibps": 0.5}}),
+                  (mpatch, {"properties": {"throughputMibps": 0.126}}),
+                  (lambda s, b, n: put(s, b, n, "manual"), body(token="v1", throughputMibps=0.5))):
+        e = arm_error(fn, store, b, "v1")
+        assert (e.status, e.code, e.message) == (400, "InvalidRequestContent", RANGE)
+    assert store.get_resource(MANUAL + "/volumes/v1").properties["throughputMibps"] == 0.125
+    e = arm_error(put, store, body(token="v2", throughputMibps=0.125), "v2", "manual")  # 새 볼륨은 늘 1~4,500
+    assert (e.status, e.code, e.message) == (400, "InvalidRequestContent", RANGE)
+
+
+def test_resending_a_stored_limit_passes_an_overcommitted_budget(store):
+    # 옮겨 받은 합이 총 처리량을 넘는 풀에서도 같은 값 재PUT은 예산을 보지 않는다 (§9-1)
+    manual_pool(store)  # 128 MiB/s
+    mcreate(store, "v1", 100)
+    mcreate(store, "v2", 28)
+    set_throughput(store, "v1", 100.5)
+    created, res, op = put(store, body(token="v2", throughputMibps=28), "v2", "manual")
+    assert (created, op.action, res.properties["throughputMibps"]) == (False, "UPDATE", 28.0)
+
+
 def test_put_back_the_get_body_of_a_manual_volume(store):
     manual_pool(store)
     b = volumes.volume_body(mcreate(store, "v1", 12.5))

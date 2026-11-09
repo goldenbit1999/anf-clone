@@ -229,6 +229,46 @@ def test_ac08_rejections_change_nothing(agent, api):
         delete_volume(name, pool=pool)
 
 
+# --- AC-09 (처리량 설계 §9-5) ---
+
+
+def test_ac09_switched_volume_below_1_takes_its_get_body_back(agent, api):
+    """전환이 채운 1 미만 값(1 GiB Ultra = 0.125)은 갱신에서 같은 값이면 받는다. 바꾸는 값만 1~4,500이다.
+    전환 전후 값·풀 합·HTB rate와 잰 처리량은 데이터 파일의 AC-09가 본다."""
+    api()
+    create_account(ACCT)
+    create_pool(ACCT, "sw", TIB, "Ultra")  # Auto
+    *_, v = make("w1", token("t9"), "sw")
+    fsid = fsid_of(v)
+    r = call("PATCH", pool_url(ACCT, "sw"), {"properties": {"qosType": "Manual"}})
+    assert r.status == 202, r.raw
+    switched, _ = poll(r.headers["azure-asyncoperation"], POLL)
+    got = get_volume("w1", "sw")
+    tc_before = tc_state(fsid)
+    put = call("PUT", vol_url(ACCT, "sw", "w1"), got)  # GET 본문 그대로
+    assert put.status == 200, put.raw
+    put_final, put_seen = poll(put.headers["azure-asyncoperation"], POLL)
+    after_put = limits("w1", "sw")
+    p = patch_volume("w1", "sw", {"throughputMibps": 0.125})
+    assert p.status == 202, p.raw
+    patch_final, _ = poll(p.headers["azure-asyncoperation"], POLL)
+    bad = error_of(patch_volume("w1", "sw", {"throughputMibps": 0.5}))
+    after = {**limits("w1", "sw"), "utilized": pool_props("sw")["utilizedThroughputMibps"]}
+    tc_after = tc_state(fsid)
+    note("AC-09 re-PUT of a switched volume", switched=switched["status"], get=got["properties"],
+         put=put.json()["properties"]["provisioningState"], put_seen=put_seen, put_final=put_final["status"],
+         after_put=after_put, patch_final=patch_final["status"], changed_below_1=bad, after=after,
+         tc_before=tc_before, tc_after=tc_after)
+    delete_volume("w1", pool="sw")
+    assert switched["status"] == "Succeeded" and got["properties"]["throughputMibps"] == 0.125
+    assert put.json()["properties"]["provisioningState"] == "Updating" and put_final["status"] == "Succeeded"
+    assert after_put == {"throughputMibps": 0.125, "actualThroughputMibps": 0.125, "provisioningState": "Succeeded"}
+    assert patch_final["status"] == "Succeeded"
+    assert bad == (400, "InvalidRequestContent", RANGE)
+    assert after == {**after_put, "utilized": 0.125}
+    assert matches(tc_before, 0.125) and matches(tc_after, 0.125), (tc_before, tc_after)
+
+
 # --- AC-10 ---
 
 
