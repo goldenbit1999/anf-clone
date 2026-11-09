@@ -42,7 +42,7 @@ class FakeStorage:
         self.ips: dict[str, str] = {}
         self.snapshots: dict[str, dict[str, dict]] = {}  # 볼륨 uuid → 스냅샷 uuid → 레코드
 
-    async def ensure_volume(self, uuid_, path, size, perms, protocol, correlation_id=None, clone=None):
+    async def ensure_volume(self, uuid_, path, size, perms, protocol, correlation_id=None, clone=None, qos=None):
         self.calls.append(("ensure_volume", uuid_, path, size, perms, protocol, clone))
         records = self.snapshots.setdefault(uuid_, {})
         if clone is not None and not records:
@@ -212,7 +212,8 @@ def test_new_volume_in_another_pool_follows_its_own_pool(client, storage):
     put_and_wait(client, url, new_body(protocolTypes=["NFSv3"], unixPermissions="0700"))
 
     props = client.get(url).json()["properties"]
-    assert (props["serviceLevel"], props["actualThroughputMibps"]) == ("Standard", 1.5625)
+    # 100 GiB × Standard 16 = 1.5625, 소수 셋째 자리 half-even (처리량 결정 2)
+    assert (props["serviceLevel"], props["actualThroughputMibps"]) == ("Standard", 1.562)
     assert (props["protocolTypes"], props["unixPermissions"]) == (["NFSv3"], "0700")
     assert props["originatingResourceId"] == snap_path("s2")
     assert storage.calls[-1][5:] == ("nfs3", (client.get(VOL).json()["properties"]["fileSystemId"],

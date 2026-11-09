@@ -7,7 +7,9 @@
 풀이 볼륨에 주는 효과는 두 가지 규칙이다.
 - 용량: 볼륨 할당량(`usageThreshold`) 합 ≤ 풀 `size`. 풀 쪽 검사(축소 하한)는 여기에 있고,
   볼륨 생성 쪽 검사는 볼륨 사이클에서 같은 규칙으로 만든다 (설계 §6).
-- 처리량: 풀 총 처리량 = 풀 TiB × 서비스 수준 단가. 실제 I/O 제한은 FR-08에서 한다.
+- 처리량: 풀 총 처리량 = 풀 TiB × 서비스 수준 단가. 볼륨 한도(Auto는 할당량 공식, Manual은 `throughputMibps`)의
+  합이 `utilizedThroughputMibps`다. Manual 풀은 그 합이 총 처리량을 넘지 않게 한다 (처리량 설계 결정 5·7).
+  볼륨 쪽 예산 검사는 volumes.py에 있다. 실제 I/O 제한은 agent가 볼륨마다 건다 (처리량 결정 8·9).
 
 규칙 위반은 검사와 쓰기를 같은 트랜잭션에서 하고 동기 400으로 거절한다 (설계 결정 4).
 """
@@ -139,7 +141,22 @@ def total_throughput_mibps(props: dict) -> float:
     return props["size"] / TIB * MIBPS_PER_TIB[props["serviceLevel"]]
 
 
-def pool_body(res: Resource) -> dict:
+def volume_throughput_mibps(props: dict) -> float:
+    """볼륨 처리량 한도 (처리량 설계 결정 2·5). Manual 볼륨은 `throughputMibps`이고, Auto 볼륨은 할당량(2진 TiB) ×
+    서비스 수준 단가를 소수 셋째 자리로 반올림한 값(half-even)이다. Premium 101 GiB = 6.3125 → 6.312 [녹화 R3].
+    응답에 보이는 값이 agent가 거는 값이다. 볼륨 행은 풀의 서비스 수준을 물려받아 갖고 있다."""
+    if "throughputMibps" in props:
+        return props["throughputMibps"]
+    return round(props["usageThreshold"] / TIB * MIBPS_PER_TIB[props["serviceLevel"]], 3)
+
+
+def utilized_throughput_mibps(volumes: list[Resource]) -> float:
+    """풀의 모든 볼륨 행(상태와 무관)의 한도 합 (처리량 결정 5). 소수 셋째 자리에서 비교하고 보인다."""
+    return float(round(sum(volume_throughput_mibps(v.properties) for v in volumes), 3))
+
+
+def pool_body(res: Resource, volumes: list[Resource]) -> dict:
+    """volumes는 풀의 볼륨 행이다(`utilizedThroughputMibps`). 볼륨 모듈을 import하지 않게 호출 쪽이 넘긴다."""
     props = res.properties
     account = res.id.split("/")[-3]  # .../netAppAccounts/{account}/capacityPools/{pool}
     return {
@@ -155,8 +172,8 @@ def pool_body(res: Resource) -> dict:
             "size": props["size"],
             "qosType": props["qosType"],
             "totalThroughputMibps": total_throughput_mibps(props),
-            # 볼륨 처리량 한도의 합 (녹화 N5). 볼륨 사이클 전에는 볼륨이 없으므로 0이다.
-            "utilizedThroughputMibps": 0.0,
+            # 볼륨 처리량 한도의 합 [녹화 R1·R2] (처리량 결정 5)
+            "utilizedThroughputMibps": utilized_throughput_mibps(volumes),
             "encryptionType": props["encryptionType"],
             "coolAccess": props["coolAccess"],
         },
@@ -181,9 +198,10 @@ def _apply_changes(tx: Tx, pool: Resource, changes: dict) -> dict:
     if changes.get("serviceLevel", props["serviceLevel"]) != props["serviceLevel"] and tx.child_ids(pool.id):
         # 볼륨이 있는 풀만 거절한다 [풀 브리프 문서 8에서 추론] (설계 결정 5)
         raise ArmError(400, "BadRequest", "ServiceLevel cannot be changed.")
+    volumes = tx.list_children(pool.id, _VOLUME_TYPE)
     if "size" in changes:
         # 하한은 사용량이 아니라 볼륨 할당량의 합이다. 상태와 무관하게 모든 볼륨 행이 예약이다 (설계 §6).
-        allocated = sum(v.properties["usageThreshold"] for v in tx.list_children(pool.id, _VOLUME_TYPE))
+        allocated = sum(v.properties["usageThreshold"] for v in volumes)
         if changes["size"] < allocated:
             # NetApp KB의 메시지 [풀 브리프 문서 13]
             raise ArmError(
@@ -192,7 +210,32 @@ def _apply_changes(tx: Tx, pool: Resource, changes: dict) -> dict:
                 f"volume size of {allocated} bytes of the capacity pool. Make sure that the total "
                 "size of all the volumes in the capacity pool does not exceed the size of the "
                 "capacity pool.")
-    return {**props, **changes}
+    new = {**props, **changes}
+    to_manual = props["qosType"] == "Auto" and new["qosType"] == "Manual"
+    if to_manual:
+        for volume in volumes:
+            # 그 작업이 실패해 이전 properties로 되돌리면 아래에서 채운 값이 사라진다 (처리량 결정 6)
+            if tx.active_operation(volume.id) is not None:
+                raise ArmError(
+                    409, "Conflict",
+                    f"Cannot change the QoS type of capacity pool '{pool.id}' because an operation is in "
+                    f"progress on volume '{volume.id}'. Wait until it is finished, and then retry.")
+    if new["qosType"] == "Manual" and new["size"] < props["size"]:
+        # 배정 합이 예산보다 큰 상태를 만들지 않는다. 크기를 줄일 때만 본다: 반올림한 Auto 값을 옮겨 받은 풀은
+        # 합이 총 처리량을 조금 넘을 수 있고, 줄이지 않는 갱신은 그 상태를 바꾸지 않는다 (처리량 결정 7)
+        total = round(total_throughput_mibps(new), 3)
+        utilized = utilized_throughput_mibps(volumes)
+        if total < utilized:
+            raise ArmError(
+                400, "BadRequest",
+                f"The capacity pool throughput of {total} MiB/s is too small for the combined volume "
+                f"throughput of {utilized} MiB/s of the capacity pool.")
+    if to_manual:
+        # Manual 풀 볼륨은 throughputMibps가 필수다. 직전 한도를 그대로 옮기므로 데이터 플레인 작업이 없다 (결정 3·6)
+        for volume in volumes:
+            volume.properties = {**volume.properties, "throughputMibps": volume_throughput_mibps(volume.properties)}
+            tx.put_resource(volume)
+    return new
 
 
 def get_pool(store: StateStore, subscription_id: str, resource_group: str, account: str,

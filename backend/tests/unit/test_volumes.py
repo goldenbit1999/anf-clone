@@ -210,7 +210,6 @@ def test_malformed_body_is_invalid_request_content(store, b):
 @pytest.mark.parametrize("props", [
     {"protocolTypes": ["CIFS"]},
     {"exportPolicy": {"rules": [{**default_rule(), "allowedClients": "10.0.0.0/24"}]}},
-    {"throughputMibps": 10.0},
     {"snapshotDirectoryVisible": False},
     {"deleteBaseSnapshot": True},
     {"backupId": "b1"},
@@ -264,12 +263,6 @@ def test_pool_not_succeeded_is_bad_request(store, state):
     e = arm_error(put, store, body(), "vol1", "pool2")
     assert (e.status, e.code, e.message) == (
         400, "BadRequest", "Volume cannot be created in a pool that isn't in state succeeded.")
-
-
-def test_manual_qos_pool_is_deferred(store):
-    make_pool(store, "manual", qos="Manual")
-    e = arm_error(put, store, body(), "vol1", "manual")
-    assert (e.status, e.code) == (400, "InvalidRequestContent")
 
 
 # --- 경로와 용량 ---
@@ -465,6 +458,164 @@ def test_pool_service_level_is_fixed_while_it_has_volumes(store):
     assert (e.status, e.code, e.message) == (400, "BadRequest", "ServiceLevel cannot be changed.")
 
 
+# --- 처리량 한도 (FR-08, 처리량 설계 결정 2~7, §4.2) ---
+
+MANUAL = ACC + "/capacityPools/manual"
+REQUIRED = "The 'properties.throughputMibps' property is required for a volume in a Manual QoS capacity pool."
+RANGE = "The 'properties.throughputMibps' property must be a number from 1 to 4500."
+AUTO_ONLY = "The 'properties.throughputMibps' property can be set only for a volume in a Manual QoS capacity pool."
+
+
+def manual_pool(store, size_tib=1, level="Ultra"):
+    """Manual QoS 풀 'manual'. 기본 Ultra 1 TiB = 총 128 MiB/s."""
+    make_pool(store, "manual", size_tib=size_tib, level=level, qos="Manual")
+
+
+def mcreate(store, name, mibps, status="Succeeded", **kw):
+    _, res, op = put(store, body(token=name, throughputMibps=mibps, **kw), name, "manual")
+    finish(store, op, status)
+    return store.get_resource(res.id)
+
+
+def mpatch(store, b, name):
+    return volumes.patch_volume(store, "s1", "rg1", "acc1", "manual", name, b, None)
+
+
+def no_budget(total, free):
+    return ("Requested throughput not available. Capacity pool 'manual' has "
+            f"{total} MiB/s in total and {free} MiB/s left for this volume.")
+
+
+@pytest.mark.parametrize("size, level, mibps", [
+    (101 * GIB, "Premium", 6.312),  # 6.3125 → half-even (결정 2) [녹화 R3]
+    (GIB, "Premium", 0.062),
+    (GIB, "Standard", 0.016),
+    (100 * GIB, "Premium", 6.25),
+])
+def test_auto_volume_limit_is_the_rounded_formula_without_throughput_mibps(store, size, level, mibps):
+    make_pool(store, "pool2", level=level)
+    _, res, _ = put(store, body(token="v", size=size), "v", "pool2", min_size=GIB)
+    props = volumes.volume_body(res)["properties"]
+    assert props["actualThroughputMibps"] == mibps
+    assert "throughputMibps" not in props  # Auto 볼륨 응답에는 없다 (결정 4) [녹화 R4·R6]
+
+
+def test_manual_pool_volume_keeps_the_requested_throughput(store):
+    manual_pool(store)
+    _, res, op = put(store, body(throughputMibps=10), "vol1", "manual")
+    assert (res.provisioning_state, op.action) == ("Creating", "CREATE")
+    props = volumes.volume_body(res)["properties"]
+    assert props["throughputMibps"] == props["actualThroughputMibps"] == 10.0  # (결정 5) [녹화 R1]
+    assert isinstance(props["throughputMibps"], float)
+    _, res, _ = put(store, body(token="v2", throughputMibps=12.5), "v2", "manual")
+    assert volumes.volume_body(res)["properties"]["actualThroughputMibps"] == 12.5
+
+
+@pytest.mark.parametrize("props", [{}, {"throughputMibps": None}])
+def test_manual_pool_volume_requires_throughput_mibps(store, props):
+    manual_pool(store)
+    e = arm_error(put, store, body(**props), "vol1", "manual")
+    assert (e.status, e.code, e.message) == (400, "InvalidRequestContent", REQUIRED)
+    assert store.get_resource(MANUAL + "/volumes/vol1") is None
+    assert store.active_operations() == []
+
+
+@pytest.mark.parametrize("value", [0.5, 0, -1, 4500.5, "10", True, [], {}, float("inf"), float("nan")])
+def test_throughput_mibps_must_be_a_number_from_1_to_4500(store, value):
+    manual_pool(store)
+    e = arm_error(put, store, body(throughputMibps=value), "vol1", "nopool")  # 본문 검사가 풀 검사보다 먼저다
+    assert (e.status, e.code, e.message) == (400, "InvalidRequestContent", RANGE)
+
+
+def test_throughput_mibps_bounds_are_accepted(store):
+    manual_pool(store, size_tib=40)  # 5,120 MiB/s
+    mcreate(store, "v1", 1)
+    mcreate(store, "v2", 4500)
+
+
+def test_auto_pool_volume_rejects_throughput_mibps(store):
+    e = arm_error(put, store, body(throughputMibps=10))
+    assert (e.status, e.code, e.message) == (400, "BadRequest", AUTO_ONLY)
+    assert store.get_resource(VOL) is None
+    create(store)
+    for fn in (put, patch):
+        e = arm_error(fn, store, body(throughputMibps=10))
+        assert (e.status, e.code, e.message) == (400, "BadRequest", AUTO_ONLY)
+    assert "throughputMibps" not in store.get_resource(VOL).properties
+
+
+def test_create_beyond_the_manual_pool_budget_is_400(store):
+    manual_pool(store)  # 128 MiB/s
+    mcreate(store, "v1", 100, status="Failed")  # 실패한 볼륨 행도 예산을 차지한다 (결정 5·7)
+    e = arm_error(put, store, body(token="v2", throughputMibps=28.5), "v2", "manual")
+    assert (e.status, e.code, e.message) == (400, "BadRequest", no_budget(128.0, 28.0))
+    assert store.get_resource(MANUAL + "/volumes/v2") is None
+    mcreate(store, "v2", 28)  # 정확히 남은 예산은 받는다
+
+
+def test_throughput_change_beyond_the_budget_is_400_and_keeps_the_old_value(store):
+    manual_pool(store)
+    mcreate(store, "v1", 100)
+    mcreate(store, "v2", 20)
+    e = arm_error(mpatch, store, {"properties": {"throughputMibps": 108.5}}, "v1")
+    assert (e.status, e.code, e.message) == (400, "BadRequest", no_budget(128.0, 108.0))
+    assert store.get_resource(MANUAL + "/volumes/v1").properties["throughputMibps"] == 100
+    assert store.active_operations() == []
+    res, op = mpatch(store, {"properties": {"throughputMibps": 108}}, "v1")
+    assert (res.provisioning_state, op.action) == ("Patching", "PATCH")
+    assert res.properties["throughputMibps"] == 108.0
+    assert op.previous["properties"]["throughputMibps"] == 100
+
+
+def test_put_can_change_throughput_and_keeps_it_when_missing(store):
+    manual_pool(store)
+    mcreate(store, "v1", 10)
+    created, res, _ = put(store, body(token="v1", throughputMibps=30), "v1", "manual")
+    assert (created, res.properties["throughputMibps"]) == (False, 30.0)
+    finish(store, store.active_operations()[0])
+    _, res, op = put(store, {"location": "westus2"}, "v1", "manual")
+    assert res.properties["throughputMibps"] == 30.0
+    finish(store, op)
+    res, _ = mpatch(store, {"properties": {"throughputMibps": None}}, "v1")  # null은 값을 바꾸지 않는다
+    assert res.properties["throughputMibps"] == 30.0
+
+
+def test_lowering_or_resending_a_limit_skips_the_budget(store):
+    # 반올림한 Auto 값을 옮겨 받은 풀은 합이 총 처리량을 조금 넘을 수 있다. 한도를 올릴 때만 예산을 본다
+    manual_pool(store)
+    mcreate(store, "v1", 100)
+    mcreate(store, "v2", 28)
+    with store.transaction() as tx:
+        v1 = tx.get_resource(MANUAL + "/volumes/v1")
+        v1.properties = {**v1.properties, "throughputMibps": 100.5}
+        tx.put_resource(v1)
+    _, op = mpatch(store, {"properties": {"throughputMibps": 28}}, "v2")
+    finish(store, op)
+    mpatch(store, {"properties": {"throughputMibps": 20}}, "v2")
+
+
+def test_put_back_the_get_body_of_a_manual_volume(store):
+    manual_pool(store)
+    b = volumes.volume_body(mcreate(store, "v1", 12.5))
+    for key in ("id", "name", "type"):
+        b.pop(key)
+    created, _, _ = put(store, b, "v1", "manual")
+    assert created is False
+
+
+def test_restore_to_a_manual_pool_needs_its_own_throughput(store):
+    _, s = source(store)  # Auto pool1의 vol1과 스냅샷 s1
+    manual_pool(store)
+    e = arm_error(put_from, store, s.id, pool="manual")
+    assert (e.status, e.code, e.message) == (400, "InvalidRequestContent", REQUIRED)
+    e = arm_error(put_from, store, s.id, pool="manual", throughputMibps=128.5)
+    assert (e.status, e.code, e.message) == (400, "BadRequest", no_budget(128.0, 128.0))
+    _, res, _ = put_from(store, s.id, pool="manual", throughputMibps=12.5)
+    assert volumes.volume_body(res)["properties"]["actualThroughputMibps"] == 12.5
+    e = arm_error(put_from, store, s.id, name="vol3", throughputMibps=10)  # Auto pool1
+    assert (e.status, e.code, e.message) == (400, "BadRequest", AUTO_ONLY)
+
+
 # --- 처리기 (결정 11·12) ---
 
 
@@ -477,6 +628,7 @@ class FakeStorage:
         self.error: Exception | None = None
         self.remaining: set[str] = set()  # agent에 있는 스냅샷 uuid (되돌린 뒤 남은 것)
         self.records: list[dict] = []  # agent에 있는 스냅샷 레코드 (스냅샷에서 만든 볼륨의 base 스냅샷)
+        self.limits: list = []  # ensure_volume마다 보낸 처리량 한도 (처리량 결정 8)
 
     async def snapshot_records(self, uuid, correlation_id=None):
         self.calls.append(("snapshot_records", uuid, correlation_id))
@@ -492,8 +644,9 @@ class FakeStorage:
         self.calls.append(("snapshots", uuid, correlation_id))
         return self.remaining
 
-    async def ensure_volume(self, *args, correlation_id=None, clone=None):
+    async def ensure_volume(self, *args, correlation_id=None, clone=None, qos=None):
         self.calls.append(("ensure", *args, correlation_id, clone))
+        self.limits.append(qos)
         if self.error:
             raise self.error
         return self.ip
@@ -542,6 +695,32 @@ def test_update_and_patch_ensure_the_volume_again(store, action):
     assert run_operation(store, storage, op).status == "Succeeded"
     assert [c[0] for c in storage.calls] == ["ensure"]
     assert store.get_resource(v.id).properties["mountTargets"][0]["ipAddress"] == "172.30.0.129"
+
+
+def test_every_ensure_sends_the_volume_limit(store):
+    # agent POST 보장이 태그와 tc를 그 값에 맞춘다 (처리량 결정 8). Auto는 응답과 같은 반올림 값이다
+    storage = FakeStorage()
+    _, _, op = put(store, body(size=101 * GIB))
+    run_operation(store, storage, op)
+    manual_pool(store)
+    _, _, op = put(store, body(token="m1", throughputMibps=10), "m1", "manual")
+    run_operation(store, storage, op)
+    _, op = mpatch(store, {"properties": {"throughputMibps": 30}}, "m1")
+    run_operation(store, storage, op)
+    _, _, op = put(store, body(token="m1"), "m1", "manual")
+    run_operation(store, storage, op)
+    assert storage.limits == [6.312, 10.0, 30.0, 30.0]
+
+
+def test_failed_throughput_change_keeps_the_previous_value(store):
+    manual_pool(store)
+    mcreate(store, "m1", 10)
+    storage = FakeStorage()
+    storage.error = RuntimeError("agent job failed")
+    _, op = mpatch(store, {"properties": {"throughputMibps": 30}}, "m1")
+    assert run_operation(store, storage, op).status == "Failed"
+    v = store.get_resource(MANUAL + "/volumes/m1")
+    assert (v.provisioning_state, v.properties["throughputMibps"]) == ("Failed", 10)
 
 
 def test_failed_storage_work_fails_the_operation(store):

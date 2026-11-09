@@ -58,8 +58,8 @@ _SNAPSHOT = _SNAPSHOTS + "/{snapshot_name}"
 _OPERATION = "/subscriptions/{subscription_id}" + _PROVIDER + "/locations/{location}/operationResults/{operation_id}"
 
 # Location 방식으로 끝난 작업이 돌려줄 리소스 본문 (리소스 종류별)
-_BODIES = {ACCOUNT_TYPE: accounts.account_body, POOL_TYPE: pools.pool_body, VOLUME_TYPE: volumes.volume_body,
-           SNAPSHOT_TYPE: snapshots.snapshot_body}
+_BODIES = {ACCOUNT_TYPE: accounts.account_body, VOLUME_TYPE: volumes.volume_body,
+           SNAPSHOT_TYPE: snapshots.snapshot_body}  # 풀 본문은 저장소가 필요해 create_app 안에서 더한다
 
 
 def _default_db_path() -> Path:
@@ -114,6 +114,12 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
     if faults:
         log.warning("Fault injection is enabled (ANF_FAULT_INJECTION): %s", faults)
     worker = LroWorker(store, handlers, faults)
+
+    def pool_body(res) -> dict:
+        # utilizedThroughputMibps는 풀의 볼륨 행 한도 합이다 (처리량 설계 결정 5)
+        return pools.pool_body(res, store.list_children(res.id, VOLUME_TYPE))
+
+    bodies = {**_BODIES, POOL_TYPE: pool_body}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -202,14 +208,14 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
                                           pool_name, body, request.state.correlation_id)
         worker.notify()
         # 계정과 같다: 생성 201, 갱신 200, 둘 다 Azure-AsyncOperation만 (녹화 N1, N3, 풀 설계 결정 1)
-        return JSONResponse(pools.pool_body(res), status_code=201 if created else 200,
+        return JSONResponse(pool_body(res), status_code=201 if created else 200,
                             headers={"Azure-AsyncOperation": _operation_url(request, op)})
 
     @app.get(_POOL)
     async def get_pool(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
                        api_version: ApiVersion = None):
         check_api_version(api_version)
-        return pools.pool_body(
+        return pool_body(
             pools.get_pool(store, subscription_id, resource_group, account_name, pool_name))
 
     @app.patch(_POOL)
@@ -221,7 +227,7 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
                                    body, request.state.correlation_id)
         worker.notify()
         # 계정 PATCH(동기 200)와 달리 풀 PATCH는 202 + Patching 본문 + 두 헤더다 (녹화 N2, P1)
-        return JSONResponse(pools.pool_body(res), status_code=202,
+        return JSONResponse(pool_body(res), status_code=202,
                             headers=_tracking_headers(request, op))
 
     @app.delete(_POOL)
@@ -239,7 +245,7 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
     async def list_pools(subscription_id: str, resource_group: str, account_name: str,
                          api_version: ApiVersion = None):
         check_api_version(api_version)
-        return {"value": [pools.pool_body(r) for r in
+        return {"value": [pool_body(r) for r in
                           pools.list_pools(store, subscription_id, resource_group, account_name)]}
 
     @app.put(_VOLUME)
@@ -369,6 +375,6 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         if res is None:
             raise ArmError(404, "ResourceNotFound",
                            f"The resource with identifier '{op.resource_id}' is not found.")
-        return _BODIES[res.type](res)
+        return bodies[res.type](res)
 
     return app

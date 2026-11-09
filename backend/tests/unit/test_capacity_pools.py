@@ -60,15 +60,21 @@ def create(store, name="pool1", **kw):
     return store.get_resource(f"{ACC}/capacityPools/{name}")
 
 
-def add_volume(store, name, quota_tib, state="Succeeded"):
-    """볼륨 사이클 전이라 볼륨 행을 저장소에 직접 넣는다 (풀 설계 결정 3)."""
+def add_volume(store, name, quota_tib, state="Succeeded", level="Premium", **props):
+    """볼륨 행을 저장소에 직접 넣는다 (풀 설계 결정 3). 볼륨 규칙은 test_volumes.py가 확인한다."""
     with store.transaction() as tx:
         tx.put_resource(Resource(
             id=f"{POOL}/volumes/{name}", type=VOLUME_TYPE, subscription_id="s1",
             resource_group="rg1", name=name, location="westus2", tags={},
-            properties={"usageThreshold": quota_tib * TIB}, provisioning_state=state,
-            parent_id=POOL,
+            properties={"usageThreshold": round(quota_tib * TIB), "serviceLevel": level, **props},
+            provisioning_state=state, parent_id=POOL,
         ))
+
+
+def body_of(store, name="pool1"):
+    """API가 돌려주는 풀 본문: 자식 볼륨으로 utilizedThroughputMibps를 낸다."""
+    res = store.get_resource(f"{ACC}/capacityPools/{name}")
+    return pools.pool_body(res, store.list_children(res.id, VOLUME_TYPE))
 
 
 # --- 본문 검사 (설계 §4.3) ---
@@ -160,8 +166,8 @@ def test_patch_body_rejects_properties_missing_from_patch_model(props):
 # --- 응답 본문 (설계 §4.2) ---
 
 def test_pool_body_after_create_has_defaults_and_computed_throughput(store):
-    res = create(store, tags={"k": "v"})
-    b = pools.pool_body(res)
+    create(store, tags={"k": "v"})
+    b = body_of(store)
     assert b["id"] == POOL
     assert b["name"] == "acc1/pool1"
     assert b["type"] == "Microsoft.NetApp/netAppAccounts/capacityPools"
@@ -237,7 +243,7 @@ def test_put_existing_pool_is_updating_and_replaces_tags(store):
     stored = store.get_resource(POOL)
     assert stored.tags == {"b": "2"}
     assert stored.properties["size"] == 8 * TIB
-    assert pools.pool_body(stored)["properties"]["totalThroughputMibps"] == 512.0
+    assert body_of(store)["properties"]["totalThroughputMibps"] == 512.0
 
 
 def test_put_update_keeps_properties_missing_from_body(store):
@@ -259,7 +265,7 @@ def test_service_level_can_change_on_empty_pool(store):
     create(store, level="Premium")
     _, res, _ = put(store, body(level="Ultra"))
     assert res.properties["serviceLevel"] == "Ultra"
-    assert pools.pool_body(res)["properties"]["totalThroughputMibps"] == 512.0
+    assert body_of(store)["properties"]["totalThroughputMibps"] == 512.0
 
 
 def test_service_level_change_with_volumes_is_400_bad_request(store):
@@ -291,6 +297,126 @@ def test_qos_type_cannot_change_from_manual_to_auto(store, via):
     assert "Manual to Auto" in err.message
     assert store.get_resource(POOL).properties["qosType"] == "Manual"
     assert store.active_operations() == []
+
+
+# --- 처리량 한도 (처리량 설계 결정 2·5·6·7) ---
+
+GIB = 1 << 30
+
+
+@pytest.mark.parametrize("props, mibps", [
+    ({"usageThreshold": 101 * GIB, "serviceLevel": "Premium"}, 6.312),  # 6.3125, half-even [녹화 R3]
+    ({"usageThreshold": 100 * GIB, "serviceLevel": "Premium"}, 6.25),
+    ({"usageThreshold": GIB, "serviceLevel": "Premium"}, 0.062),
+    ({"usageThreshold": GIB, "serviceLevel": "Standard"}, 0.016),
+    ({"usageThreshold": GIB, "serviceLevel": "Ultra"}, 0.125),
+    ({"usageThreshold": 4 * TIB, "serviceLevel": "Ultra"}, 512.0),
+    ({"usageThreshold": GIB, "serviceLevel": "Premium", "throughputMibps": 12.5}, 12.5),  # Manual 값
+])
+def test_volume_throughput_is_the_manual_value_or_the_rounded_auto_formula(props, mibps):
+    assert pools.volume_throughput_mibps(props) == mibps
+
+
+def test_utilized_throughput_is_the_sum_of_all_volume_limits(store):
+    create(store)
+    assert body_of(store)["properties"]["utilizedThroughputMibps"] == 0.0
+    add_volume(store, "v1", 1)
+    add_volume(store, "v2", 101 / 1024, state="Failed")  # 실패한 볼륨 행도 예산을 차지한다 (결정 5)
+    assert body_of(store)["properties"]["utilizedThroughputMibps"] == 70.312
+
+
+def test_utilized_throughput_of_manual_pool_sums_throughput_mibps(store):
+    create(store, qosType="Manual")
+    add_volume(store, "v1", 0.001, throughputMibps=10)
+    add_volume(store, "v2", 0.001, throughputMibps=20.5)
+    assert body_of(store)["properties"]["utilizedThroughputMibps"] == 30.5
+
+
+def busy(store, name):
+    """볼륨 행에 진행 중 작업을 만든다."""
+    with store.transaction() as tx:
+        tx.create_operation(tx.get_resource(f"{POOL}/volumes/{name}"), "PATCH", "Patching")
+
+
+@pytest.mark.parametrize("via", ["put", "patch"])
+def test_auto_to_manual_fills_each_volume_with_its_previous_limit(store, via):
+    create(store)
+    add_volume(store, "v1", 101 / 1024)
+    add_volume(store, "v2", 1 / 1024, state="Failed")
+    before = body_of(store)["properties"]["utilizedThroughputMibps"]
+    if via == "put":
+        put(store, body(qosType="Manual"))
+    else:
+        patch(store, {"properties": {"qosType": "Manual"}})
+    rows = {v.name: v.properties for v in store.list_children(POOL, VOLUME_TYPE)}
+    assert rows["v1"]["throughputMibps"] == 6.312
+    assert rows["v2"]["throughputMibps"] == 0.062
+    assert body_of(store)["properties"]["utilizedThroughputMibps"] == before == 6.374
+    assert store.get_resource(f"{POOL}/volumes/v2").provisioning_state == "Failed"  # 상태는 그대로다
+
+
+def test_auto_to_manual_with_a_volume_operation_in_progress_is_409(store):
+    create(store)
+    add_volume(store, "v1", 1)
+    add_volume(store, "v2", 1)
+    busy(store, "v2")
+    err = arm_error(patch, store, {"properties": {"qosType": "Manual"}})
+    assert (err.status, err.code, err.message) == (
+        409, "Conflict",
+        f"Cannot change the QoS type of capacity pool '{POOL}' because an operation is in progress on "
+        f"volume '{POOL}/volumes/v2'. Wait until it is finished, and then retry.")
+    assert store.get_resource(POOL).properties["qosType"] == "Auto"
+    assert "throughputMibps" not in store.get_resource(f"{POOL}/volumes/v1").properties
+    assert [op.resource_id for op in store.active_operations()] == [f"{POOL}/volumes/v2"]
+
+
+def test_manual_pool_patch_without_qos_change_ignores_busy_volumes_and_keeps_limits(store):
+    create(store, qosType="Manual")
+    add_volume(store, "v1", 1, throughputMibps=10)
+    busy(store, "v1")
+    patch(store, {"tags": {"a": "1"}, "properties": {"qosType": "Manual"}})
+    assert store.get_resource(f"{POOL}/volumes/v1").properties["throughputMibps"] == 10
+
+
+@pytest.mark.parametrize("via", ["put", "patch"])
+def test_shrinking_manual_pool_below_the_volume_throughput_sum_is_400(store, via):
+    create(store, size_tib=4, level="Ultra", qosType="Manual")  # 512 MiB/s
+    add_volume(store, "v1", 0.5, level="Ultra", throughputMibps=300)
+    add_volume(store, "v2", 0.5, level="Ultra", state="Failed", throughputMibps=100.5)
+    if via == "put":
+        err = arm_error(put, store, body(size_tib=3, level="Ultra", qosType="Manual"))
+    else:
+        err = arm_error(patch, store, {"properties": {"size": 3 * TIB}})
+    assert (err.status, err.code, err.message) == (
+        400, "BadRequest",
+        "The capacity pool throughput of 384.0 MiB/s is too small for the combined volume throughput of "
+        "400.5 MiB/s of the capacity pool.")
+    assert store.get_resource(POOL).properties["size"] == 4 * TIB
+    assert store.active_operations() == []
+
+
+def test_shrinking_manual_pool_to_exactly_the_volume_throughput_sum_is_allowed(store):
+    create(store, size_tib=4, level="Ultra", qosType="Manual")
+    add_volume(store, "v1", 0.5, level="Ultra", throughputMibps=384)
+    res, _ = patch(store, {"properties": {"size": 3 * TIB}})
+    assert res.properties["size"] == 3 * TIB
+
+
+def test_manual_pool_patch_that_keeps_its_size_skips_the_throughput_floor(store):
+    # 반올림한 Auto 값을 옮겨 받은 풀은 합이 총 처리량을 조금 넘을 수 있다 (예: Premium 3 GiB × 341 = 64.108).
+    # 크기를 줄이지 않는 PATCH는 그 상태를 바꾸지 않으므로 거절하지 않는다
+    create(store, size_tib=1, qosType="Manual")
+    add_volume(store, "v1", 1, throughputMibps=64.108)
+    _, op = patch(store, {"properties": {"size": TIB}})
+    finish(store, op)
+    put(store, body(size_tib=2, qosType="Manual"))
+
+
+def test_shrinking_auto_pool_uses_only_the_quota_rule(store):
+    create(store, size_tib=4)
+    add_volume(store, "v1", 3)
+    res, _ = patch(store, {"properties": {"size": 3 * TIB}})
+    assert res.properties["size"] == 3 * TIB
 
 
 # --- 풀 축소 하한 (설계 §6, 결정 3, 4) ---
