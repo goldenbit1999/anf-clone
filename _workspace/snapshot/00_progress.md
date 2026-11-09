@@ -2,9 +2,9 @@
 
 - 상태: in_progress
 - FR: FR-05 (스냅샷: 생성, 조회, 목록, 삭제, NFS 클라이언트의 `.snapshot`)
-- 마지막 완료 단계: 2
-- 재개할 단계: 3 (구현)
-- 검증 대상 코드: 아직 없음
+- 마지막 완료 단계: 3
+- 재개할 단계: 4 (실환경 검증)
+- 검증 대상 코드: 제품 코드 내용 해시 `f5607a082c70d4dad6899f7722cfdcc486eb67bd249210c3c3cd5e9ecf2738f1`, 커밋 `27757aa` (브랜치 `feature/snapshot`, 작업 트리와 같은 값)
 - verifier 에이전트 ID:
 - 미해결: 없음
 
@@ -37,3 +37,6 @@
 - 2026-11-08 S4 완료 — `_workspace/spikes/S4.md`. 판정 조건부 통과: 스냅샷마다 자기 `fsid`로 export(부모 `crossmnt`만으로는 v3·v4.1 모두 Stale file handle), `.snapshot`에 `chattr +i`(없으면 root 클라이언트가 `.snapshot`을 `mv`할 수 있었다), export 표를 파일로(재시작 때 `exportfs -ua`로 스냅샷 export가 사라졌다). **볼륨 결함 발견**: NFSv4.1 클라이언트 기록이 남은 인스턴스는 재시작하지 못한다(진입점이 정상 유예 기간을 추적 실패로 오인). 시제품으로 살아 있는 클라이언트는 3 s에 회수, 죽은 클라이언트 기록은 100 s 대기를 확인했다. WSL 배포판이 wsl.exe 세션 없이 잠시 뒤 종료되는 것도 확인했다(백그라운드 `sleep`으로 유지).
 - 2026-11-08 단계 2 시작 — 1단계 요약, S4 결과, 기본 설계안(결정 5~16)과 선택지 네 가지를 사용자에게 제시했다.
 - 2026-11-08 단계 2 완료 — 사용자가 네 선택지를 모두 추천안으로 확정했다: 볼륨 결함을 이번 사이클에 고침(결정 1), 볼륨 DELETE가 스냅샷을 함께 지움(결정 2), 같은 이름 PUT은 `200` + `Updating` 비동기(결정 3), `snapshotDirectoryVisible`은 계속 미룸(결정 4). 기본 결정 5~16에 이견이 없었다. 검증 기준 AC-01~AC-15. ADR(§2.3 스냅샷 행, §6.1, §7.2, §7.4, S4, R-09, D-11), CLAUDE.md(Decided)를 고쳤다. **무효화**: 결정 1로 볼륨 인스턴스 코드(진입점, `nfs_instance.py`)와 `flexvol.py`가 바뀌므로, 3단계 시작 때 볼륨을 `in_progress`로 되돌리고 AC-14(볼륨 e2e 전체)로 회귀 검증한다. 공통 코드(`state_store.py`, `arm_app.py`)도 바뀌므로 계정·풀도 같은 AC-14로 회귀한다.
+- 2026-11-08 단계 3 시작 — 무효화 규칙대로 `docs/feature-status.md`의 계정·풀·볼륨을 `in_progress`로 되돌렸다(AC-14 회귀 대기).
+- 2026-11-08 단계 3 agent 쪽 커밋 `a2a819e` — 스냅샷 LV·`.snapshot`(+i)·스냅샷별 export 파일, 볼륨 연쇄 삭제, 시작 복구, 진입점의 lease·grace 30/45와 유예 판정(결정 1). 단위 테스트 GREEN, 통합 테스트(WSL root) 10 passed. 설계 §9 1~6.
+- 2026-11-08 단계 3 완료 — anf-api 쪽 커밋 `27757aa`: `snapshots.py`(새), `arm_rules.py`, `state_store.py`(연쇄 삭제), `storage_client.py`, `volumes.py`(스냅샷 작업 중 볼륨 DELETE 409), `arm_app.py`(라우트). 계약 테스트 `tests/contract/test_snapshots_api.py` 26개를 먼저 RED로 확인했다. 전체 662 passed, 94 skipped(실환경·root 테스트), ruff 통과. 설계 §9 7. e2e(실환경) 테스트는 볼륨 사이클처럼 verifier가 `backend/tests/e2e/`에 쓴다.
