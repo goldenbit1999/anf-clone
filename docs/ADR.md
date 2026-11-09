@@ -90,7 +90,7 @@ ONTAP REST 경로와 필드 이름은 기능마다 조사 단계에서 ONTAP RES
 | 스냅샷으로 되돌리기 | SnapRestore (볼륨 단위) | `PATCH /api/storage/volumes/{uuid}?restore_to.snapshot.uuid=…`, `202` + job. `restore_to.request_uuid`(멱등 키)는 클론 확장이다 (**되돌리기 설계에서 확정**, `_workspace/snapshot-revert/02_main_design.md` §6) | 더 새 스냅샷(dm-thin id가 큰 것)을 지우고 고른 스냅샷의 쓰기 가능 스냅샷을 새 볼륨 LV로 만든다. 인스턴스 netns 입력을 잠깐 막은 채 옛 볼륨을 내리고 새 LV를 올린 뒤, 옛 LV를 지우고 새 LV가 이름을 넘겨받는다. 고른 스냅샷은 그대로 남는다. 마운트한 클라이언트는 몇 초 멈췄다 이어 간다 (S5, 되돌리기 설계 §9-1) | ONTAP REST 경로는 되돌리기 브리프 [문서 10]. 동작 대응은 [추론] |
 | 새 볼륨으로 복원 | FlexClone + clone split [추론] | `POST /api/storage/volumes`에 `clone.is_flexclone`, `clone.parent_volume.uuid`, `clone.parent_snapshot.uuid`, `202` + job. split API는 없다: 처음부터 독립이다 (**새 볼륨 복원 설계에서 확정**, `_workspace/restore-new-volume/02_main_design.md` §6) | 원본 스냅샷 LV의 쓰기 가능 thin 스냅샷을 새 볼륨 LV로 만들고(블록 공유), 필요하면 `lvextend` + 온라인 `resize2fs`, `.snapshot`에 남은 원본 마운트 지점을 지운 뒤 같은 이름의 base 스냅샷을 찍는다. ext4 UUID는 원본과 같고 export `fsid`가 볼륨마다 다르다 (S6) | ONTAP REST 필드는 새 볼륨 복원 브리프 [문서 8, 10]. ANF가 FlexClone을 쓴다는 것은 [추론] |
 | 클론 (FR-18) | FlexClone | 새 볼륨 복원과 같은 API 후보 | 볼륨의 쓰기 가능 thin 스냅샷 | [추론] |
-| 처리량 제한 | QoS policy group (최대 처리량) | `/api/storage/qos/policies` | 볼륨 인스턴스 veth의 tc HTB 클래스 하나 (읽기·쓰기 합산, [§7.3](#73-처리량-제한-방식-확정-d-12)) | [추론] |
+| 처리량 제한 | QoS policy group (최대 처리량). Manual은 non-shared fixed 정책의 `max_throughput_mbps`와 닮았고, Auto의 할당량 비례는 adaptive QoS와 생각이 같지만 adaptive는 IOPS/TB다 [추론] | 볼륨 POST의 인라인 필드 `qos.policy.max_throughput_mbps`, `202` + job. 값은 MiB/s이고 소수를 받는다(ONTAP은 정수 Mbps). 정책 객체(`/api/storage/qos/policies`)는 없다 (**처리량 제한 설계에서 확정**, `_workspace/throughput-limit/02_main_design.md` §6) | 인스턴스 netns 안: `eth0` clsact → 양방향을 `ifb0`으로 → HTB 클래스 하나(읽기·쓰기 합산) + fq_codel. rate = 한도 ÷ 0.9564(헤더 보정). 한도는 볼륨 LV 태그 `anf_qos`이고 인스턴스를 띄울 때마다 건다 ([§7.3](#73-처리량-제한-방식-확정-d-12), S7) | ONTAP REST 필드는 처리량 브리프 [ONTAP O1]. ANF가 QoS policy를 쓰는지는 [미확인] |
 | export policy | export policy와 규칙 | `/api/protocols/nfs/export-policies` | `exportfs`의 클라이언트 규칙 | [추론] |
 | 마운트 대상 IP | data LIF | 볼륨 레코드의 클론 확장 필드 `data_lif.ip.address` (볼륨 설계 결정 12·18). `/api/network/ip/interfaces`는 필요해지면 만든다 | 볼륨 인스턴스의 `anf-vnet` 고정 IP(172.30.0.128/25에서 agent가 고름). ANF와 달리 볼륨마다 IP가 하나씩이다 | [추론] |
 | 파일 경로 `creationToken` | SVM 네임스페이스의 junction path. 진입점은 SVM 루트 볼륨 | 볼륨 POST의 `nas.path` | nfs-utils `[exports] rootdir=/var/lib/anf-clone/ns`. export 경로 `/<creationToken>` (볼륨 설계 결정 2) | [추론] (볼륨 브리프) |
@@ -313,7 +313,13 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | **T1n (채택)** | **볼륨마다 knfsd 인스턴스(자기 netns, privileged 컨테이너)와 IP. 인스턴스의 호스트 쪽 veth에 clsact → 양방향을 IFB 하나로 → HTB 클래스 하나** | 통과. v3·v4.1 모두 설정값의 약 95%(10→9.5, 30→28.5 MiB/s, 헤더 바이트 포함), 읽기+쓰기 합산(4.85+4.69=9.53), `tc class change`로 실시간 변경, 같은 클라이언트의 다른 볼륨은 영향 없음 |
 
 - 볼륨 인스턴스와 볼륨별 IP는 볼륨 사이클(FR-04)에서 만든다 (§7.4). tc는 FR-08에서 더한다.
-- 검증 시계: 제한기와 fio가 같은 게스트 시계를 쓰므로 게스트 단조 시계(fio `clock_gettime`)로 판정하고 호스트 시계 값은 참고로 기록한다. WSL 게스트 시계는 호스트의 0.908배 속도다 (S2).
+- **agent 인스턴스에 거는 방식 (S7 `_workspace/spikes/S7.md`, 처리량 제한 설계 결정 9~14).** S2는 실험용 인스턴스의 호스트 쪽 veth에 걸었다. FR-08은 같은 T1n 구성을 인스턴스 netns 안에 둔다. 인스턴스 `eth0`(veth의 netns 쪽 끝)에 clsact를 달고, 양방향을 netns 안 `ifb0`으로 보내 HTB 클래스 하나와 fq_codel을 지나게 한다. 명령은 호스트의 `ip`·`tc`를 `nsenter -t <pid> -n`으로 쓴다. 되돌리기 창의 iptables와 같은 경로다.
+  - S7에서 정확도, 실시간 변경, 되돌리기 창과의 공존은 호스트 쪽 방식과 같았다.
+  - 호스트 쪽 방식은 시작할 때마다 veth를 찾아야 했다(이름과 ifindex가 바뀐다). IFB 이름은 15자라 uuid를 못 쓰고, IFB가 볼륨 삭제 뒤에도 남았다. netns 방식은 이름이 늘 `ifb0`이고 인스턴스와 함께 사라진다.
+  - 인스턴스가 `docker start`·`docker run`될 때마다 veth가 새로 생겨 tc가 사라진다. 그래서 agent가 인스턴스를 띄우는 모든 경로(생성, 재전송, 시작 복구)에서 `start` → 걸기 → `wait_ready` 순서로 다시 건다. 한도는 볼륨 LV 태그 `anf_qos`에 둔다.
+  - HTB rate = 한도 ÷ 0.9564다. 0.9564 = 1448/1514는 MTU 1500에서 데이터 대 wire 바이트의 이론 상한이다. S7에서 보정 없이는 데이터가 설정의 92~95%였다. 0.9534로 보정하면 98~99%이고, 모든 회가 한도 이하였다.
+  - 낮은 한도: 1 GiB Premium(0.0625 MiB/s, 검증 전용 크기)에서도 마운트, 읽기·쓰기, v4.1 lease가 오류 없이 됐다. 같은 TCP 연결의 메타데이터는 1분을 넘었고 RPC 시간 초과 로그가 나왔다. 다른 연결은 fq_codel 덕에 2 s 이내였다.
+- 검증 시계: 제한기와 fio가 같은 게스트 시계를 쓰므로 게스트 단조 시계(fio `clock_gettime`)로 판정하고 호스트 시계 값은 참고로 기록한다. WSL 게스트/호스트 시계 비율은 S2에서 0.908, S7에서 0.9948~1.0009로 매번 달라서 검증 때마다 잰다.
 
 ### 7.4 NFS
 
@@ -337,7 +343,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 - **메트릭 (Prometheus 형식).**
   - anf-api: 요청 수와 지연 시간(경로 템플릿, 메서드, 상태 코드별), 작업 수와 소요 시간(종류, 결과별), 진행 중 작업 수
   - storage agent: 볼륨 사용량(파일시스템에서 읽은 실제 값), 스냅샷 수, 볼륨별 처리량과 IOPS, knfsd 전체 통계(`/proc/net/rpc/nfsd`)
-  - 볼륨별 처리량은 볼륨 인스턴스 IFB의 tc 카운터(`tc -s class show`의 Sent bytes)에서 얻을 수 있다 (D-12). 헤더 바이트가 포함된다.
+  - 볼륨별 처리량은 볼륨 인스턴스 netns 안 `ifb0`의 송신 바이트에서 얻을 수 있다 (D-12, §7.3). 호스트에서 `/proc/<인스턴스 pid>/net/dev`로 읽거나 `nsenter … tc -s class show dev ifb0`의 Sent bytes로 읽는다. 양방향 wire 바이트라 헤더를 포함해 데이터보다 4.5% 남짓 크다 (S7).
   - 메트릭 이름을 ANF의 Azure Monitor 메트릭과 어떻게 대응시킬지는 FR-12 조사에서 정한다.
 - **로그.** JSON 구조 로그를 쓴다. ARM 관례인 `x-ms-request-id`, `x-ms-correlation-request-id` 헤더를 받거나 새로 만든다. 그 값을 워커와 storage agent 호출까지 넘긴다.
 - **대시보드.** 리소스는 anf-api에서, 시계열은 Prometheus 쿼리 API에서 읽는다 (D-08).
@@ -387,7 +393,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | S4 | 볼륨 인스턴스(D-12) 구조에서 `.snapshot/<이름>`이 v3·v4.1로 읽기 전용으로 보이는가, 클라이언트가 `.snapshot`을 바꿀 수 있는가, 인스턴스 재시작 뒤에도 보이는가. **조건부 통과 (2026-11-08, `_workspace/spikes/S4.md`)**: 스냅샷마다 자기 `fsid` export, `.snapshot`에 `chattr +i`, export 표를 파일로. v4.1 인스턴스 재시작 결함도 찾았다 | 스냅샷 설계 전 | — |
 | S5 | 볼륨 인스턴스 구조에서 스냅샷으로 되돌리기: LVM 절차(merge·교체), 클라이언트가 마운트를 유지한 채 무엇을 보는가(다시 마운트, stale handle, 열린 fd, 창 동안의 오류). **조건부 통과 (2026-11-08, `_workspace/spikes/S5.md`)**: 인스턴스 netns 입력을 잠깐 막고 언마운트 → `lvconvert --merge` → 고른 스냅샷 다시 만들기 → 다시 올리면 v3·v4.1 모두 다시 마운트 없이 오류 0(2~5 s 멈춤). 구현 중 merge가 두 번째 되돌리기를 못 해 LVM 절차는 교체 방식(L2)으로 바꿨다(창 방식은 그대로). 스냅샷 뒤에 만든 파일을 잡은 fd·cwd만 ESTALE. export 제거는 v3에 EACCES, 인스턴스 재시작은 v4.1에 23 s와 틀린 캐시. knfsd 기본 NFSv4 위임에서는 v4.1 열린 fd가 16~32 s 옛 캐시를 읽는다 | 되돌리기 설계 전 | — |
 | S6 | 볼륨 인스턴스 구조에서 스냅샷으로 새 볼륨 만들기 (FR-07): 읽기 전용 스냅샷 LV의 쓰기 가능 스냅샷, ext4 UUID 중복, `.snapshot`에 남은 원본의 마운트 지점, 원본보다 큰 크기, 다른 프로토콜, 원본 스냅샷·볼륨 삭제와 되돌리기 뒤의 독립성, base 스냅샷 | 새 볼륨 복원 설계 전 (`_workspace/spikes/S6.md`) | — |
-| S7 | agent 볼륨 인스턴스(`anf-nfs-<uuid>`)에서 처리량 제한 (FR-08): S2 T1n(veth clsact → IFB → HTB)을 실제 인스턴스에 걸 때의 veth 찾기, v3·v4.1 정확도, 실시간 변경, 작은 볼륨의 낮은 한도(0.0625~3.125 MiB/s)에서 NFS 동작, 인스턴스 재시작·되돌리기 창·복구와 tc 수명, 헤더 보정 | 처리량 설계 전 (`_workspace/spikes/S7.md`) | — |
+| S7 | agent 볼륨 인스턴스(`anf-nfs-<uuid>`)에서 처리량 제한 (FR-08): S2 T1n(veth clsact → IFB → HTB)을 실제 인스턴스에 걸 때의 veth 찾기, v3·v4.1 정확도, 실시간 변경, 작은 볼륨의 낮은 한도(0.0625~3.125 MiB/s)에서 NFS 동작, 인스턴스 재시작·되돌리기 창·복구와 tc 수명, 헤더 보정. **조건부 통과 (2026-11-09, `_workspace/spikes/S7.md`)**: 실제 인스턴스에서 v3·v4.1 모두 설정의 92~95%(보정하면 98~99%, 모든 회 한도 이하), 읽기+쓰기 합산, 1초 안의 실시간 변경, 볼륨 독립, 되돌리기 창과 공존. 인스턴스가 다시 뜰 때마다 tc를 다시 걸어야 한다. 0.0625 MiB/s에서도 오류는 없지만 같은 연결의 메타데이터가 1분을 넘는다. tc를 인스턴스 netns 안에 두는 변형도 같은 결과였다 | 처리량 설계 전 (`_workspace/spikes/S7.md`) | — |
 
 ### 위험
 
@@ -418,7 +424,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | D-09 | 작업 워커는 anf-api 프로세스 안에서 돈다. 작업은 SQLite에 저장한다 | 확정 (2026-11-07) |
 | D-10 | Docker Engine은 Ubuntu 안에 둔다 (`docker.io`). Docker Desktop은 서버가 모든 컨테이너를 같은 Windows NAT IP로 봐서 클라이언트를 구분하지 못한다 | 확정 (2026-11-07, S0: `_workspace/spikes/S0.md`) |
 | D-11 | 볼륨·스냅샷 저장 방식: **C.** 씬 풀 하나(aggregate 역할) 위에 볼륨마다 thin LV + ext4(`nodelalloc`). 스냅샷은 읽기 전용 thin 스냅샷이고 `.snapshot/<이름>`에 마운트해 자기 `fsid`로 export한다. 근거와 버린 대안은 [§7.2](#72-볼륨스냅샷-저장-방식-확정-d-11) | 확정 (2026-11-07, S1: `_workspace/spikes/S1.md`). 스냅샷 노출은 S4로 확정 (2026-11-08, `_workspace/spikes/S4.md`). 되돌리기 절차는 S5로 확정 (2026-11-08, `_workspace/spikes/S5.md`, §7.2). 새 볼륨 복원은 S6로 확정 (2026-11-09, `_workspace/spikes/S6.md`, §7.2) |
-| D-12 | 처리량 제한 방식 = T1n: 볼륨마다 knfsd 인스턴스(자기 netns)와 IP를 두고, 인스턴스 veth를 tc HTB로 제한한다(읽기·쓰기 합산). 인스턴스와 IP는 볼륨 사이클에서 만든다. NFSv4 위임은 끈다(§7.4) | 확정 (2026-11-07, S2: `_workspace/spikes/S2.md`). 위임 끄기는 2026-11-08 (S5) |
+| D-12 | 처리량 제한 방식 = T1n: 볼륨마다 knfsd 인스턴스(자기 netns)와 IP를 두고, 인스턴스 veth를 tc HTB로 제한한다(읽기·쓰기 합산). 인스턴스와 IP는 볼륨 사이클에서 만든다. NFSv4 위임은 끈다(§7.4) | 확정 (2026-11-07, S2: `_workspace/spikes/S2.md`). 위임 끄기는 2026-11-08 (S5). agent 인스턴스에서 tc 위치(netns 안 `ifb0`)·수명·헤더 보정은 2026-11-09 (S7, §7.3) |
 | D-13 | 인증 없음. anf-api는 `Authorization` 헤더를 검사하지 않고, 서비스는 localhost에만 바인딩한다 (§5). 실제 Azure에서는 토큰 검증과 RBAC를 ARM이 맡고 ANF 리소스 공급자는 그 뒤에서 요청을 받는다. 그래서 구독·RBAC 검사를 생략한 것과 같은 선에서 생략한다. 버린 대안: 고정 Bearer 토큰(모든 클라이언트가 헤더를 보내야 하는데 데이터 플레인 설명에 보탬이 없다), Entra ID 모양 JWT(비용이 가장 크다) | 확정 (2026-11-07) |
 | D-14 | Python 프로젝트 설정은 루트 `pyproject.toml` 하나에 둔다(의존성, pytest 설정). 코드는 `backend/` 아래에 둔다. 가상환경은 OS별로 Windows `.venv-win/`(저장소 안), WSL `~/.venvs/anf-clone`(저장소 밖, `ANF_CLONE_VENV`로 바꿀 수 있음) | 확정 (2026-11-07) |
 
