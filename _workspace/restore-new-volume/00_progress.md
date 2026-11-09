@@ -1,9 +1,9 @@
 # restore-new-volume 진행 기록
 
-- 상태: in_progress
+- 상태: done
 - FR: FR-07 (스냅샷에서 새 볼륨으로 복원)
-- 마지막 완료 단계: 4
-- 재개할 단계: 5 (개념 문서)
+- 마지막 완료 단계: 6
+- 재개할 단계: 없음 (사이클 완료, 출하만 남음)
 - 검증 대상 코드: 제품 코드 내용 해시 `1e950522c13e991ad33d06e2ad2fbd182685426ef7f774fc8bde4ccbf339a9f7`, 커밋 `a8ddc0a`
 - implementer 에이전트 ID: a41cc624ee346fccd (스파이크 S6부터)
 - researcher 에이전트 ID: a5124c3e4df55979d
@@ -47,3 +47,5 @@
 - 2026-11-09 단계 3 완료 — implementer 커밋 `fa75aff`·`b7a26b2`·`def0999`·`bbb482a`·`a8ddc0a`. Windows `python -m pytest` 817 passed / 143 skipped(root·e2e 조건) / 0 failed, ruff 통과, WSL 통합 25 passed(새 8개). WSL 전체 + e2e 회귀는 Windows 호스트 메모리 부족으로 background shell이 정리돼 결과 없음(테스트 실패 아님) → AC-11은 검증에서 돌린다. 남은 데이터 플레인 자원은 implementer가 정리함. 구현 중 변경 10개(설계 §9). 그중 1번: 헤더 두 개(`Azure-AsyncOperation` + `Location`)는 스냅샷에서 만드는 생성 201에만 — 설계 §4.1·AC-01(녹화 R4)을 따르고 일반 생성(V1, 헤더 하나)은 그대로 둔다. 메인이 받아들였다
 - 2026-11-09 단계 4 시작 — verifier 1회차. AC-11 e2e는 메모리 때문에 파일별로 돌리라고 지시
 - 2026-11-09 단계 4 완료 — 1회차 11/11 PASS (FAIL 0, UNVERIFIED 0). e2e는 파일별로 돌려 메모리 문제 없음(Windows 여유 최저 약 3.9 GB). 검증 스크립트 `backend/tests/e2e/restore_live.py`, `test_restore_new_volume_{data,contract}_live.py`
+- 2026-11-09 단계 5 완료 — `docs/concepts/restore-new-volume.md`, 면접 Q&A 12개. concept-explainer가 설계 결정 3의 근거 오기(`S6 N5` → `S6 F2`)를 찾아 고쳤다. "쓰지 못한 것"은 문서 부록에 있다(ANF가 FlexClone을 쓴다는 공식 문장, ANF 거절 응답, `deleteBaseSnapshot` 대상 등). 볼륨 전체의 빈칸으로 `maximumNumberOfFiles`·`isRestoring` 미구현을 문서 4절에 적었다
+- 2026-11-09 단계 6 완료 — `docs/feature-status.md` done. 문서만 바뀌어 검증 대상 코드(`1e950522…`)는 그대로다
