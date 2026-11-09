@@ -131,6 +131,26 @@ def test_delete_resource(store):
     assert store.get_resource(ACC) is None
 
 
+def test_delete_resource_deletes_nested_resources(store):
+    # 볼륨을 지우면 스냅샷도 지워진다 (스냅샷 설계 결정 2). 계정·풀은 DELETE 전에 자식을 409로 막는다
+    nested = make_pool("p1")
+    nested_child = Resource(
+        id=nested.id + "/volumes/v1", type=nested.type + "/volumes", subscription_id="s1", resource_group="rg1",
+        name="v1", location="westus2", tags={}, properties={}, provisioning_state="Succeeded",
+        parent_id=nested.id.upper(),
+    )
+    other = make_pool("p2")
+    with store.transaction() as tx:
+        for res in (make_account(), nested, nested_child, other):
+            tx.put_resource(res)
+    with store.transaction() as tx:
+        tx.delete_resource(nested.id)
+    assert store.get_resource(nested.id) is None
+    assert store.get_resource(nested_child.id) is None
+    assert store.get_resource(other.id) is not None
+    assert store.get_resource(ACC) is not None
+
+
 def test_transaction_rolls_back_on_error(store):
     with pytest.raises(RuntimeError):
         with store.transaction() as tx:

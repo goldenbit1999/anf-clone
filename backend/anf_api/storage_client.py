@@ -64,6 +64,21 @@ class StorageClient:
     async def delete_volume(self, uuid: str, correlation_id: str | None = None) -> None:
         await self._run_job("DELETE", f"/api/storage/volumes/{uuid}", None, correlation_id)
 
+    async def ensure_snapshot(self, volume_uuid: str, uuid: str, name: str,
+                              correlation_id: str | None = None) -> str:
+        """스냅샷이 있게 하고(없으면 만들고) 만든 시각(agent의 create_time, UTC ISO 8601)을 돌려준다.
+        uuid는 anf-api가 정한 멱등 키다 (스냅샷 설계 결정 9)."""
+        snapshots = f"/api/storage/volumes/{volume_uuid}/snapshots"
+        await self._run_job("POST", snapshots, {"name": name, "uuid": uuid}, correlation_id)
+        path = f"{snapshots}/{uuid}"
+        status, record = await self._call("GET", path, None, correlation_id)
+        if status != 200:
+            raise StorageError(f"GET {path}: agent answered {status}: {_message(record)}")
+        return record["create_time"]
+
+    async def delete_snapshot(self, volume_uuid: str, uuid: str, correlation_id: str | None = None) -> None:
+        await self._run_job("DELETE", f"/api/storage/volumes/{volume_uuid}/snapshots/{uuid}", None, correlation_id)
+
     async def _run_job(self, method: str, path: str, body: dict | None, correlation_id: str | None) -> None:
         while True:
             status, reply = await self._call(method, path, body, correlation_id)

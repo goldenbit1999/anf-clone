@@ -11,6 +11,7 @@ PROVIDER = "Microsoft.NetApp"
 ACCOUNT_TYPE = f"{PROVIDER}/netAppAccounts"
 POOL_TYPE = f"{ACCOUNT_TYPE}/capacityPools"
 VOLUME_TYPE = f"{POOL_TYPE}/volumes"
+SNAPSHOT_TYPE = f"{VOLUME_TYPE}/snapshots"
 
 # 계정 이름: 영숫자로 시작, 영숫자·`-`·`_`, 1~128자 [스펙 3]
 _ACCOUNT_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9\-_]{0,127}")
@@ -18,6 +19,9 @@ _ACCOUNT_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9\-_]{0,127}")
 _POOL_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9\-_]{0,63}")
 # 볼륨 이름: 영문자로 시작, 1~64자 [볼륨 브리프, 스펙 2]
 _VOLUME_NAME = re.compile(r"[a-zA-Z][a-zA-Z0-9\-_]{0,63}")
+# 스냅샷 이름: 스펙에 패턴이 없다. 이름이 .snapshot 아래 디렉터리와 export 경로가 되므로 영숫자로 시작하고
+# 영숫자·`-`·`_`·`.`만, ext4 파일 이름 한도인 255자까지 (스냅샷 설계 결정 10)
+_SNAPSHOT_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9\-_.]{0,254}")
 # 리소스 그룹 이름: 1~90자, 문자·숫자·`-`·`_`·`.`·`(`·`)` [스펙 8, common-types]
 _RESOURCE_GROUP_NAME = re.compile(r"[-\w._()]{1,90}")
 
@@ -81,6 +85,16 @@ def check_volume_name(name: str) -> None:
         )
 
 
+def check_snapshot_name(name: str) -> None:
+    if not _SNAPSHOT_NAME.fullmatch(name):
+        raise ArmError(
+            400,
+            "InvalidResourceName",
+            f"The snapshot name '{name}' is invalid. It must start with an alphanumeric character, "
+            "contain only alphanumerics, '-', '_' or '.', and be 1 to 255 characters long.",
+        )
+
+
 def check_resource_group_name(name: str) -> None:
     if not _RESOURCE_GROUP_NAME.fullmatch(name):
         raise ArmError(
@@ -104,6 +118,11 @@ def pool_id(subscription_id: str, resource_group: str, account: str, name: str) 
 
 def volume_id(subscription_id: str, resource_group: str, account: str, pool: str, name: str) -> str:
     return f"{pool_id(subscription_id, resource_group, account, pool)}/volumes/{name}"
+
+
+def snapshot_id(subscription_id: str, resource_group: str, account: str, pool: str, volume: str,
+                name: str) -> str:
+    return f"{volume_id(subscription_id, resource_group, account, pool, volume)}/snapshots/{name}"
 
 
 def invalid_content(message: str) -> ArmError:
