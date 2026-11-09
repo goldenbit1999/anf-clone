@@ -196,7 +196,8 @@ def test_ac09_delete_volume(agent, api, clients):
          pre_mounted_client=out(seen_by_pre2))
     assert mount_ip(v2) == ip
     assert fsid_of(v2) != fsid
-    assert again.returncode == 0 and again.stdout == "listed\n", out(again)
+    # 새 볼륨에는 옛 데이터가 없고 `.snapshot`만 있다 (스냅샷 설계 결정 8: 스냅샷이 없어도 `.snapshot`이 있다)
+    assert again.returncode == 0 and again.stdout == ".snapshot\nlisted\n", out(again)
 
     pre.remove()
     delete_volume("v09")

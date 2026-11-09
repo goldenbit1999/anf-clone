@@ -6,6 +6,7 @@ from anf_api.arm_rules import (
     ACCOUNT_TYPE,
     API_VERSION,
     POOL_TYPE,
+    SNAPSHOT_TYPE,
     VOLUME_TYPE,
     ArmError,
     account_id,
@@ -13,6 +14,7 @@ from anf_api.arm_rules import (
     check_api_version,
     check_pool_name,
     check_resource_group_name,
+    check_snapshot_name,
     check_tags,
     check_volume_name,
     invalid_content,
@@ -20,6 +22,7 @@ from anf_api.arm_rules import (
     not_found,
     operation_path,
     pool_id,
+    snapshot_id,
     unknown_property,
     unsupported_property,
     volume_id,
@@ -131,6 +134,30 @@ def test_volume_id_nests_under_pool():
     assert volume_id("sub1", "rg1", "acc1", "pool1", "vol1") == (
         "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.NetApp/netAppAccounts/acc1"
         "/capacityPools/pool1/volumes/vol1"
+    )
+
+
+# --- 스냅샷 (스냅샷 설계 결정 10) ---
+
+@pytest.mark.parametrize("name", ["s", "1st", "snap1", "daily.2026-11-08_0010", "A-b_c.d", "a" * 255])
+def test_valid_snapshot_names_pass(name):
+    check_snapshot_name(name)
+
+
+# 이름이 .snapshot 아래 디렉터리와 export 경로가 된다: 영숫자로 시작, `/`·공백 없음, ext4 이름 한도 255자
+@pytest.mark.parametrize("name", ["", ".a", "..", "-a", "_a", "a/b", "a b", "a;b", "a" * 256])
+def test_invalid_snapshot_names_are_400_invalid_resource_name(name):
+    with pytest.raises(ArmError) as e:
+        check_snapshot_name(name)
+    assert (e.value.status, e.value.code) == (400, "InvalidResourceName")
+    assert "snapshot" in e.value.message
+
+
+def test_snapshot_id_nests_under_volume():
+    assert SNAPSHOT_TYPE == "Microsoft.NetApp/netAppAccounts/capacityPools/volumes/snapshots"
+    assert snapshot_id("sub1", "rg1", "acc1", "pool1", "vol1", "snap1") == (
+        "/subscriptions/sub1/resourceGroups/rg1/providers/Microsoft.NetApp/netAppAccounts/acc1"
+        "/capacityPools/pool1/volumes/vol1/snapshots/snap1"
     )
 
 

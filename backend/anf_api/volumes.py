@@ -12,6 +12,7 @@ import re
 import uuid
 
 from anf_api.arm_rules import (
+    SNAPSHOT_TYPE,
     VOLUME_TYPE,
     ArmError,
     check_account_name,
@@ -408,13 +409,20 @@ def patch_volume(store: StateStore, subscription_id: str, resource_group: str, a
 
 def delete_volume(store: StateStore, subscription_id: str, resource_group: str, account: str, pool: str,
                   name: str, correlation_id: str | None) -> Operation | None:
-    """있으면 Deleting + DELETE 작업(202), 없으면 None(204)."""
+    """있으면 Deleting + DELETE 작업(202), 없으면 None(204). 스냅샷도 함께 지워진다: agent가 스냅샷부터 지우고,
+    작업이 끝나면 볼륨 행과 스냅샷 행이 한 트랜잭션에서 지워진다. 그래서 진행 중인 스냅샷 작업이 있으면 409다
+    (스냅샷 설계 결정 2)."""
     rid = _id(subscription_id, resource_group, account, pool, name)
     with store.transaction() as tx:
         res = tx.get_resource(rid)
         if res is None:
             return None
         _ensure_terminal(tx, res)
+        for snap in tx.list_children(rid, SNAPSHOT_TYPE):
+            if tx.active_operation(snap.id) is not None:
+                raise ArmError(409, "Conflict",
+                               f"Cannot delete volume '{rid}' because an operation is in progress on its snapshot "
+                               f"'{snap.id}'. Wait until it is finished, and then retry.")
         op = tx.create_operation(res, "DELETE", "Deleting", correlation_id=correlation_id)
         res.provisioning_state = "Deleting"
         tx.put_resource(res)

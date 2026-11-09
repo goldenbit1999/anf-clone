@@ -10,6 +10,7 @@ import pytest
 
 import anf_api.accounts as accounts
 import anf_api.capacity_pools as pools
+import anf_api.snapshots as snapshots
 import anf_api.volumes as volumes
 from anf_api.arm_rules import VOLUME_TYPE, ArmError
 
@@ -413,6 +414,18 @@ def test_delete(store):
 
 def test_delete_missing_volume_is_none(store):
     assert delete(store) is None
+
+
+def test_volume_with_a_snapshot_operation_in_progress_cannot_be_deleted(store):
+    # 볼륨 DELETE는 스냅샷도 지운다. 진행 중인 스냅샷 작업과 겹치지 않게 거절한다 (스냅샷 설계 결정 2)
+    create(store)
+    _, snap, _ = snapshots.put_snapshot(store, "s1", "rg1", "acc1", "pool1", "vol1", "snap1",
+                                        {"location": "westus2"}, None)
+    e = arm_error(delete, store)
+    assert (e.status, e.code, e.message) == (
+        409, "Conflict", f"Cannot delete volume '{VOL}' because an operation is in progress on its snapshot "
+                         f"'{snap.id}'. Wait until it is finished, and then retry.")
+    assert store.get_resource(VOL).provisioning_state == "Succeeded"
 
 
 def test_get_and_list(store):

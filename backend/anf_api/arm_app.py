@@ -25,11 +25,13 @@ from fastapi.responses import JSONResponse, Response
 
 import anf_api.accounts as accounts
 import anf_api.capacity_pools as pools
+import anf_api.snapshots as snapshots
 import anf_api.volumes as volumes
 from anf_api.arm_rules import (
     ACCOUNT_TYPE,
     API_VERSION,
     POOL_TYPE,
+    SNAPSHOT_TYPE,
     VOLUME_TYPE,
     ArmError,
     check_api_version,
@@ -51,10 +53,13 @@ _POOLS = _ACCOUNT + "/capacityPools"
 _POOL = _POOLS + "/{pool_name}"
 _VOLUMES = _POOL + "/volumes"
 _VOLUME = _VOLUMES + "/{volume_name}"
+_SNAPSHOTS = _VOLUME + "/snapshots"
+_SNAPSHOT = _SNAPSHOTS + "/{snapshot_name}"
 _OPERATION = "/subscriptions/{subscription_id}" + _PROVIDER + "/locations/{location}/operationResults/{operation_id}"
 
 # Location 방식으로 끝난 작업이 돌려줄 리소스 본문 (리소스 종류별)
-_BODIES = {ACCOUNT_TYPE: accounts.account_body, POOL_TYPE: pools.pool_body, VOLUME_TYPE: volumes.volume_body}
+_BODIES = {ACCOUNT_TYPE: accounts.account_body, POOL_TYPE: pools.pool_body, VOLUME_TYPE: volumes.volume_body,
+           SNAPSHOT_TYPE: snapshots.snapshot_body}
 
 
 def _default_db_path() -> Path:
@@ -103,7 +108,8 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
     min_size = _min_volume_size(min_volume_size_gib)
     if storage is None:
         storage = StorageClient(os.environ.get("ANF_STORAGE_AGENT_URL") or "http://127.0.0.1:8090")
-    handlers = {**accounts.HANDLERS, **pools.HANDLERS, **volumes.make_handlers(store, storage)}
+    handlers = {**accounts.HANDLERS, **pools.HANDLERS, **volumes.make_handlers(store, storage),
+                **snapshots.make_handlers(store, storage)}
     faults = parse_faults(fault_injection, handlers)
     if faults:
         log.warning("Fault injection is enabled (ANF_FAULT_INJECTION): %s", faults)
@@ -283,6 +289,43 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         check_api_version(api_version)
         return {"value": [volumes.volume_body(r) for r in volumes.list_volumes(
             store, subscription_id, resource_group, account_name, pool_name)]}
+
+    @app.put(_SNAPSHOT)
+    async def put_snapshot(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                           volume_name: str, snapshot_name: str, request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        body = await _json_body(request)
+        created, res, op = snapshots.put_snapshot(store, subscription_id, resource_group, account_name, pool_name,
+                                                  volume_name, snapshot_name, body, request.state.correlation_id)
+        worker.notify()
+        # 생성 201에는 두 헤더 (녹화 R1). 다시 PUT은 200 + Azure-AsyncOperation만 (스냅샷 설계 결정 3)
+        headers = _tracking_headers(request, op) if created else {"Azure-AsyncOperation": _operation_url(request, op)}
+        return JSONResponse(snapshots.snapshot_body(res), status_code=201 if created else 200, headers=headers)
+
+    @app.get(_SNAPSHOT)
+    async def get_snapshot(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                           volume_name: str, snapshot_name: str, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        return snapshots.snapshot_body(snapshots.get_snapshot(
+            store, subscription_id, resource_group, account_name, pool_name, volume_name, snapshot_name))
+
+    @app.delete(_SNAPSHOT)
+    async def delete_snapshot(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                              volume_name: str, snapshot_name: str, request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        op = snapshots.delete_snapshot(store, subscription_id, resource_group, account_name, pool_name,
+                                       volume_name, snapshot_name, request.state.correlation_id)
+        if op is None:
+            return Response(status_code=204)
+        worker.notify()
+        return Response(status_code=202, headers=_tracking_headers(request, op))
+
+    @app.get(_SNAPSHOTS)
+    async def list_snapshots(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                             volume_name: str, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        return {"value": [snapshots.snapshot_body(r) for r in snapshots.list_snapshots(
+            store, subscription_id, resource_group, account_name, pool_name, volume_name)]}
 
     @app.get(_OPERATION)
     async def operation_result(

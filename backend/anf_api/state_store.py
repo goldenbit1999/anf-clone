@@ -187,6 +187,10 @@ class Tx:
         )
 
     def delete_resource(self, resource_id: str) -> None:
+        """자식 리소스도 함께 지운다: 볼륨을 지우면 그 스냅샷도 지워진다 (스냅샷 설계 결정 2).
+        계정·풀은 DELETE를 받을 때 자식을 409로 막으므로(`ensure_no_children`) 여기까지 자식이 오지 않는다."""
+        for row in self._conn.execute("SELECT id FROM resources WHERE parent_id = ?", (resource_id,)).fetchall():
+            self.delete_resource(row["id"])
         self._conn.execute("DELETE FROM resources WHERE id = ?", (resource_id,))
 
     def get_operation(self, operation_id: str) -> Operation | None:

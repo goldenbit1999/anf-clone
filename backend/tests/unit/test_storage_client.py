@@ -161,6 +161,47 @@ def test_failed_delete_raises(agent, client):
         asyncio.run(client.delete_volume(U1))
 
 
+# --- 스냅샷 (스냅샷 설계 결정 9, §6.1) ---
+
+S1 = "5a000000-0000-4000-8000-000000000001"
+SNAPSHOTS = f"/api/storage/volumes/{U1}/snapshots"
+
+
+def test_ensure_snapshot_posts_polls_and_returns_the_create_time(agent, client):
+    agent.reply("POST", SNAPSHOTS, job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("running"), state("success"))
+    agent.reply("GET", f"{SNAPSHOTS}/{S1}", (200, {"uuid": S1, "name": "daily.1",
+                                                   "create_time": "2026-11-08T23:07:12Z", "volume": {"uuid": U1}}))
+
+    created = asyncio.run(client.ensure_snapshot(U1, S1, "daily.1", correlation_id="corr-3"))
+
+    assert created == "2026-11-08T23:07:12Z"
+    assert agent.requests[0][:3] == ("POST", SNAPSHOTS, {"name": "daily.1", "uuid": S1})
+    assert all(h == {"x-ms-correlation-request-id": "corr-3"} for _, _, _, h in agent.requests)
+
+
+def test_failed_snapshot_job_raises(agent, client):
+    agent.reply("POST", SNAPSHOTS, job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("failure", "A snapshot with the specified name already exists."))
+    with pytest.raises(StorageError, match="already exists"):
+        asyncio.run(client.ensure_snapshot(U1, S1, "daily.1"))
+
+
+def test_snapshot_gone_after_its_job_raises(agent, client):
+    agent.reply("POST", SNAPSHOTS, job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("success"))
+    agent.reply("GET", f"{SNAPSHOTS}/{S1}", (404, {"error": {"message": f"snapshot {S1} not found"}}))
+    with pytest.raises(StorageError, match="404"):
+        asyncio.run(client.ensure_snapshot(U1, S1, "daily.1"))
+
+
+def test_delete_snapshot(agent, client):
+    agent.reply("DELETE", f"{SNAPSHOTS}/{S1}", job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("success"))
+    asyncio.run(client.delete_snapshot(U1, S1, correlation_id="corr-4"))
+    assert agent.paths() == [("DELETE", f"{SNAPSHOTS}/{S1}"), ("GET", "/api/cluster/jobs/j1")]
+
+
 # --- 기본 전송 (urllib) ---
 
 
