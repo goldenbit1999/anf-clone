@@ -178,9 +178,11 @@ def pool_list_url(account: str, rg: str = RG, sub: str = SUB) -> str:
 
 
 def create_pool(account: str, name: str, size: int = 4 * TIB, service_level: str = "Premium",
-                tags: dict | None = None, timeout: float = POLL_TIMEOUT) -> dict:
-    """새 풀을 PUT하고 작업이 Succeeded가 될 때까지 기다린다. 반환: GET 본문."""
+                tags: dict | None = None, timeout: float = POLL_TIMEOUT, qos_type: str | None = None) -> dict:
+    """새 풀을 PUT하고 작업이 Succeeded가 될 때까지 기다린다. qos_type이 None이면 보내지 않는다(Auto). 반환: GET 본문."""
     body = {"location": LOC, "properties": {"size": size, "serviceLevel": service_level}}
+    if qos_type is not None:
+        body["properties"]["qosType"] = qos_type
     if tags is not None:
         body["tags"] = tags
     r = call("PUT", pool_url(account, name), body)
