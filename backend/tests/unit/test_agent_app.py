@@ -49,9 +49,11 @@ class FakeManager:
     def recover(self):
         self.calls.append("recover")
 
-    def create(self, *args, clone=None):
+    def create(self, *args, clone=None, qos=None):
         self.gate.wait(5)
         self.calls.append(("create", *args, clone))
+        if qos is not None:
+            self.calls.append(("qos", args[0], qos))
         if self.error:
             raise self.error
 
@@ -187,6 +189,56 @@ def test_invalid_clone_is_rejected_without_a_job(manager, client, clone):
     assert r.status_code == 400
     assert r.json()["error"]["message"]
     assert not any(isinstance(c, tuple) for c in manager.calls)
+
+
+# 처리량 한도: ONTAP 볼륨의 인라인 QoS 필드. 클론은 값을 MiB/s로 읽고 소수를 받는다 (처리량 설계 결정 8, §6.1)
+
+
+@pytest.mark.parametrize("value, expected", [(12.5, 12.5), (10, 10.0), (0.062, 0.062), (6000, 6000.0)])
+def test_post_volume_with_a_throughput_limit(manager, client, value, expected):
+    # 위 한도는 두지 않는다: Auto 값은 4,500을 넘을 수 있다
+    r = client.post("/api/storage/volumes", json=body(qos={"policy": {"max_throughput_mbps": value}}))
+    assert r.status_code == 202
+    assert wait_job(client, r.json()["job"]["_links"]["self"]["href"])["state"] == "success"
+    assert ("qos", U1, expected) in manager.calls
+    assert isinstance(next(c[2] for c in manager.calls if c[0] == "qos"), float)
+
+
+@pytest.mark.parametrize("qos", [
+    None, [], {}, {"policy": None}, {"policy": {}},
+    {"policy": {"max_throughput_mbps": 0}},
+    {"policy": {"max_throughput_mbps": -1}},
+    {"policy": {"max_throughput_mbps": "10"}},
+    {"policy": {"max_throughput_mbps": True}},
+    {"policy": {"max_throughput_mbps": 10, "name": "pg1"}},
+    {"policy": {"max_throughput_iops": 100}},
+    {"policy": {"max_throughput_mbps": 10}, "min_throughput_mbps": 1},
+], ids=str)
+def test_invalid_qos_is_rejected_without_a_job(manager, client, qos):
+    r = client.post("/api/storage/volumes", json=body(qos=qos))
+    assert r.status_code == 400
+    assert "qos" in r.json()["error"]["message"]
+    assert not any(isinstance(c, tuple) for c in manager.calls)
+
+
+def test_non_finite_qos_is_rejected(manager, client):
+    raw = ('{"uuid": "%s", "name": "%s", "size": %d, "nas": {"path": "/vol1", "unix_permissions": 770, '
+           '"protocols": ["nfs3"]}, "qos": {"policy": {"max_throughput_mbps": Infinity}}}') % (U1, NAME1, GIB)
+    r = client.post("/api/storage/volumes", content=raw, headers={"content-type": "application/json"})
+    assert r.status_code == 400
+
+
+def test_post_with_another_limit_is_another_job(manager, client):
+    # 한도가 job 키에 들어간다. anf-api가 포기한 job에 다른 한도의 요청이 합쳐지지 않는다 (결정 8)
+    manager.gate.clear()
+    def post(mbps):
+        return client.post("/api/storage/volumes", json=body(qos={"policy": {"max_throughput_mbps": mbps}}))
+
+    first, again, other = (post(m).json()["job"]["uuid"] for m in (10, 10, 20))
+    manager.gate.set()
+    assert first == again != other
+    wait_job(client, f"/api/cluster/jobs/{other}")
+    assert [c for c in manager.calls if c[0] == "qos"] == [("qos", U1, 10.0), ("qos", U1, 20.0)]
 
 
 def test_failed_create_is_a_failed_job(manager, client):

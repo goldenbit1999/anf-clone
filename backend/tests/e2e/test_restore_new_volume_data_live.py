@@ -21,8 +21,8 @@ import pytest
 import live_api
 from live_api import TIB, create_pool
 from dataplane_live import (
-    ACCT, agent_call, create_volume, delete_volume, fsid_of, GIB, instance_name, instances, lv_name, mount_ip, note,
-    NS, one_shot, out, setup_pool, sh, SKIP_UNLESS_ROOT, token,
+    ACCT, agent_call, create_volume, DATA_MIBPS, delete_volume, fsid_of, GIB, instance_name, instances, lv_name,
+    mount_ip, note, NS, one_shot, out, setup_pool, sh, SKIP_UNLESS_ROOT, token,
 )
 from snapshot_live import (
     create_snapshot, delete_snapshot, exported_paths, exports_file, instance_etab, lsattr_d, snap_mounts,
@@ -37,7 +37,9 @@ from restore_live import (
     WRITE_REFUSALS,
 )
 
-pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT]
+# 데이터를 쓰므로 Manual 풀과 DATA_MIBPS 한도로 볼륨을 만든다 (처리량 설계 결정 17)
+pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT,
+              pytest.mark.usefixtures("manual_data")]
 
 POOL2 = "e2e-vol-pool2"
 
@@ -155,7 +157,7 @@ def test_ac02_ac03_ac04a_content_and_independence(agent, api, clients, ac, proto
 def test_ac04b_nfsv41_volume_in_another_pool_from_nfsv3_snapshot(agent, api, clients):
     api()
     setup_pool()
-    create_pool(ACCT, POOL2, 4 * TIB, "Standard")
+    create_pool(ACCT, POOL2, 4 * TIB, "Standard", qos_type="Manual")  # 64 MiB/s: DATA_MIBPS 볼륨 하나
     tok = token("nac04b")
     v = create_volume("vn4", tok, protocols=["NFSv3"])
     c = clients()
@@ -186,7 +188,9 @@ def test_ac04b_nfsv41_volume_in_another_pool_from_nfsv3_snapshot(agent, api, cli
          read=out(rd), v3_mount=out(v3), list=sorted(nlist))
     assert n["id"].split("/capacityPools/")[1].startswith(POOL2 + "/")
     assert np_["serviceLevel"] == "Standard" and vprops["serviceLevel"] == "Premium"
-    assert np_["actualThroughputMibps"] == GIB / TIB * 16 and vprops["actualThroughputMibps"] == GIB / TIB * 64
+    # 두 풀 모두 Manual이다(결정 17): Auto 1 GiB Standard(0.016 MiB/s)로는 기록을 읽는 데 몇 분이 걸린다.
+    # 서비스 수준별 Auto 공식 값은 test_throughput_limit_contract_live.py가 본다
+    assert np_["actualThroughputMibps"] == np_["throughputMibps"] == DATA_MIBPS == vprops["actualThroughputMibps"]
     assert np_["protocolTypes"] == ["NFSv4.1"] and vprops["protocolTypes"] == ["NFSv3"]
     assert np_["exportPolicy"]["rules"][0]["nfsv41"] is True and np_["exportPolicy"]["rules"][0]["nfsv3"] is False
     assert ct == s_tree and cbase == s_tree

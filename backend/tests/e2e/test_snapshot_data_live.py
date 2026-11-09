@@ -31,7 +31,9 @@ from snapshot_live import (
     SNAPSHOT_WRITES, thin_used_bytes, vol_snap_lvs,
 )
 
-pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT]
+# 데이터를 쓰므로 Manual 풀과 DATA_MIBPS 한도로 볼륨을 만든다 (처리량 설계 결정 17)
+pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT,
+              pytest.mark.usefixtures("manual_data")]
 
 PROTOCOLS = [("NFSv3", "3"), ("NFSv4.1", "4.1")]
 MIB = 1 << 20

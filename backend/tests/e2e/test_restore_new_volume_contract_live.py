@@ -32,7 +32,9 @@ from revert_live import (
 )
 from restore_live import cl_tags, put_restore, restore_body, restore_volume, state_in
 
-pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT]
+# 기록(16 MiB)을 쓰므로 Manual 풀과 DATA_MIBPS 한도로 볼륨을 만든다 (처리량 설계 결정 17)
+pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT,
+              pytest.mark.usefixtures("manual_data")]
 
 ACCT2 = "e2e-vol-acct2"
 SNAPSHOT_ID_MSG = ("The 'properties.snapshotId' property must be a snapshot resource ID: /subscriptions/{id}"
@@ -163,7 +165,7 @@ def test_ac07_rejections_create_nothing(agent, api, clients):
     db = srv.db_path
     setup_pool()
     create_account(ACCT2)
-    create_pool(ACCT2, POOL, 4 * TIB, "Premium")
+    create_pool(ACCT2, POOL, 4 * TIB, "Premium", qos_type="Manual")  # vol_body가 throughputMibps를 넣는다 (결정 17)
     v, tok, snaps = small_source("vn7", "nac07", size=2 * GIB, snaps=("S", "S9"))
     s, s9 = snaps["S"], snaps["S9"]
     vb, _, snaps_b = small_source("vn7b", "nac07b", snaps=("SB",), acct=ACCT2)

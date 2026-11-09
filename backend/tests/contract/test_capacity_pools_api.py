@@ -71,14 +71,14 @@ def create(client, url=POOL, **kw):
     return r
 
 
-def add_volume(client, quota_tib):
-    """볼륨 사이클 전이라 볼륨 행을 저장소에 직접 넣는다 (풀 설계 결정 3, CV-1~CV-3)."""
+def add_volume(client, quota_tib, name="v1"):
+    """볼륨 행을 저장소에 직접 넣는다 (풀 설계 결정 3, CV-1~CV-3). 볼륨 규칙은 test_volumes_api.py가 본다."""
     with client.app.state.store.transaction() as tx:
         tx.put_resource(Resource(
-            id=f"{POOL_PATH}/volumes/v1", type="Microsoft.NetApp/netAppAccounts/capacityPools/volumes",
-            subscription_id=SUB, resource_group="rg1", name="v1", location="westus2", tags={},
-            properties={"usageThreshold": quota_tib * TIB}, provisioning_state="Succeeded",
-            parent_id=POOL_PATH,
+            id=f"{POOL_PATH}/volumes/{name}", type="Microsoft.NetApp/netAppAccounts/capacityPools/volumes",
+            subscription_id=SUB, resource_group="rg1", name=name, location="westus2", tags={},
+            properties={"usageThreshold": round(quota_tib * TIB), "serviceLevel": "Premium"},
+            provisioning_state="Succeeded", parent_id=POOL_PATH,
         ))
 
 
@@ -311,6 +311,32 @@ def test_cv2_shrinking_below_volume_quota_sum_is_400(client, method):
         r = client.put(POOL, json=pool_body(size_tib=2))
     assert error_code(r) == (400, "BadRequest")
     assert client.get(POOL).json()["properties"]["size"] == 4 * TIB
+
+
+def test_utilized_throughput_is_the_volume_limit_sum_in_every_pool_body(client):
+    # 처리량 설계 결정 5: Auto 볼륨 한도 = round(할당량 TiB × 64, 3). 1 TiB = 64.0, 101 GiB = 6.312
+    create(client)
+    add_volume(client, 1)
+    add_volume(client, 101 / 1024, name="v2")
+    assert client.get(POOL).json()["properties"]["utilizedThroughputMibps"] == 70.312
+    assert client.get(POOLS).json()["value"][0]["properties"]["utilizedThroughputMibps"] == 70.312
+    r = client.patch(POOL, json={"tags": {"a": "1"}})
+    assert r.json()["properties"]["utilizedThroughputMibps"] == 70.312
+    wait_terminal(client, r.headers["Azure-AsyncOperation"])
+    assert client.get(r.headers["Location"]).json()["properties"]["utilizedThroughputMibps"] == 70.312
+    r = client.put(POOL, json=pool_body())
+    assert r.json()["properties"]["utilizedThroughputMibps"] == 70.312
+
+
+def test_auto_to_manual_pool_patch_moves_volume_limits_to_throughput_mibps(client):
+    create(client)
+    add_volume(client, 101 / 1024)
+    r = client.patch(POOL, json={"properties": {"qosType": "Manual"}})
+    assert r.status_code == 202
+    assert wait_terminal(client, r.headers["Azure-AsyncOperation"])["status"] == "Succeeded"
+    v1 = client.app.state.store.get_resource(f"{POOL_PATH}/volumes/v1")
+    assert v1.properties["throughputMibps"] == 6.312
+    assert client.get(POOL).json()["properties"]["utilizedThroughputMibps"] == 6.312
 
 
 def test_cv3_service_level_change_with_volume_is_400(client):

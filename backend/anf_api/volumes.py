@@ -5,6 +5,8 @@
 규칙 위반은 검사와 쓰기를 같은 트랜잭션에서 하고 동기로 거절한다
 (결정 13·14). 검사 순서: 이름 → 본문 형식 → 부모 존재·상태 → 진행 중 작업 → 불변 속성 → 경로 중복 → 용량.
 스냅샷에서 만드는 볼륨(`snapshotId`, FR-07)은 부모 검사 뒤에 원본 스냅샷을 검사한다 (복원 설계 결정 13).
+처리량 한도(FR-08): Auto 풀 볼륨은 할당량 공식, Manual 풀 볼륨은 `throughputMibps`(필수, 1~4,500)다. 풀 QoS 유형에
+기대는 검사는 부모 상태 검사 뒤에, Manual 풀 예산은 용량 검사 뒤에 한다 (처리량 설계 결정 3·4·7, §4.2).
 
 데이터 효과를 아직 만들지 않은 속성은 저장만 하지 않고 거절한다. 클론이 지금 하는 값과 같으면 받는다 (결정 4).
 """
@@ -29,13 +31,20 @@ from anf_api.arm_rules import (
     unsupported_property,
     volume_id,
 )
-from anf_api.capacity_pools import MIBPS_PER_TIB, TIB
+from anf_api.capacity_pools import (
+    MIBPS_PER_TIB,
+    TIB,
+    total_throughput_mibps,
+    utilized_throughput_mibps,
+    volume_throughput_mibps,
+)
 from anf_api.snapshots import ensure_not_cloning, snapshot_not_found
 from anf_api.state_store import Operation, Resource, StateStore, Tx
 
 GIB = 1 << 30
 DEFAULT_MIN_SIZE = 50 * GIB  # [스펙 2]. 검증할 때만 ANF_MIN_VOLUME_SIZE_GIB로 낮춘다 (결정 3)
 _MAX_SIZE = 100 * TIB  # 일반 볼륨 상한 [스펙 2 설명]. large volume은 범위 밖
+_MAX_THROUGHPUT = 4500  # 일반 볼륨의 Manual QoS 한도 상한 MiB/s [처리량 브리프 스펙 S1, 문서 D4]
 
 _TOKEN_CHARS = re.compile(r"[a-zA-Z0-9\-_]*")
 _SUBNET_ID = re.compile(
@@ -54,10 +63,11 @@ _READ_ONLY_PROPERTIES = {"provisioningState", "actualThroughputMibps", "mountTar
 # deleteBaseSnapshot: 스펙과 문서가 지우는 대상을 다르게 읽혀 false만 받는다 (복원 설계 결정 7)
 _FIXED = {"kerberosEnabled": False, "ldapEnabled": False, "isLargeVolume": False, "coolAccess": False,
           "deleteBaseSnapshot": False}
-# 값이 있으면 미룬 기능이다: Manual QoS 처리량(FR-08), 백업 복원, 데이터 보호(복제)
-_NOT_YET = {"throughputMibps", "backupId", "dataProtection"}
-# 생성 때 요청 값을 쓰는 속성
-_SETTABLE = ("creationToken", "usageThreshold", "subnetId", "protocolTypes", "networkFeatures", "unixPermissions")
+# 값이 있으면 미룬 기능이다: 백업 복원, 데이터 보호(복제)
+_NOT_YET = {"backupId", "dataProtection"}
+# 생성 때 요청 값을 쓰는 속성. throughputMibps는 Manual 풀 볼륨에만 있다 (처리량 결정 3·4)
+_SETTABLE = ("creationToken", "usageThreshold", "subnetId", "protocolTypes", "networkFeatures", "unixPermissions",
+             "throughputMibps")
 # 서비스가 정하는 값. 요청 값이 그와 다르면 미룬 기능이다
 _SERVICE_HELD = ("serviceLevel", "snapshotDirectoryVisible", "securityStyle", "exportPolicy")
 _PROPERTIES = {*_SETTABLE, *_SERVICE_HELD, "fileSystemId", "snapshotId", *_FIXED, *_NOT_YET}
@@ -70,8 +80,9 @@ _IMMUTABLE = {
     "snapshotId": "SnapshotId cannot be changed.",
 }
 _ARM_IDS = ("subnetId", "snapshotId")  # ARM ID는 대소문자를 구분하지 않는다
-# 생성 뒤에도 바꿀 수 있는 속성. Azure 네트워크 개념이라 데이터 효과가 없고 저장만 한다
-_CHANGEABLE = {"networkFeatures"}
+# 생성 뒤에도 바꿀 수 있는 속성. networkFeatures는 Azure 네트워크 개념이라 데이터 효과가 없고 저장만 한다.
+# throughputMibps는 Manual 볼륨의 한도이고, 처리기가 agent에 새 값을 건다 (처리량 결정 1·8)
+_CHANGEABLE = {"networkFeatures", "throughputMibps"}
 
 
 # --- 본문 검사 ---
@@ -151,6 +162,10 @@ def _check_property(key: str, value, min_size: int):
         if not isinstance(value, dict):
             raise invalid_content("The 'properties.exportPolicy' property must be an object.")
         return value
+    if key == "throughputMibps":  # 소수를 받고 받은 값을 그대로 저장한다 (처리량 결정 3). 범위는 _check_throughput_range
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _throughput_range()
+        return float(value)
     if key == "snapshotId":  # 스냅샷의 ARM 리소스 ID (format: arm-id) [복원 브리프 스펙 1·2]
         if not isinstance(value, str) or not _SNAPSHOT_ID.fullmatch(value):
             raise invalid_content(
@@ -162,6 +177,28 @@ def _check_property(key: str, value, min_size: int):
     if not isinstance(value, str):
         raise invalid_content("The 'properties.fileSystemId' property must be a string.")
     return value
+
+
+def _throughput_range() -> ArmError:
+    return invalid_content("The 'properties.throughputMibps' property must be a number from 1 to 4500.")
+
+
+def _check_throughput_range(changes: dict) -> None:
+    """새 값의 범위 1~4,500 (처리량 결정 3). 생성은 늘 보고, 갱신은 값을 바꿀 때만 본다 (_settle_throughput)."""
+    mibps = changes.get("throughputMibps")
+    if mibps is not None and not 1 <= mibps <= _MAX_THROUGHPUT:  # nan도 여기서 거절된다
+        raise _throughput_range()
+
+
+def _settle_throughput(props: dict, changes: dict) -> dict:
+    """갱신: 저장된 값과 소수 셋째 자리까지 같으면 바꾸지 않는 것으로 보고 저장된 값을 둔다. 그때는 범위를 보지
+    않는다. Auto → Manual 전환이 채운 값은 1 미만일 수 있어(Standard 50 GiB = 0.781) GET 본문 재PUT이 되게
+    하려는 것이다 (처리량 설계 §9-5)."""
+    mibps, old = changes.get("throughputMibps"), props.get("throughputMibps")
+    if mibps is not None and old is not None and round(mibps, 3) == round(old, 3):
+        return {**changes, "throughputMibps": old}
+    _check_throughput_range(changes)
+    return changes
 
 
 def _check_properties(props, min_size: int) -> dict:
@@ -182,7 +219,7 @@ def _check_properties(props, min_size: int) -> dict:
                 raise invalid_content(f"The 'properties.{key}' property must be true or false.")
             if value != _FIXED[key]:
                 raise unsupported_property(f"properties.{key}")
-        elif not (key in ("unixPermissions", "snapshotId") and value is None):  # nullable [스펙 2]
+        elif not (key in ("unixPermissions", "snapshotId", "throughputMibps") and value is None):  # nullable [스펙 2]
             changes[key] = _check_property(key, value, min_size)
     return changes
 
@@ -250,11 +287,6 @@ def default_export_rule(protocol_types: list[str]) -> dict:
     }
 
 
-def actual_throughput_mibps(props: dict) -> float:
-    """Auto QoS 볼륨의 처리량 한도 = 할당량(2진 TiB) × 서비스 수준 단가. Premium 100 GiB = 6.25 [녹화 V1]."""
-    return props["usageThreshold"] / TIB * MIBPS_PER_TIB[props["serviceLevel"]]
-
-
 def volume_body(res: Resource) -> dict:
     parts = res.id.split("/")  # .../netAppAccounts/{a}/capacityPools/{p}/volumes/{v}
     return {
@@ -266,7 +298,8 @@ def volume_body(res: Resource) -> dict:
         "properties": {
             "provisioningState": res.provisioning_state,
             **res.properties,  # mountTargets는 생성 작업이 성공한 뒤 처리기가 넣는다 (결정 12)
-            "actualThroughputMibps": actual_throughput_mibps(res.properties),
+            # Auto는 할당량 공식(Premium 100 GiB = 6.25 [녹화 V1]), Manual은 throughputMibps (처리량 결정 2·5)
+            "actualThroughputMibps": volume_throughput_mibps(res.properties),
         },
     }
 
@@ -298,6 +331,40 @@ def _service_level_mismatch(requested: str, pool_level: str) -> ArmError:
         f"'{pool_level}'. Moving a volume to another service level is not supported by this ANF clone.")
 
 
+def _check_qos_type(pool: Resource, changes: dict, creating: bool) -> None:
+    """풀 QoS 유형에 기대는 throughputMibps 규칙. 실서비스 기본값과 거절 코드는 [미확인]이라 클론 규칙이다
+    (처리량 결정 3·4). Auto 볼륨 한도는 할당량이 정한다."""
+    if pool.properties["qosType"] == "Auto":
+        if "throughputMibps" in changes:
+            raise ArmError(400, "BadRequest", "The 'properties.throughputMibps' property can be set only for a "
+                                              "volume in a Manual QoS capacity pool.")
+    elif creating and "throughputMibps" not in changes:
+        raise invalid_content(
+            "The 'properties.throughputMibps' property is required for a volume in a Manual QoS capacity pool.")
+
+
+def _check_budget(tx: Tx, pool: Resource, volume_id: str, mibps: float) -> None:
+    """Manual 풀: 다른 모든 볼륨 행(상태와 무관)의 한도 합 + 새 값 ≤ 풀 총 처리량, 소수 셋째 자리에서 비교한다
+    (처리량 결정 7) [문서 D5·D7]. Auto 풀은 보지 않는다: 할당량 규칙이 같은 것을 보장하고, 반올림한 Auto 한도의
+    합은 총 처리량을 조금 넘을 수 있다 (Premium 3 GiB × 341 = 64.108 > 64)."""
+    total = round(total_throughput_mibps(pool.properties), 3)
+    used = utilized_throughput_mibps([v for v in tx.list_children(pool.id, VOLUME_TYPE) if v.id != volume_id])
+    if round(used + mibps, 3) > total:
+        free = max(round(total - used, 3), 0.0)
+        raise ArmError(400, "BadRequest", f"Requested throughput not available. Capacity pool '{pool.name}' has "
+                                          f"{total} MiB/s in total and {free} MiB/s left for this volume.")
+
+
+def _check_throughput_change(tx: Tx, res: Resource, changes: dict) -> None:
+    """갱신(PUT·PATCH)의 한도 규칙. 예산은 한도를 올릴 때만 본다: 줄이거나 같은 값이면 예산을 더 쓰지 않는다.
+    Auto → Manual 전환으로 옮겨 받은 반올림 값의 합이 총 처리량을 조금 넘는 풀에서도 줄이기는 된다."""
+    pool = tx.get_resource(res.parent_id)
+    _check_qos_type(pool, changes, creating=False)
+    mibps = changes.get("throughputMibps")
+    if mibps is not None and mibps > res.properties["throughputMibps"]:
+        _check_budget(tx, pool, res.id, mibps)
+
+
 def _new_volume(tx: Tx, rid: str, parent_id: str, subscription_id: str, resource_group: str,
                 name: str, location: str, tags: dict, changes: dict) -> Resource:
     pool = tx.get_resource(parent_id)
@@ -313,8 +380,7 @@ def _new_volume(tx: Tx, rid: str, parent_id: str, subscription_id: str, resource
                        f"'{pool.id}' is being deleted.")
     if pool.provisioning_state != "Succeeded":
         raise ArmError(400, "BadRequest", "Volume cannot be created in a pool that isn't in state succeeded.")
-    if pool.properties["qosType"] == "Manual":
-        raise invalid_content("Volumes in a Manual QoS capacity pool are not supported by this ANF clone.")
+    _check_qos_type(pool, changes, creating=True)
     for key in ("creationToken", "usageThreshold", "subnetId"):
         if key not in changes:
             raise invalid_content(f"The 'properties.{key}' property is required.")
@@ -346,6 +412,8 @@ def _new_volume(tx: Tx, rid: str, parent_id: str, subscription_id: str, resource
     allocated = sum(v.properties["usageThreshold"] for v in tx.list_children(parent_id, VOLUME_TYPE))
     if allocated + props["usageThreshold"] > pool.properties["size"]:
         raise ArmError(400, "BadRequest", "Pool size too small for total volume size.")
+    if "throughputMibps" in props:  # Manual 풀 (_check_qos_type)
+        _check_budget(tx, pool, rid, props["throughputMibps"])
     return Resource(
         id=rid, type=VOLUME_TYPE, subscription_id=subscription_id, resource_group=resource_group,
         name=name, location=location, tags=tags, properties=props, provisioning_state="Creating",
@@ -435,6 +503,7 @@ def put_volume(store: StateStore, subscription_id: str, resource_group: str, acc
     with store.transaction() as tx:
         existing = tx.get_resource(rid)
         if existing is None:
+            _check_throughput_range(changes)  # 본문 검사라 풀 검사보다 먼저다
             res = _new_volume(tx, rid, parent_id, subscription_id, resource_group, name, location,
                               tags, changes)
             op = tx.create_operation(res, "CREATE", "Creating", correlation_id=correlation_id)
@@ -444,7 +513,9 @@ def put_volume(store: StateStore, subscription_id: str, resource_group: str, acc
         if existing.location.lower() != location.lower():
             raise location_conflict(existing.name, existing.resource_group, existing.location, location)
         # 빠진 속성은 기존 값을 유지한다 (풀 결정 8과 같음)
+        changes = _settle_throughput(existing.properties, changes)
         properties = _apply_update(existing.properties, changes)
+        _check_throughput_change(tx, existing, changes)
         previous = {"tags": existing.tags, "properties": existing.properties}
         op = tx.create_operation(existing, "UPDATE", "Updating",
                                  previous=previous, correlation_id=correlation_id)
@@ -468,7 +539,9 @@ def patch_volume(store: StateStore, subscription_id: str, resource_group: str, a
         _ensure_terminal(tx, res)
         if location is not None and res.location.lower() != location.lower():
             raise location_conflict(res.name, res.resource_group, res.location, location)
+        changes = _settle_throughput(res.properties, changes)
         properties = _apply_update(res.properties, changes)
+        _check_throughput_change(tx, res, changes)
         previous = {"tags": res.tags, "properties": res.properties}
         op = tx.create_operation(res, "PATCH", "Patching", previous=previous, correlation_id=correlation_id)
         if tags is not None:
@@ -565,7 +638,8 @@ def make_handlers(store: StateStore, storage) -> dict:
         clone = clone_source(props)
         ip = await storage.ensure_volume(
             fsid, "/" + props["creationToken"], props["usageThreshold"], int(props["unixPermissions"]),
-            _AGENT_PROTOCOL[props["protocolTypes"][0]], correlation_id=op.correlation_id, clone=clone)
+            _AGENT_PROTOCOL[props["protocolTypes"][0]], correlation_id=op.correlation_id, clone=clone,
+            qos=volume_throughput_mibps(props))  # 응답의 actualThroughputMibps와 같은 값 (처리량 결정 2·8)
         with store.transaction() as tx:
             res = tx.get_resource(op.resource_id)
             # 워커가 끝낼 때 리소스를 다시 읽으므로 여기서 쓴 값이 남는다

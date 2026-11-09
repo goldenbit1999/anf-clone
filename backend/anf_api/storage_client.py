@@ -51,14 +51,17 @@ class StorageClient:
 
     async def ensure_volume(self, uuid: str, junction_path: str, size: int, unix_permissions: int,
                             protocol: str, correlation_id: str | None = None,
-                            clone: tuple[str, str] | None = None) -> str:
+                            clone: tuple[str, str] | None = None, qos: float | None = None) -> str:
         """볼륨이 있게 하고(없으면 만들고) data LIF IP를 돌려준다. clone = (부모 볼륨 uuid, 부모 스냅샷 uuid)면
-        그 스냅샷에서 만든다 (ONTAP FlexClone 필드, 복원 설계 결정 14)."""
+        그 스냅샷에서 만든다 (ONTAP FlexClone 필드, 복원 설계 결정 14). qos는 처리량 한도(MiB/s)이고 ONTAP 볼륨의
+        인라인 QoS 필드로 보낸다 (처리량 설계 결정 8)."""
         body = {"uuid": uuid, "name": "vol_" + uuid.replace("-", ""), "size": size,
                 "nas": {"path": junction_path, "unix_permissions": unix_permissions, "protocols": [protocol]}}
         if clone is not None:
             body["clone"] = {"is_flexclone": True, "parent_volume": {"uuid": clone[0]},
                              "parent_snapshot": {"uuid": clone[1]}}
+        if qos is not None:
+            body["qos"] = {"policy": {"max_throughput_mbps": qos}}
         await self._run_job("POST", "/api/storage/volumes", body, correlation_id)
         path = f"/api/storage/volumes/{uuid}"
         status, record = await self._call("GET", path, None, correlation_id)

@@ -10,7 +10,9 @@ aggregate를 쓴다. 테스트는 자기가 만든 볼륨(경로 `it-<임의>`)�
     wsl -d Ubuntu -u root -e bash -c 'cd <repo> && /home/<user>/.venvs/anf-clone/bin/python -m pytest backend/tests/integration'
 """
 
+import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -20,7 +22,7 @@ from pathlib import Path
 import pytest
 
 from storage_agent.flexvol import FlexVolManager, VolumeError
-from storage_agent.nfs_instance import NETWORK, VOLUME_IPS, container_name
+from storage_agent.nfs_instance import NETWORK, VOLUME_IPS, container_name, htb_rate_bits
 from storage_agent.runner import CommandError, Result, Runner
 
 pytestmark = [
@@ -594,3 +596,111 @@ def test_volume_from_snapshot_resumes_after_stopping_midway(mgr, vol, vol2, fail
                   "cat /m/a && ls -A /m/.snapshot && cat /m/.snapshot/s1/a && stat -c %a /m")
     assert read.returncode == 0, read.stdout + read.stderr
     assert read.stdout.split() == ["one", "s1", "one", "755"]
+
+
+# --- 처리량 한도: 인스턴스 netns 안의 IFB + HTB (처리량 설계 §6.2, AC-11) ---
+
+
+def in_netns(vid, *argv):
+    pid = sh("docker", "inspect", "-f", "{{.State.Pid}}", container_name(vid)).stdout.strip()
+    assert pid not in ("", "0"), f"instance of {vid} is not running"
+    return sh("nsenter", "-t", pid, "-n", *argv)
+
+
+def htb_rate(vid):
+    """netns ifb0의 HTB 클래스 1:1 rate (bit/s). tc는 `87710Kbit`처럼 단위를 붙여 보인다. 없으면 None."""
+    out = in_netns(vid, "tc", "class", "show", "dev", "ifb0").stdout
+    match = re.search(r"class htb 1:1 .*?rate (\d+)([KMG]?)bit", out)
+    if match is None:
+        return None
+    return int(match[1]) * {"": 1, "K": 10**3, "M": 10**6, "G": 10**9}[match[2]]
+
+
+def redirect_filters(vid):
+    """eth0의 방향별 matchall redirect 필터 수 (`tc -j filter`는 필터마다 머리 줄과 본문 줄을 낸다)."""
+    counts = {}
+    for direction in ("ingress", "egress"):
+        rows = json.loads(in_netns(vid, "tc", "-j", "filter", "show", "dev", "eth0", direction).stdout or "[]")
+        counts[direction] = sum(1 for r in rows if r.get("kind") == "matchall" and "options" in r)
+    return counts
+
+
+def host_ifbs():
+    return sh("ip", "-o", "link", "show", "type", "ifb").stdout.splitlines()
+
+
+def assert_limited(vid, mibps):
+    rate = htb_rate(vid)
+    assert rate is not None, "no HTB class in the instance netns"
+    assert abs(rate - htb_rate_bits(mibps)) <= htb_rate_bits(mibps) * 1e-3, (rate, htb_rate_bits(mibps))
+    assert redirect_filters(vid) == {"ingress": 1, "egress": 1}
+
+
+def test_limit_lives_in_the_instance_netns_and_is_idempotent(mgr, vol):
+    vid, token = vol
+    before = host_ifbs()
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs4.1", qos=10.0)
+
+    assert_limited(vid, 10.0)
+    assert mgr.record(vid)["qos"] == {"policy": {"max_throughput_mbps": 10.0}}
+    assert "anf_qos=10.0" in volume_tags(vid)
+    assert host_ifbs() == before  # IFB는 netns 안에만 있다 (결정 9)
+
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs4.1", qos=12.5)  # 한도 변경: 같은 uuid의 POST
+    assert_limited(vid, 12.5)  # 필터는 여전히 방향마다 하나다
+    tags = volume_tags(vid)
+    assert "anf_qos=12.5" in tags and "anf_qos=10.0" not in tags
+
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs4.1")  # qos 없는 POST는 태그를 그대로 둔다
+    assert_limited(vid, 12.5)
+    wrote = client(mgr.record(vid)["data_lif"]["ip"]["address"], token, "4.1", "echo hello > /m/f && cat /m/f")
+    assert (wrote.returncode, wrote.stdout) == (0, "hello\n"), wrote.stderr
+
+
+def test_volume_without_a_limit_has_no_tc(mgr, vol):
+    vid, token = vol
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs3")
+    assert in_netns(vid, "ip", "link", "show", "ifb0").returncode != 0
+    assert "clsact" not in in_netns(vid, "tc", "qdisc", "show", "dev", "eth0").stdout
+    assert "qos" not in mgr.record(vid)
+
+
+def test_limit_comes_back_when_the_instance_starts_again(mgr, vol):
+    # 인스턴스를 띄울 때마다 netns가 새로 생겨 tc가 사라진다. 시작 복구(docker start)와 다시 만들기(docker run)가
+    # 태그의 한도를 다시 건다 (결정 10, S7 L1·L2·L5)
+    vid, token = vol
+    mp = ROOT / "ns" / token
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs3", qos=10.0)
+    assert sh("docker", "stop", container_name(vid)).returncode == 0
+    for _ in range(120):
+        if sh("umount", str(mp)).returncode == 0:
+            break
+        time.sleep(0.5)
+    mgr.recover()
+    assert_limited(vid, 10.0)
+
+    assert sh("docker", "rm", "-f", container_name(vid)).returncode == 0
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs3")
+    assert_limited(vid, 10.0)
+
+
+def test_revert_keeps_the_limit(mgr, vol):
+    vid, token = vol
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs4.1", qos=10.0)
+    sid = str(uuid.uuid4())
+    mgr.create_snapshot(vid, sid, "s1")
+    mgr.restore(vid, sid, str(uuid.uuid4()))
+    assert "anf_qos=10.0" in volume_tags(vid)  # 새 볼륨 LV가 태그를 물려받았다
+    assert_limited(vid, 10.0)
+    assert not blocked(vid)
+
+
+def test_volume_from_snapshot_gets_its_own_limit(mgr, vol, vol2):
+    vid, token = vol
+    nid, ntoken = vol2
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs3", qos=10.0)
+    sid = str(uuid.uuid4())
+    mgr.create_snapshot(vid, sid, "s1")
+    mgr.create(nid, f"/{ntoken}", GIB, 770, "nfs3", clone=(vid, sid), qos=20.0)
+    assert_limited(nid, 20.0)
+    assert_limited(vid, 10.0)

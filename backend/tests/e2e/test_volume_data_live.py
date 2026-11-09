@@ -30,7 +30,9 @@ from dataplane_live import (
     POOL, setup_pool, sh, SKIP_UNLESS_ROOT, thin_data_percent, token, vol_url, VOLUME_IPS,
 )
 
-pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT]
+# 데이터를 쓰므로 Manual 풀과 DATA_MIBPS 한도로 볼륨을 만든다 (처리량 설계 결정 17)
+pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT,
+              pytest.mark.usefixtures("manual_data")]
 
 # 새 볼륨의 첫 NFSv4.1 쓰기 한도. 정상은 1초 안팎이고, 유예 기간에 걸리면 90초 넘게 막힌다 (1회차 AC-03)
 FIRST_IO_SECONDS = 10

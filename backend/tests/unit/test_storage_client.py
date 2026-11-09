@@ -117,6 +117,25 @@ def test_ensure_volume_from_a_snapshot_sends_the_flexclone_fields(agent, client)
     }
 
 
+def test_ensure_volume_with_a_throughput_limit_sends_the_qos_policy_field(agent, client):
+    # ONTAP 볼륨의 인라인 QoS 필드. 값은 MiB/s다 (처리량 설계 결정 8)
+    agent.reply("POST", "/api/storage/volumes", job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("success"))
+    agent.reply("GET", f"/api/storage/volumes/{U1}", VOLUME)
+
+    asyncio.run(client.ensure_volume(U1, "/vol1", GIB, 770, "nfs3", qos=6.312))
+
+    assert agent.requests[0][2]["qos"] == {"policy": {"max_throughput_mbps": 6.312}}
+
+
+def test_ensure_volume_without_a_limit_sends_no_qos(agent, client):
+    agent.reply("POST", "/api/storage/volumes", job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("success"))
+    agent.reply("GET", f"/api/storage/volumes/{U1}", VOLUME)
+    ensure(client)
+    assert "qos" not in agent.requests[0][2]
+
+
 def test_failed_job_raises_with_the_agent_message(agent, client):
     agent.reply("POST", "/api/storage/volumes", job("j1"))
     agent.reply("GET", "/api/cluster/jobs/j1", state("failure", "junction path /vol1 is already used"))

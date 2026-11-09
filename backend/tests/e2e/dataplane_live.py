@@ -56,6 +56,19 @@ TOKEN_PREFIX = f"e2ev{RUN}"
 CLIENT_PREFIX = "anfe2e-cli-"
 REJECT_OPTS = "retry=0,soft,timeo=20,retrans=1"  # 거절은 2분 재시도하지 않고 바로 실패로 본다
 ACCT, POOL = "e2e-vol-acct", "e2e-vol-pool"
+# 데이터를 쓰는 e2e 파일의 볼륨 한도 (처리량 설계 결정 17). 1 GiB Premium Auto 볼륨은 0.062 MiB/s라 기존 데이터 시험
+# (채우기 1,229 MiB, 기록 16 MiB 등)이 몇 시간 걸린다. 4 TiB Premium Manual 풀(256 MiB/s)에 볼륨 4개가 들어간다
+DATA_MIBPS = 64.0
+_manual = {"on": False}
+
+
+@pytest.fixture(scope="module")
+def manual_data():
+    """이 픽스처를 쓰는 시험 파일에서는 setup_pool이 Manual 풀을 만들고, vol_body가 throughputMibps(DATA_MIBPS)를
+    넣는다. 그래서 회귀 데이터도 tc 한도를 지난다. Auto 풀에 만들 때는 throughputMibps=None(null은 무시된다)을 준다."""
+    _manual["on"] = True
+    yield
+    _manual["on"] = False
 
 
 def note(tag: str, **data) -> None:
@@ -474,6 +487,8 @@ def vol_body(token_: str | None, size: int | None = GIB, protocols=None, subnet=
         props["subnetId"] = subnet
     if protocols is not None:
         props["protocolTypes"] = protocols
+    if _manual["on"]:
+        props["throughputMibps"] = DATA_MIBPS
     props.update(extra)
     return {"location": LOC, "properties": props}
 
@@ -528,4 +543,4 @@ def default_rule(nfsv3: bool, nfsv41: bool) -> dict:
 
 def setup_pool(size=4 * TIB, acct=ACCT, pool=POOL) -> None:
     create_account(acct)
-    create_pool(acct, pool, size, "Premium")
+    create_pool(acct, pool, size, "Premium", qos_type="Manual" if _manual["on"] else None)

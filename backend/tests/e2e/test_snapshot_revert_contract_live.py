@@ -37,7 +37,9 @@ from revert_live import (
     revert_url, RuleWatch, rv_tags, snapshot_trees, start_script, tree, volume_lvs,
 )
 
-pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT]
+# 기록(16 MiB)을 쓰므로 Manual 풀과 DATA_MIBPS 한도로 볼륨을 만든다 (처리량 설계 결정 17)
+pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT,
+              pytest.mark.usefixtures("manual_data")]
 
 CONFLICT = ("Cannot modify resource with id '{rid}' because the resource entity provisioning state is not terminal. "
             "Please wait for the provisioning state to become terminal and then retry the request.")

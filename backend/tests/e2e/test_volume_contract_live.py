@@ -208,7 +208,8 @@ def test_ac06_invalid_bodies_rejected(agent, api):
         ("subnetId VNet without subnet", "v06", vol_body(tok, subnet=SUBNET_ID.rsplit("/subnets/", 1)[0])),
         ("subnetId missing", "v06", vol_body(tok, subnet=None)),
         ("exportPolicy custom rule", "v06", vol_body(tok, exportPolicy={"rules": [custom_rule]})),
-        ("throughputMibps", "v06", vol_body(tok, throughputMibps=10.0)),
+        # FR-08 전에는 미룬 속성이었다. 이제 범위(1~4,500) 밖의 값이 본문 단계에서 거절된다 (처리량 §4.2)
+        ("throughputMibps below 1", "v06", vol_body(tok, throughputMibps=0.5)),
         ("snapshotDirectoryVisible false", "v06", vol_body(tok, snapshotDirectoryVisible=False)),
         ("snapshotId", "v06", vol_body(tok, snapshotId=str(uuid.uuid4()))),
         ("kerberosEnabled true", "v06", vol_body(tok, kerberosEnabled=True)),

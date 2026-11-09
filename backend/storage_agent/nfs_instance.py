@@ -1,4 +1,4 @@
-"""볼륨 NFS 서버 인스턴스 (볼륨 설계 결정 17·18, ADR D-12 = S2 T1n, 스냅샷 설계 결정 1·6·7).
+"""볼륨 NFS 서버 인스턴스 (볼륨 설계 결정 17·18, ADR D-12 = S2 T1n, 스냅샷 설계 결정 1·6·7, 처리량 설계 결정 9·10).
 
 볼륨마다 knfsd를 자기 네트워크 네임스페이스(privileged 컨테이너)에서 하나씩 띄운다. knfsd의 서버 신원,
 스레드, export 캐시가 netns마다 따로라서, NFSv4.1 클라이언트가 볼륨들을 연결 하나로 합치지 않고
@@ -41,6 +41,16 @@ VOLUME_OPTIONS = "rw,sync,no_subtree_check,no_root_squash,secure,crossmnt,mp"
 # 파일 핸들이 겹쳐 Stale file handle이 된다 (S4 E1·E2)
 SNAPSHOT_OPTIONS = "ro,sync,no_subtree_check,no_root_squash,secure,mp"
 _SETUP_HINT = "Run scripts/setup-wsl-dataplane.sh as root first."
+# HTB는 헤더를 포함한 wire 바이트를 센다. MTU 1500, TCP 타임스탬프의 MSS 1448에서 데이터/wire 이론 상한이
+# 1448/1514 = 0.9564라서, 이 값으로 나누면 어떤 I/O 모양에서도 데이터가 한도를 넘지 않는다 (처리량 결정 12, S7 Q7)
+DATA_PER_WIRE = 0.9564
+IFB = "ifb0"  # 인스턴스 netns 안의 IFB. netns마다 따로라 모든 인스턴스가 같은 이름을 쓴다 (처리량 결정 9, S7 N4)
+_REDIRECT = ["matchall", "action", "mirred", "egress", "redirect", "dev", IFB]
+
+
+def htb_rate_bits(mibps: float) -> int:
+    """볼륨 한도(MiB/s)를 걸 HTB rate(bit/s 정수)."""
+    return round(mibps * 1048576 * 8 / DATA_PER_WIRE)
 
 
 class StartupError(Exception):
@@ -82,6 +92,11 @@ class NfsInstances:
             raise StartupError(
                 "NFSv4 delegations must be off: fs.leases-enable must be 0, or NFSv4.1 clients read stale "
                 f"data after a snapshot revert. {_SETUP_HINT}")
+        # 처리량 한도의 IFB. 저절로 올라가면 호스트 netns에 ifb0·ifb1이 덤으로 생긴다. 이미 올라와 있으면 modprobe는
+        # 아무것도 하지 않는다 (처리량 결정 14, S7 N1)
+        result = self._run(["modprobe", "ifb", "numifbs=0"], check=False)
+        if result.returncode != 0:
+            raise StartupError(f"Kernel module 'ifb' could not be loaded: {result.stderr.strip()}")
 
     def ensure_shared_ns(self) -> None:
         """WSL의 /는 private 마운트라 컨테이너의 rslave 바인드가 거절된다. ns를 자기 자신에 바인드하고
@@ -92,10 +107,45 @@ class NfsInstances:
         if "shared" not in result.stdout.strip().split(","):
             self._run(["mount", "--make-rshared", str(self._ns)])
 
-    def ensure(self, uuid: str, token: str, ip: str, protocol: str) -> None:
-        """인스턴스가 서비스하고 있게 한다. 호스트에 볼륨이 마운트되고 export 파일을 쓴 뒤에 부른다."""
+    def ensure(self, uuid: str, token: str, ip: str, protocol: str, qos: float | None = None) -> None:
+        """인스턴스가 서비스하고 있게 한다. 호스트에 볼륨이 마운트되고 export 파일을 쓴 뒤에 부른다.
+        한도는 시작과 준비 사이에 건다: knfsd가 서비스하기 전이다 (처리량 결정 10)."""
         self.start(uuid, token, ip, protocol)
+        self.limit(uuid, qos)
         self.wait_ready(uuid)
+
+    def limit(self, uuid: str, qos: float | None) -> None:
+        """인스턴스 netns의 송수신을 한도(MiB/s) 하나로 묶는다 (처리량 결정 9·10·12·13, §6.2). eth0의 clsact가
+        양방향을 ifb0으로 보내고, ifb0의 HTB 클래스 1:1과 leaf fq_codel을 지난다. 그래서 읽기와 쓰기가 한도를 나눠 쓴다.
+        멱등이다: 있는 것은 그대로 두고 클래스 rate만 맞춘다. ifb0과 HTB가 먼저, 필터가 나중이다.
+        한도가 없으면 아무것도 하지 않는다. 명령은 호스트의 ip·tc를 nsenter로 netns 안에서 쓴다 (이미지에 없다)."""
+        if qos is None:
+            return
+        pid = self._pid(uuid)
+        if pid is None:
+            raise InstanceError(f"instance {container_name(uuid)} is not running; cannot apply the throughput limit")
+
+        def netns(*argv, check=True):
+            return self._run(["nsenter", "-t", pid, "-n", *argv], check=check)
+
+        def shown(*argv) -> list[dict]:
+            return json.loads(netns("tc", "-j", *argv).stdout or "[]")
+
+        if netns("ip", "link", "show", IFB, check=False).returncode != 0:
+            netns("ip", "link", "add", IFB, "type", "ifb")
+        netns("ip", "link", "set", IFB, "up")
+        qdiscs = shown("qdisc", "show", "dev", IFB)
+        if not any(q["kind"] == "htb" and q["handle"] == "1:" and q.get("root") for q in qdiscs):
+            netns("tc", "qdisc", "add", "dev", IFB, "root", "handle", "1:", "htb", "default", "1")
+        rate = f"{htb_rate_bits(qos)}bit"
+        netns("tc", "class", "replace", "dev", IFB, "parent", "1:", "classid", "1:1", "htb", "rate", rate, "ceil", rate)
+        if not any(q["kind"] == "fq_codel" and q.get("parent") == "1:1" for q in qdiscs):
+            netns("tc", "qdisc", "add", "dev", IFB, "parent", "1:1", "handle", "10:", "fq_codel")
+        if not any(q["kind"] == "clsact" for q in shown("qdisc", "show", "dev", "eth0")):
+            netns("tc", "qdisc", "add", "dev", "eth0", "clsact")
+        for direction in ("ingress", "egress"):
+            if not any(f["kind"] == "matchall" for f in shown("filter", "show", "dev", "eth0", direction)):
+                netns("tc", "filter", "add", "dev", "eth0", direction, *_REDIRECT)
 
     def start(self, uuid: str, token: str, ip: str, protocol: str) -> None:
         """돌고 있지 않으면 띄운다. `docker run`은 진입점이 knfsd를 띄우기 전에 돌아온다 (준비는 wait_ready)."""

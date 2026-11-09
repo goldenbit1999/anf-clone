@@ -28,9 +28,11 @@ class FakeStorage:
     def __init__(self):
         self.calls: list[tuple] = []
         self.error: Exception | None = None
+        self.limits: list = []  # ensure_volume마다 보낸 처리량 한도 (처리량 결정 8)
 
-    async def ensure_volume(self, *args, correlation_id=None, clone=None):
+    async def ensure_volume(self, *args, correlation_id=None, clone=None, qos=None):
         self.calls.append(("ensure", *args, correlation_id))
+        self.limits.append(qos)
         if self.error:
             raise self.error
         return "172.30.0.129"
@@ -177,6 +179,123 @@ def test_pool_with_volume_cannot_be_deleted(client):
     create(client)
     r = client.delete(f"{POOL_PATH}?{V}")
     assert (r.status_code, r.json()["error"]["code"]) == (409, "CannotDeleteResource")
+
+
+# --- 처리량 한도 (FR-08, 처리량 설계 §4, AC-01·02·04·08·09 계약) ---
+
+MANUAL_PATH = f"{ACC_PATH}/capacityPools/manual"
+MVOL_PATH = f"{MANUAL_PATH}/volumes/m1"
+MVOL = f"{MVOL_PATH}?{V}"
+
+
+def manual_pool(client, size_tib=1, level="Ultra"):
+    r = client.put(f"{MANUAL_PATH}?{V}", json={"location": "westus2", "properties": {
+        "size": size_tib * TIB, "serviceLevel": level, "qosType": "Manual"}})
+    assert wait_terminal(client, r.headers["Azure-AsyncOperation"])["status"] == "Succeeded"
+
+
+def put_wait(client, url, b, expected=201):
+    r = client.put(url, json=b)
+    assert r.status_code == expected, r.text
+    assert wait_terminal(client, r.headers["Azure-AsyncOperation"])["status"] == "Succeeded"
+    return client.get(url).json()["properties"]
+
+
+def test_auto_volume_shows_the_rounded_limit_and_the_pool_sums_it(client, storage):
+    """AC-01 (a) 계약: round(할당량 TiB × 64, 3), Auto 볼륨에는 throughputMibps가 없다."""
+    props = put_wait(client, VOL, vol_body(size=101 * GIB))
+    assert props["actualThroughputMibps"] == 6.312 and "throughputMibps" not in props
+    assert client.get(f"{POOL_PATH}?{V}").json()["properties"]["utilizedThroughputMibps"] == 6.312
+    assert storage.limits == [6.312]
+
+
+def test_manual_volume_is_created_and_changed_with_throughput_mibps(client, storage):
+    """AC-02·AC-04 계약: 201 → Succeeded, PATCH 202 → Succeeded, 재PUT 200 → Succeeded. 매번 agent에 한도를 보낸다."""
+    manual_pool(client)
+    props = put_wait(client, MVOL, vol_body(creationToken="m1", throughputMibps=10))
+    assert props["throughputMibps"] == props["actualThroughputMibps"] == 10.0
+    pool = f"{MANUAL_PATH}?{V}"
+    assert client.get(pool).json()["properties"]["utilizedThroughputMibps"] == 10.0
+
+    r = client.patch(MVOL, json={"properties": {"throughputMibps": 30}})
+    assert (r.status_code, r.json()["properties"]["provisioningState"]) == (202, "Patching")
+    assert r.json()["properties"]["throughputMibps"] == 30.0
+    status = wait_terminal(client, r.headers["Azure-AsyncOperation"])
+    assert (status["status"], status["properties"]["action"]) == ("Succeeded", "PATCH")
+    props = put_wait(client, MVOL, vol_body(creationToken="m1", throughputMibps=12.5), expected=200)
+    assert props["actualThroughputMibps"] == 12.5
+    assert client.get(pool).json()["properties"]["utilizedThroughputMibps"] == 12.5
+    assert storage.limits == [10.0, 30.0, 12.5]
+
+
+@pytest.mark.parametrize("props, code, message", [
+    ({}, "InvalidRequestContent",
+     "The 'properties.throughputMibps' property is required for a volume in a Manual QoS capacity pool."),
+    ({"throughputMibps": None}, "InvalidRequestContent",
+     "The 'properties.throughputMibps' property is required for a volume in a Manual QoS capacity pool."),
+    ({"throughputMibps": 0.5}, "InvalidRequestContent",
+     "The 'properties.throughputMibps' property must be a number from 1 to 4500."),
+    ({"throughputMibps": "10"}, "InvalidRequestContent",
+     "The 'properties.throughputMibps' property must be a number from 1 to 4500."),
+    ({"throughputMibps": 128.5}, "BadRequest",
+     "Requested throughput not available. Capacity pool 'manual' has 128.0 MiB/s in total and 128.0 MiB/s left "
+     "for this volume."),
+])
+def test_manual_volume_rejects_create_bodies(client, props, code, message):
+    """AC-08 계약: 거절이면 볼륨 행과 작업이 생기지 않는다."""
+    manual_pool(client)
+    r = client.put(MVOL, json=vol_body(creationToken="m1", **props))
+    assert (r.status_code, r.json()["error"]) == (400, {"code": code, "message": message})
+    assert client.get(MVOL).status_code == 404
+
+
+def test_auto_volume_rejects_throughput_mibps_and_budget_patch_keeps_the_old_value(client, storage):
+    """AC-08 계약: Auto 풀 볼륨에 값, 예산 초과 PATCH."""
+    r = client.put(VOL, json=vol_body(throughputMibps=10))
+    assert (r.status_code, r.json()["error"]["code"]) == (400, "BadRequest")
+    manual_pool(client)
+    put_wait(client, MVOL, vol_body(creationToken="m1", throughputMibps=100))
+    r = client.patch(MVOL, json={"properties": {"throughputMibps": 128.5}})
+    assert (r.status_code, r.json()["error"]["code"]) == (400, "BadRequest")
+    props = client.get(MVOL).json()["properties"]
+    assert (props["throughputMibps"], props["provisioningState"]) == (100.0, "Succeeded")
+    assert storage.limits == [100.0]
+
+
+def test_auto_to_manual_moves_limits_and_then_patch_changes_them(client, storage):
+    """AC-09 계약: 전환 뒤 throughputMibps = 전환 전 actualThroughputMibps, 풀 사용량은 그대로."""
+    before = put_wait(client, VOL, vol_body(size=101 * GIB))["actualThroughputMibps"]
+    r = client.patch(f"{POOL_PATH}?{V}", json={"properties": {"qosType": "Manual"}})
+    assert wait_terminal(client, r.headers["Azure-AsyncOperation"])["status"] == "Succeeded"
+    props = client.get(VOL).json()["properties"]
+    assert props["throughputMibps"] == props["actualThroughputMibps"] == before == 6.312
+    assert client.get(f"{POOL_PATH}?{V}").json()["properties"]["utilizedThroughputMibps"] == 6.312
+    r = client.patch(VOL, json={"properties": {"throughputMibps": 20}})
+    assert wait_terminal(client, r.headers["Azure-AsyncOperation"])["status"] == "Succeeded"
+    assert storage.limits == [6.312, 20.0]
+
+
+def test_switched_volume_below_1_takes_its_get_body_back(client, storage):
+    """§9-5: 전환이 채운 1 미만 값(Standard 50 GiB = 0.781)은 같은 값이면 갱신에서 받는다. 바꾸는 값은 1~4,500이다."""
+    std = f"{ACC_PATH}/capacityPools/std"
+    r = client.put(f"{std}?{V}", json={"location": "westus2", "properties": {"size": TIB, "serviceLevel": "Standard"}})
+    assert wait_terminal(client, r.headers["Azure-AsyncOperation"])["status"] == "Succeeded"
+    url = f"{std}/volumes/s1?{V}"
+    put_wait(client, url, vol_body(size=50 * GIB, creationToken="s1"))
+    r = client.patch(f"{std}?{V}", json={"properties": {"qosType": "Manual"}})
+    assert wait_terminal(client, r.headers["Azure-AsyncOperation"])["status"] == "Succeeded"
+    got = client.get(url).json()
+    assert got["properties"]["throughputMibps"] == 0.781
+
+    props = put_wait(client, url, got, expected=200)  # GET 본문 그대로
+    assert props["throughputMibps"] == props["actualThroughputMibps"] == 0.781
+    r = client.patch(url, json={"properties": {"throughputMibps": 0.781}})
+    assert r.status_code == 202, r.text
+    assert wait_terminal(client, r.headers["Azure-AsyncOperation"])["status"] == "Succeeded"
+    r = client.patch(url, json={"properties": {"throughputMibps": 0.5}})
+    assert (r.status_code, r.json()["error"]["code"]) == (400, "InvalidRequestContent")
+    assert client.get(url).json()["properties"]["throughputMibps"] == 0.781
+    assert storage.limits == [0.781, 0.781, 0.781]
 
 
 # --- 최소 볼륨 크기 (결정 3) ---
