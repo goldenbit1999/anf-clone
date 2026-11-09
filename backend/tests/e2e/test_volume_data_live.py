@@ -65,7 +65,9 @@ def test_ac02_nfsv3_mount_two_clients(agent, api, clients):
 
     v41 = one_shot(ip, tok, "4.1")
     note("AC-02 vers=4.1 on NFSv3 volume", **out(v41))
-    assert v41.returncode != 0
+    # 거절 이유까지 본다: soft·timeo=20 마운트라 서버가 늦어도 실패하기 때문이다
+    assert v41.returncode != 0 and ("Protocol not supported" in v41.stderr
+                                    or "requested NFS version or transport protocol is not supported" in v41.stderr), out(v41)
 
     for c in (a, b):
         c.run("umount /m")
@@ -104,7 +106,8 @@ def test_ac03_nfsv41_volume(agent, api, clients):
     for vers in ("3", "4.0"):
         r = one_shot(ip, tok, vers)
         note(f"AC-03 vers={vers} on NFSv4.1 volume", **out(r))
-        assert r.returncode != 0
+        assert r.returncode != 0 and ("Protocol not supported" in r.stderr
+                                      or "requested NFS version or transport protocol is not supported" in r.stderr), out(r)
 
     for c in (a, b):
         c.run("umount /m")
