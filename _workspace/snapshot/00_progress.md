@@ -1,9 +1,9 @@
 # snapshot 진행 기록
 
-- 상태: in_progress
+- 상태: done
 - FR: FR-05 (스냅샷: 생성, 조회, 목록, 삭제, NFS 클라이언트의 `.snapshot`)
-- 마지막 완료 단계: 4
-- 재개할 단계: 5 (개념 문서)
+- 마지막 완료 단계: 6
+- 재개할 단계: 없음 (push, PR, CI, merge만 남음)
 - 검증 대상 코드: 제품 코드 내용 해시 `f5607a082c70d4dad6899f7722cfdcc486eb67bd249210c3c3cd5e9ecf2738f1`, 커밋 `27757aa` (브랜치 `feature/snapshot`, 작업 트리와 같은 값)
 - verifier 에이전트 ID: a5f7546514170897e (1회차, 2026-11-08)
 - 미해결: 없음 (FR-05를 막지 않는 관찰 두 가지는 아래 "후속 후보")
@@ -60,3 +60,5 @@
 - 2026-11-08 단계 3 완료 — anf-api 쪽 커밋 `27757aa`: `snapshots.py`(새), `arm_rules.py`, `state_store.py`(연쇄 삭제), `storage_client.py`, `volumes.py`(스냅샷 작업 중 볼륨 DELETE 409), `arm_app.py`(라우트). 계약 테스트 `tests/contract/test_snapshots_api.py` 26개를 먼저 RED로 확인했다. 전체 662 passed, 94 skipped(실환경·root 테스트), ruff 통과. 설계 §9 7. e2e(실환경) 테스트는 볼륨 사이클처럼 verifier가 `backend/tests/e2e/`에 쓴다.
 - 2026-11-08 단계 4 시작 — real-env-verifier 1회차(ID a5f7546514170897e). AC-01~AC-15, AC-14는 계정·풀·볼륨 e2e 전체와 통합 테스트. 스냅샷 e2e는 verifier가 `backend/tests/e2e/test_snapshot_*_live.py`로 쓴다.
 - 2026-11-08 단계 4 완료 — 1회차 PASS 15 / FAIL 0 / UNVERIFIED 0 (`04_verifier_report.md`). 해시는 시작과 끝이 같다. verifier가 스냅샷 e2e(`snapshot_live.py`, `test_snapshot_{contract,data,recovery}_live.py`)를 썼고, 이번 사이클 변경에 맞게 볼륨 e2e 두 줄을 고쳤다. 리더 판단: agent 로그 문구는 되돌리지 않고 테스트 수정을 받아들임, errno는 관찰값(EROFS/EPERM/EBUSY)으로 바로잡음(설계 §9 8~9). Windows 662 passed, 112 skipped(live·root), ruff 통과를 메인이 다시 확인했다.
+- 2026-11-08 단계 5 완료 — concept-explainer가 `docs/concepts/snapshot.md`를 썼다(면접 Q&A 10개). 결정 16의 (5) errno는 관찰값으로, 결정 1(v4.1 재시작 결함)은 3.1절에 따로 다뤘다. 리더가 씬 풀 청크 크기 512 KiB를 WSL에서 확인해(`lvs -o chunk_size anf/aggr0`) dm-thin CoW 설명의 근거를 보강했다: 측정 증가량 524288 B와 69730304 B가 청크 1개와 133개다. WAFL 내부 구조는 브리프에 없어 [브리프 밖]으로 남겼다.
+- 2026-11-08 단계 6 — `docs/feature-status.md`: snapshot `done`. AC-14 회귀 PASS로 netapp-account·capacity-pool·volume을 `done`으로 되돌렸고 회귀 대기 메모를 지웠다. 검증 대상 코드는 내용 해시 `f5607a08…`(커밋 `27757aa`)다. squash merge 뒤에도 해시로 대조할 수 있다.
