@@ -3,7 +3,7 @@
 - 상태: in_progress
 - FR: FR-08 (처리량 제한)
 - 마지막 완료 단계: 3 (4단계 1회차 끝남, FAIL 1)
-- 재개할 단계: 4 (AC-12 수정 뒤 2회차, 처리량 데이터 e2e만 다시)
+- 재개할 단계: 4 (2회차 진행 중, 처리량 데이터 e2e만 다시. 수정 `3328486`)
 - 검증 대상 코드: `0b44a8f` (`feature/throughput-limit`, 내용 해시 `f99bc5cfbcf1429d3040a72b4c30205fe983c8e806f375b57c30c15c9dc1a6d3`)
 - implementer 에이전트 ID: acadc68bbbccab96e (스파이크 S7부터, 구현도 같은 ID)
 - researcher 에이전트 ID: ae21e308facd1f3ae
