@@ -2,12 +2,12 @@
 
 - 상태: in_progress
 - FR: FR-07 (스냅샷에서 새 볼륨으로 복원)
-- 마지막 완료 단계: 3
-- 재개할 단계: 4 (실환경 검증)
+- 마지막 완료 단계: 4
+- 재개할 단계: 5 (개념 문서)
 - 검증 대상 코드: 제품 코드 내용 해시 `1e950522c13e991ad33d06e2ad2fbd182685426ef7f774fc8bde4ccbf339a9f7`, 커밋 `a8ddc0a`
 - implementer 에이전트 ID: a41cc624ee346fccd (스파이크 S6부터)
 - researcher 에이전트 ID: a5124c3e4df55979d
-- verifier 에이전트 ID:
+- verifier 에이전트 ID: ab657ccad3b0c38a8 (1회차)
 - 미해결: 없음
 
 ## 선행 확인 (0단계)
@@ -27,17 +27,17 @@
 
 | 기준 ID | 기준 | 최신 결과 | 근거 보고서 | 검증 대상 코드 |
 | --- | --- | --- | --- | --- |
-| AC-01 | 계약·상태 (성공), base 스냅샷 | 미검증 | | |
-| AC-02 | 내용 NFSv3, `.snapshot` 정리 | 미검증 | | |
-| AC-03 | 독립성 (FR-07) | 미검증 | | |
-| AC-04 | NFSv4.1, 다른 프로토콜·다른 풀 | 미검증 | | |
-| AC-05 | 크기 (원본보다 큼) | 미검증 | | |
-| AC-06 | 생성 뒤 원본 되돌리기·삭제 | 미검증 | | |
-| AC-07 | 거절 | 미검증 | | |
-| AC-08 | 진행 중 충돌, 원본 보호 | 미검증 | | |
-| AC-09 | 실패·회복·재시작 안전 | 미검증 | | |
-| AC-10 | agent API | 미검증 | | |
-| AC-11 | 회귀 | 미검증 | | |
+| AC-01 | 계약·상태 (성공), base 스냅샷 | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-02 | 내용 NFSv3, `.snapshot` 정리 | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-03 | 독립성 (FR-07) | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-04 | NFSv4.1, 다른 프로토콜·다른 풀 | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-05 | 크기 (원본보다 큼) | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-06 | 생성 뒤 원본 되돌리기·삭제 | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-07 | 거절 | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-08 | 진행 중 충돌, 원본 보호 | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-09 | 실패·회복·재시작 안전 | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-10 | agent API | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
+| AC-11 | 회귀 (e2e 14파일 131, 통합 25, 단위·계약 817, skip 0) | PASS | `04_verifier_report.md` (1회차) | `1e950522…` (`a8ddc0a`) |
 
 ## 이력
 - 2026-11-08 단계 0 완료 — 브랜치 `feature/restore-new-volume`. 조사와 스파이크 S6를 함께 시작
@@ -45,3 +45,5 @@
 - 2026-11-08 스파이크 S6 완료 — 조건부 통과 (`_workspace/spikes/S6.md`)
 - 2026-11-08 단계 2 완료 — `02_main_design.md`. 사용자에게 묻는 결정이 없어 결정 1~16 자동 채택(`roadmap.md` 표)
 - 2026-11-09 단계 3 완료 — implementer 커밋 `fa75aff`·`b7a26b2`·`def0999`·`bbb482a`·`a8ddc0a`. Windows `python -m pytest` 817 passed / 143 skipped(root·e2e 조건) / 0 failed, ruff 통과, WSL 통합 25 passed(새 8개). WSL 전체 + e2e 회귀는 Windows 호스트 메모리 부족으로 background shell이 정리돼 결과 없음(테스트 실패 아님) → AC-11은 검증에서 돌린다. 남은 데이터 플레인 자원은 implementer가 정리함. 구현 중 변경 10개(설계 §9). 그중 1번: 헤더 두 개(`Azure-AsyncOperation` + `Location`)는 스냅샷에서 만드는 생성 201에만 — 설계 §4.1·AC-01(녹화 R4)을 따르고 일반 생성(V1, 헤더 하나)은 그대로 둔다. 메인이 받아들였다
+- 2026-11-09 단계 4 시작 — verifier 1회차. AC-11 e2e는 메모리 때문에 파일별로 돌리라고 지시
+- 2026-11-09 단계 4 완료 — 1회차 11/11 PASS (FAIL 0, UNVERIFIED 0). e2e는 파일별로 돌려 메모리 문제 없음(Windows 여유 최저 약 3.9 GB). 검증 스크립트 `backend/tests/e2e/restore_live.py`, `test_restore_new_volume_{data,contract}_live.py`
