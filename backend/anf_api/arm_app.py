@@ -283,6 +283,17 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         worker.notify()
         return Response(status_code=202, headers=_tracking_headers(request, op))
 
+    @app.post(_VOLUME + "/revert")
+    async def revert_volume(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
+                            volume_name: str, request: Request, api_version: ApiVersion = None):
+        check_api_version(api_version)
+        body = await _json_body(request)
+        op = volumes.revert_volume(store, subscription_id, resource_group, account_name, pool_name,
+                                   volume_name, body, request.state.correlation_id)
+        worker.notify()
+        # 본문 없는 202 + 두 헤더 (녹화 R3, 되돌리기 설계 결정 5)
+        return Response(status_code=202, headers=_tracking_headers(request, op))
+
     @app.get(_VOLUMES)
     async def list_volumes(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
                            api_version: ApiVersion = None):

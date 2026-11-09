@@ -79,6 +79,19 @@ class StorageClient:
     async def delete_snapshot(self, volume_uuid: str, uuid: str, correlation_id: str | None = None) -> None:
         await self._run_job("DELETE", f"/api/storage/volumes/{volume_uuid}/snapshots/{uuid}", None, correlation_id)
 
+    async def revert_volume(self, volume_uuid: str, snapshot_uuid: str, request_uuid: str,
+                            correlation_id: str | None = None) -> set[str]:
+        """볼륨을 스냅샷으로 되돌리고(ONTAP SnapRestore) 남은 스냅샷 uuid를 돌려준다.
+        request_uuid는 anf-api 작업 ID다: agent가 끝낸 되돌리기를 다시 하지 않게 하는 멱등 키 (되돌리기 설계 결정 4)."""
+        volume = f"/api/storage/volumes/{volume_uuid}"
+        query = f"?restore_to.snapshot.uuid={snapshot_uuid}&restore_to.request_uuid={request_uuid}"
+        await self._run_job("PATCH", volume + query, None, correlation_id)
+        path = f"{volume}/snapshots"
+        status, reply = await self._call("GET", path, None, correlation_id)
+        if status != 200:
+            raise StorageError(f"GET {path}: agent answered {status}: {_message(reply)}")
+        return {record["uuid"] for record in reply["records"]}
+
     async def _run_job(self, method: str, path: str, body: dict | None, correlation_id: str | None) -> None:
         while True:
             status, reply = await self._call(method, path, body, correlation_id)

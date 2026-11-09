@@ -202,6 +202,57 @@ def test_delete_snapshot(agent, client):
     assert agent.paths() == [("DELETE", f"{SNAPSHOTS}/{S1}"), ("GET", "/api/cluster/jobs/j1")]
 
 
+# --- 되돌리기 (되돌리기 설계 결정 4·12, §6.1) ---
+
+S2 = "5a000000-0000-4000-8000-000000000002"
+REQ = "0c000000-0000-4000-8000-0000000000aa"
+RESTORE = f"/api/storage/volumes/{U1}?restore_to.snapshot.uuid={S2}&restore_to.request_uuid={REQ}"
+
+
+def revert(client, **kw):
+    return asyncio.run(client.revert_volume(U1, S2, REQ, **kw))
+
+
+def test_revert_volume_patches_polls_and_returns_the_remaining_snapshots(agent, client):
+    agent.reply("PATCH", RESTORE, job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("running"), state("success"))
+    agent.reply("GET", SNAPSHOTS, (200, {"records": [{"uuid": S1, "name": "a"}, {"uuid": S2, "name": "b"}],
+                                         "num_records": 2}))
+
+    assert revert(client, correlation_id="corr-5") == {S1, S2}
+
+    # ONTAP SnapRestore: 볼륨 PATCH + 쿼리, 본문 없음. request_uuid는 클론 확장 멱등 키다
+    assert agent.requests[0][:3] == ("PATCH", RESTORE, None)
+    assert agent.paths()[1:] == [("GET", "/api/cluster/jobs/j1")] * 2 + [("GET", SNAPSHOTS)]
+    assert all(h == {"x-ms-correlation-request-id": "corr-5"} for _, _, _, h in agent.requests)
+
+
+def test_failed_revert_job_raises(agent, client):
+    agent.reply("PATCH", RESTORE, job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("failure", f"snapshot {S2} not found"))
+    with pytest.raises(StorageError, match="not found"):
+        revert(client)
+
+
+def test_lost_revert_job_is_requested_again_with_the_same_key(agent, client):
+    # agent가 재시작하면 같은 request_uuid로 다시 보낸다. agent가 끝난 되돌리기를 다시 하지 않는다 (결정 4)
+    agent.reply("PATCH", RESTORE, job("j1"), job("j2"))
+    agent.reply("GET", "/api/cluster/jobs/j1", (404, {}))
+    agent.reply("GET", "/api/cluster/jobs/j2", state("success"))
+    agent.reply("GET", SNAPSHOTS, (200, {"records": [], "num_records": 0}))
+
+    assert revert(client) == set()
+    assert [p for p in agent.paths() if p[0] == "PATCH"] == [("PATCH", RESTORE)] * 2
+
+
+def test_snapshot_list_failure_after_revert_raises(agent, client):
+    agent.reply("PATCH", RESTORE, job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("success"))
+    agent.reply("GET", SNAPSHOTS, (404, {"error": {"message": f"volume {U1} not found"}}))
+    with pytest.raises(StorageError, match="404"):
+        revert(client)
+
+
 # --- 기본 전송 (urllib) ---
 
 

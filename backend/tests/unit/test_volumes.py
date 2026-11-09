@@ -473,6 +473,13 @@ class FakeStorage:
         self.ip = ip
         self.calls: list[tuple] = []
         self.error: Exception | None = None
+        self.remaining: set[str] = set()  # 되돌린 뒤 agent에 남은 스냅샷 uuid
+
+    async def revert_volume(self, uuid, snapshot_uuid, request_uuid, correlation_id=None):
+        self.calls.append(("revert", uuid, snapshot_uuid, request_uuid, correlation_id))
+        if self.error:
+            raise self.error
+        return self.remaining
 
     async def ensure_volume(self, *args, correlation_id=None):
         self.calls.append(("ensure", *args, correlation_id))
@@ -496,7 +503,7 @@ def run_operation(store, storage, op):
 
 def test_handlers_cover_all_volume_operations(store):
     assert set(volumes.make_handlers(store, FakeStorage())) == {
-        (VOLUME_TYPE, a) for a in ("CREATE", "UPDATE", "PATCH", "DELETE")}
+        (VOLUME_TYPE, a) for a in ("CREATE", "UPDATE", "PATCH", "DELETE", "POST")}
 
 
 def test_create_ensures_the_volume_and_records_the_mount_target(store):
@@ -557,3 +564,176 @@ def test_failed_delete_keeps_the_volume(store):
     op = delete(store)
     assert run_operation(store, storage, op).status == "Failed"
     assert store.get_resource(v.id).provisioning_state == "Failed"
+
+
+# --- 되돌리기 (FR-06, 되돌리기 설계 §4) ---
+
+SNAP = VOL + "/snapshots/{}"
+
+
+def make_snapshot(store, name, volume="vol1", status="Succeeded"):
+    _, res, op = snapshots.put_snapshot(store, "s1", "rg1", "acc1", "pool1", volume, name,
+                                        {"location": "westus2"}, None)
+    if status is not None:  # None이면 작업을 열어 둔다
+        finish(store, op, status)
+    return store.get_resource(res.id)
+
+
+def revert(store, b, name="vol1"):
+    return volumes.revert_volume(store, "s1", "rg1", "acc1", "pool1", name, b, "corr-7")
+
+
+def test_revert_is_reverting_with_post_operation_and_the_chosen_snapshot(store):
+    v = create(store)
+    s = make_snapshot(store, "s1")
+
+    op = revert(store, {"snapshotId": s.id})
+
+    # 작업 상태와 볼륨 상태 모두 Reverting (녹화 R3, 결정 2). 작업 입력에 고른 스냅샷 (결정 11)
+    assert (op.action, op.status, op.resource_id, op.correlation_id) == ("POST", "Reverting", v.id, "corr-7")
+    assert op.params == {"snapshotId": s.id}
+    assert store.get_resource(v.id).provisioning_state == "Reverting"
+    assert [o.id for o in store.active_operations()] == [op.id]
+
+
+def test_revert_accepts_ids_in_another_case(store):
+    # ARM ID는 대소문자를 구분하지 않는다. 작업에는 저장된 스냅샷 ID를 남긴다
+    create(store)
+    s = make_snapshot(store, "s1")
+    op = revert(store, {"snapshotId": s.id.upper().replace("SNAPSHOTS/S1", "snapshots/S1")})
+    assert op.params == {"snapshotId": s.id}
+
+
+@pytest.mark.parametrize("b, message", [
+    ([], "The request content must be a JSON object."),
+    ({"snapshotId": SNAP.format("s1"), "force": True}, "Value received for an unknown property 'force'."),
+    ({}, "The 'snapshotId' property is required and must be a snapshot resource ID."),
+    ({"snapshotId": 5}, "The 'snapshotId' property is required and must be a snapshot resource ID."),
+    ({"snapshotId": VOL}, "The 'snapshotId' property must be a snapshot resource ID: /subscriptions/{id}"
+     "/resourceGroups/{group}/providers/Microsoft.NetApp/netAppAccounts/{account}/capacityPools/{pool}"
+     "/volumes/{volume}/snapshots/{snapshot}."),
+    ({"snapshotId": SNAP.format("s1") + "/x"}, "The 'snapshotId' property must be a snapshot resource ID: "
+     "/subscriptions/{id}/resourceGroups/{group}/providers/Microsoft.NetApp/netAppAccounts/{account}"
+     "/capacityPools/{pool}/volumes/{volume}/snapshots/{snapshot}."),
+])
+def test_revert_body_errors_are_invalid_request_content(store, b, message):
+    v = create(store)
+    make_snapshot(store, "s1")
+    e = arm_error(revert, store, b)
+    assert (e.status, e.code, e.message) == (400, "InvalidRequestContent", message)
+    assert store.active_operations() == []
+    assert store.get_resource(v.id).provisioning_state == "Succeeded"
+
+
+def test_revert_to_a_snapshot_of_another_volume_is_400(store):
+    create(store)
+    create(store, name="vol2", token="vol2")
+    other = make_snapshot(store, "s1", volume="vol2")
+    e = arm_error(revert, store, {"snapshotId": other.id})
+    assert (e.status, e.code) == (400, "BadRequest")
+    assert e.message == f"The snapshot '{other.id}' does not belong to the volume '{VOL}'."
+    assert store.active_operations() == []
+
+
+def test_revert_of_a_missing_volume_is_404(store):
+    e = arm_error(revert, store, {"snapshotId": SNAP.format("s1")})
+    assert (e.status, e.code, e.message) == (404, "ResourceNotFound",
+                                             f"The resource with identifier '{VOL}' is not found.")
+
+
+def test_revert_while_the_volume_has_an_operation_is_409_request_conflict(store):
+    create(store)
+    s = make_snapshot(store, "s1")
+    patch(store, {"tags": {"a": "b"}})  # Patching 작업이 열려 있다
+    e = arm_error(revert, store, {"snapshotId": s.id})
+    assert (e.status, e.code, e.message) == (409, "RequestConflict", V6.format(VOL))
+
+
+def test_revert_of_a_failed_volume_is_400(store):
+    v = create(store)
+    s = make_snapshot(store, "s1")
+    with store.transaction() as tx:
+        res = tx.get_resource(v.id)
+        res.provisioning_state = "Failed"
+        tx.put_resource(res)
+    e = arm_error(revert, store, {"snapshotId": s.id})
+    assert (e.status, e.code, e.message) == (400, "BadRequest",
+                                             "Volume cannot be reverted when it isn't in state succeeded.")
+
+
+def test_revert_to_a_missing_snapshot_is_404_with_the_snapshot_wording(store):
+    create(store)
+    e = arm_error(revert, store, {"snapshotId": SNAP.format("nosuch")})
+    # 스냅샷 GET과 같은 문구 (녹화 R1)
+    assert (e.status, e.code) == (404, "ResourceNotFound")
+    assert e.message == (
+        "The requested snapshot 'nosuch' was not found on the volume 'acc1/pool1/vol1'. Please check the "
+        "requested snapshot. Please note: The snapshot may no longer be available based on configured "
+        "snapshot policies.")
+
+
+def test_revert_while_a_snapshot_of_the_volume_has_an_operation_is_409_conflict(store):
+    create(store)
+    s = make_snapshot(store, "s1")
+    busy = make_snapshot(store, "s2", status=None)  # 생성 작업이 열려 있다
+    e = arm_error(revert, store, {"snapshotId": s.id})
+    assert (e.status, e.code) == (409, "Conflict")
+    assert e.message == (f"Cannot revert volume '{VOL}' because an operation is in progress on its snapshot "
+                         f"'{busy.id}'. Wait until it is finished, and then retry.")
+
+
+def test_revert_to_a_failed_snapshot_is_400(store):
+    create(store)
+    s = make_snapshot(store, "s1", status="Failed")
+    e = arm_error(revert, store, {"snapshotId": s.id})
+    assert (e.status, e.code) == (400, "BadRequest")
+    assert e.message == (f"Volume cannot be reverted to snapshot '{s.id}' because the snapshot isn't in "
+                         "state succeeded.")
+
+
+def test_revert_handler_reverts_and_drops_the_snapshots_the_agent_no_longer_has(store):
+    v = create(store)
+    older, chosen, newer = (make_snapshot(store, n) for n in ("s1", "s2", "s3"))
+    storage = FakeStorage()
+    storage.remaining = {older.properties["snapshotId"], chosen.properties["snapshotId"]}
+    op = revert(store, {"snapshotId": chosen.id})
+
+    assert run_operation(store, storage, op).status == "Succeeded"
+
+    # 작업 ID가 agent의 멱등 키다 (결정 4)
+    assert storage.calls == [("revert", v.properties["fileSystemId"], chosen.properties["snapshotId"], op.id,
+                              "corr-7")]
+    assert store.get_resource(v.id).provisioning_state == "Succeeded"
+    # 더 새 스냅샷은 agent가 지웠고 ARM 목록에서도 사라진다 (결정 8)
+    assert [s.name for s in store.list_children(v.id, snapshots.SNAPSHOT_TYPE)] == ["s1", "s2"]
+    assert store.get_resource(newer.id) is None
+    assert store.get_resource(chosen.id).properties == chosen.properties
+
+
+def test_failed_revert_fails_the_volume_and_keeps_the_snapshots(store):
+    v = create(store)
+    s1 = make_snapshot(store, "s1")
+    make_snapshot(store, "s2")
+    storage = FakeStorage()
+    storage.error = RuntimeError("lvconvert failed")
+    op = revert(store, {"snapshotId": s1.id})
+
+    done = run_operation(store, storage, op)
+
+    assert (done.status, done.error["code"]) == ("Failed", "InternalServerError")
+    assert store.get_resource(v.id).provisioning_state == "Failed"
+    assert [s.name for s in store.list_children(v.id, snapshots.SNAPSHOT_TYPE)] == ["s1", "s2"]
+
+
+def test_failed_volume_after_a_revert_recovers_with_put(store):
+    # 실패한 되돌리기 뒤 같은 볼륨 PUT이 agent 볼륨을 다시 보장한다 (결정 2)
+    v = create(store)
+    s = make_snapshot(store, "s1")
+    storage = FakeStorage()
+    storage.error = RuntimeError("agent down")
+    run_operation(store, storage, revert(store, {"snapshotId": s.id}))
+    storage.error = None
+    _, _, op = put(store, body())
+    assert run_operation(store, storage, op).status == "Succeeded"
+    assert store.get_resource(v.id).provisioning_state == "Succeeded"
+    assert revert(store, {"snapshotId": s.id}).status == "Reverting"
