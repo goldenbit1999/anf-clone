@@ -2,9 +2,9 @@
 
 - 상태: in_progress
 - FR: FR-07 (스냅샷에서 새 볼륨으로 복원)
-- 마지막 완료 단계: 2
-- 재개할 단계: 3 (구현, implementer에게 맡김)
-- 검증 대상 코드: (구현 뒤)
+- 마지막 완료 단계: 3
+- 재개할 단계: 4 (실환경 검증)
+- 검증 대상 코드: 제품 코드 내용 해시 `1e950522c13e991ad33d06e2ad2fbd182685426ef7f774fc8bde4ccbf339a9f7`, 커밋 `a8ddc0a`
 - implementer 에이전트 ID: a41cc624ee346fccd (스파이크 S6부터)
 - researcher 에이전트 ID: a5124c3e4df55979d
 - verifier 에이전트 ID:
@@ -44,3 +44,4 @@
 - 2026-11-08 단계 1 완료 — 브리프 `01_researcher_brief.md` (조사 상태 완료). researcher가 30턴 상한에 닿았지만 브리프는 다 썼다. 미확인(다른 풀·프로토콜 허용, 크기 하한, 거절 오류 코드, `deleteBaseSnapshot` 대상)은 설계를 막지 않고 클론 규칙으로 정한다. ONTAP 대응(FlexClone + split)은 [추론]으로 채워졌다
 - 2026-11-08 스파이크 S6 완료 — 조건부 통과 (`_workspace/spikes/S6.md`)
 - 2026-11-08 단계 2 완료 — `02_main_design.md`. 사용자에게 묻는 결정이 없어 결정 1~16 자동 채택(`roadmap.md` 표)
+- 2026-11-09 단계 3 완료 — implementer 커밋 `fa75aff`·`b7a26b2`·`def0999`·`bbb482a`·`a8ddc0a`. Windows `python -m pytest` 817 passed / 143 skipped(root·e2e 조건) / 0 failed, ruff 통과, WSL 통합 25 passed(새 8개). WSL 전체 + e2e 회귀는 Windows 호스트 메모리 부족으로 background shell이 정리돼 결과 없음(테스트 실패 아님) → AC-11은 검증에서 돌린다. 남은 데이터 플레인 자원은 implementer가 정리함. 구현 중 변경 10개(설계 §9). 그중 1번: 헤더 두 개(`Azure-AsyncOperation` + `Location`)는 스냅샷에서 만드는 생성 201에만 — 설계 §4.1·AC-01(녹화 R4)을 따르고 일반 생성(V1, 헤더 하나)은 그대로 둔다. 메인이 받아들였다
