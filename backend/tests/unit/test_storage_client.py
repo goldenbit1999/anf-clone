@@ -100,6 +100,23 @@ def test_ensure_volume_posts_polls_and_returns_the_ip(agent, client, clock):
     assert clock.sleeps == [1.0, 1.0]
 
 
+def test_ensure_volume_from_a_snapshot_sends_the_flexclone_fields(agent, client):
+    # ONTAP FlexClone 모양 (복원 설계 결정 14). 나머지 흐름은 일반 볼륨과 같다
+    agent.reply("POST", "/api/storage/volumes", job("j1"))
+    agent.reply("GET", "/api/cluster/jobs/j1", state("success"))
+    agent.reply("GET", f"/api/storage/volumes/{U1}", VOLUME)
+    parent, snapshot = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "5a000000-0000-4000-8000-000000000001"
+
+    ip = asyncio.run(client.ensure_volume(U1, "/vol1", GIB, 770, "nfs3", clone=(parent, snapshot)))
+
+    assert ip == "172.30.0.129"
+    assert agent.requests[0][2] == {
+        "uuid": U1, "name": "vol_11111111222233334444555555555555", "size": GIB,
+        "nas": {"path": "/vol1", "unix_permissions": 770, "protocols": ["nfs3"]},
+        "clone": {"is_flexclone": True, "parent_volume": {"uuid": parent}, "parent_snapshot": {"uuid": snapshot}},
+    }
+
+
 def test_failed_job_raises_with_the_agent_message(agent, client):
     agent.reply("POST", "/api/storage/volumes", job("j1"))
     agent.reply("GET", "/api/cluster/jobs/j1", state("failure", "junction path /vol1 is already used"))
@@ -258,6 +275,20 @@ def test_snapshot_uuids_lists_the_agent_snapshots_of_a_volume(agent, client):
     agent.reply("GET", SNAPSHOTS, (200, {"records": [{"uuid": S1, "name": "a"}], "num_records": 1}))
     assert asyncio.run(client.snapshot_uuids(U1, correlation_id="corr-6")) == {S1}
     assert agent.requests == [("GET", SNAPSHOTS, None, {"x-ms-correlation-request-id": "corr-6"})]
+
+
+def test_snapshot_records_lists_the_agent_snapshot_records(agent, client):
+    # 스냅샷에서 만든 새 볼륨의 base 스냅샷을 ARM 행으로 더할 때 쓴다 (복원 설계 결정 7)
+    record = {"uuid": S1, "name": "daily.1", "create_time": "2026-11-08T23:07:12Z", "volume": {"uuid": U1}}
+    agent.reply("GET", SNAPSHOTS, (200, {"records": [record], "num_records": 1}))
+    assert asyncio.run(client.snapshot_records(U1, correlation_id="corr-7")) == [record]
+    assert agent.requests == [("GET", SNAPSHOTS, None, {"x-ms-correlation-request-id": "corr-7"})]
+
+
+def test_snapshot_records_of_a_missing_volume_raises(agent, client):
+    agent.reply("GET", SNAPSHOTS, (404, {"error": {"message": f"volume {U1} not found"}}))
+    with pytest.raises(StorageError, match="404"):
+        asyncio.run(client.snapshot_records(U1))
 
 
 # --- 기본 전송 (urllib) ---
