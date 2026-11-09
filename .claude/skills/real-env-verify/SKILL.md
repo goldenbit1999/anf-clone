@@ -63,6 +63,10 @@ description: ANF 클론에 구현한 기능이 WSL2·Docker 실환경에서 실�
 - **FAIL**: 기준을 충족하지 못했다. 재현 명령, 실제 출력, 기대값, 추정 원인 위치(파일:줄), 수정 제안을 쓴다.
 - **UNVERIFIED**: 환경 문제나 도구 부족으로 확인하지 못했다. PASS로 세지 않는다. pytest가 skip한 테스트도 UNVERIFIED다.
 
+판정을 흐리기 쉬운 두 경우는 다음 기준을 따른다.
+- **거절을 기대하는 항목은 거절 이유까지 확인한다.** 명령이 실패했다는 사실(종료 코드가 0이 아님)만으로는 PASS가 아니다. 서버가 아직 안 떴거나, 시간이 초과됐거나, 경로가 틀려도 종료 코드는 0이 아니기 때문이다. 기대한 이유로 실패했음을 함께 보인다. 클라이언트 명령이면 stderr 문구나 errno(예: `Protocol not supported`, `Read-only file system`), API면 HTTP 상태 코드와 `error.code`다. e2e 테스트의 단언도 같은 기준으로 쓴다.
+- **간헐 결함은 원래 실패율로 반복 횟수를 정한다.** 실패율 p로 관찰된 결함은, 수정 뒤 최소 n = ⌈3/p⌉번 반복해 실패가 한 번도 없어야 PASS다. n번 모두 성공하면 실패율 상한을 95% 신뢰로 약 3/n이라고 말할 수 있기 때문이다(3의 규칙). 예를 들어 p가 7.5%면 40번이다. 보고서에 p, n, 결과를 적는다. n번을 돌리지 못했으면 UNVERIFIED로 두고, 돌린 횟수와 그 횟수로 말할 수 있는 상한(3/돌린 횟수)을 적는다.
+
 측정값은 숫자로 남기고 반복 횟수를 적는다. 처리량은 한 번 측정한 값으로 판정하지 않는다.
 
 ## 5. 제품 코드는 고치지 않는다
@@ -75,9 +79,12 @@ TDD 훅(`.claude/hooks/tdd_guard.py`)은 서브에이전트의 Write·Edit 호�
 
 ## 6. 보고서 형식
 
+**보고서는 시작할 때 저장하고, 판정할 때마다 갱신한다.** 환경 사전 점검 전에 골격을 저장한다. 골격에는 머리말, 이번 회차의 기준 ID 목록이 들어가고, 결과는 모두 `대기`다. 기준 하나를 판정하면 그 항목과 표를 바로 고치고, 맨 위의 진행 상태에 지금 하는 일과 시작 시각을 적는다. 검증은 30~80분 걸린다. 그동안 리더와 사용자가 이 파일만 보고 어디까지 왔는지 알 수 있어야 하고, 중간에 멈춰도 판정한 결과는 남아야 한다.
+
 ```markdown
 # {기능} 검증 보고서 — {회차}회차
 
+- 진행 상태: 진행 중 — {지금 하는 일} ({시작 시각}) | 완료
 - 검증일:
 - 검증 대상 코드: 제품 코드 내용 해시(검증 시작과 끝에 계산한 값), 커밋 SHA (`git rev-parse HEAD`), 미커밋 변경 파일 목록. 해시 명령은 아래와 같다. 줄 끝(CRLF/LF)과 새 파일에 상관없이 내용이 같으면 같은 값이 나온다 (`anf-feature-cycle` 3단계 4번):
   `git ls-files -co --exclude-standard -- pyproject.toml backend ':!backend/tests' | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done | tr -d '\r' | sha256sum`
@@ -90,8 +97,8 @@ TDD 훅(`.claude/hooks/tdd_guard.py`)은 서브에이전트의 Write·Edit 호�
 PASS n / FAIL n / UNVERIFIED n
 
 ## 수락 기준별 최신 결과
-재검증 회차에도 전체 기준을 모두 적는다. 이번에 실행하지 않은 기준은 이전 회차의 결과와 그 보고서 이름을 적는다. 수정의 영향을 받을 수 있는 이전 PASS는 다시 실행한다.
-| 기준 ID | 결과 | 확인한 회차 |
+재검증 회차에도 전체 기준을 모두 적는다. 이번에 실행하지 않은 기준은 이전 회차의 결과와 그 보고서 이름을 적는다. 수정의 영향을 받을 수 있는 이전 PASS는 다시 실행한다. 아직 판정하지 않은 기준은 `대기`로 둔다.
+| 기준 ID | 결과 (PASS, FAIL, UNVERIFIED, 대기) | 확인한 회차 |
 
 ## 항목별 결과
 ### [PASS|FAIL|UNVERIFIED] AC-nn 항목 이름 (층)
@@ -107,8 +114,9 @@ PASS n / FAIL n / UNVERIFIED n
 
 ## 스택별 명령
 
-기술 스택은 정해졌다(ADR D-01~D-04: FastAPI 백엔드, React + TypeScript 대시보드, NFSv3·NFSv4.1, Docker 클라이언트). 테스트는 저장소 루트에서 OS에 맞는 가상환경의 Python으로 `python -m pytest`를 실행한다 (D-14, `CLAUDE.md`의 Commands). 아래 명령은 아직 비어 있다.
-- 서비스 실행, API 호출: 계정 기능을 구현한 직후 채운다.
-- 클라이언트 컨테이너 실행과 마운트: 스토리지 백엔드(D-06)와 Docker 위치(D-10)가 정해진 뒤 볼륨 기능에서 채운다.
+기술 스택은 정해졌다(ADR D-01~D-04: FastAPI 백엔드, React + TypeScript 대시보드, NFSv3·NFSv4.1, Docker 클라이언트). 서비스 실행(anf-api, storage agent), WSL 데이터 플레인 setup, 테스트, lint 명령은 `CLAUDE.md`의 "Commands and architecture" 절을 그대로 쓴다. 여기에 옮겨 적지 않는다. 두 곳에 두면 한쪽이 낡기 때문이다.
 
-채우는 작업은 harness:evolve로 한다.
+e2e 검증 코드는 기존 도우미를 먼저 재사용하고, 새 기능에 필요한 것만 기능별 도우미로 더한다. `snapshot_live.py`와 `revert_live.py`가 그렇게 만들어졌다.
+- `backend/tests/e2e/live_api.py`: anf-api를 실제 uvicorn 프로세스로 띄우고 멈추며 HTTP로 부른다. 결함 주입과 재시작 시험에 쓴다.
+- `backend/tests/e2e/dataplane_live.py`: storage agent(root), 일반 사용자 권한의 anf-api, `anf-vnet`의 클라이언트 컨테이너를 다루는 픽스처(`agent`, `api`, `clients`)와 데이터 플레인 관찰 도구다. 픽스처는 `conftest.py`가 등록한다.
+- `backend/tests/e2e/snapshot_live.py`, `revert_live.py`: 스냅샷·되돌리기 경로와 그 관찰 도구다.
