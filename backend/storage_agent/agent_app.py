@@ -10,6 +10,7 @@ anf-api만 부르는 내부 API라 인증은 없다 (D-13). 커널 명령에 들
 
 import json
 import logging
+import math
 import re
 from contextlib import asynccontextmanager
 
@@ -56,10 +57,25 @@ def _parse_clone(clone) -> tuple[str, str]:
     return uuids[0], uuids[1]
 
 
-def parse_volume(body) -> tuple[str, str, int, int, str, tuple[str, str] | None]:
-    """POST 본문 → (uuid, junction path, size, unix_permissions, protocol, clone). clone은 선택이다."""
-    if not isinstance(body, dict) or set(body) - {"clone"} != {"uuid", "name", "size", "nas"}:
-        raise BadRequest("body must have exactly the fields uuid, name, size, nas and optionally clone")
+def _parse_qos(qos) -> float:
+    """ONTAP 볼륨의 인라인 QoS 필드 `qos.policy.max_throughput_mbps` → 처리량 한도 (처리량 설계 결정 8, §6.1).
+    ONTAP과 달리 값은 MiB/s이고 소수를 받는다(Auto 한도 0.062, 6.312). 위 한도는 없다: Auto 값은 4,500을 넘을 수 있다.
+    정책 이름·uuid·IOPS·최소 처리량 필드는 없다."""
+    if not isinstance(qos, dict) or set(qos) != {"policy"}:
+        raise BadRequest("qos must have exactly the field policy")
+    policy = qos["policy"]
+    if not isinstance(policy, dict) or set(policy) != {"max_throughput_mbps"}:
+        raise BadRequest("qos.policy must have exactly the field max_throughput_mbps")
+    value = policy["max_throughput_mbps"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise BadRequest("qos.policy.max_throughput_mbps must be a number of MiB/s greater than 0")
+    return float(value)
+
+
+def parse_volume(body) -> tuple[str, str, int, int, str, tuple[str, str] | None, float | None]:
+    """POST 본문 → (uuid, junction path, size, unix_permissions, protocol, clone, qos). clone과 qos는 선택이다."""
+    if not isinstance(body, dict) or set(body) - {"clone", "qos"} != {"uuid", "name", "size", "nas"}:
+        raise BadRequest("body must have exactly the fields uuid, name, size, nas and optionally clone, qos")
     nas = body["nas"]
     if not isinstance(nas, dict) or set(nas) != {"path", "unix_permissions", "protocols"}:
         raise BadRequest("nas must have exactly the fields path, unix_permissions, protocols")
@@ -79,7 +95,8 @@ def parse_volume(body) -> tuple[str, str, int, int, str, tuple[str, str] | None]
     if not isinstance(protocols, list) or len(protocols) != 1 or protocols[0] not in PROTOCOLS:
         raise BadRequest(f"nas.protocols must be one of {[[p] for p in PROTOCOLS]}")
     clone = _parse_clone(body["clone"]) if "clone" in body else None
-    return uuid, path, size, perms, protocols[0], clone
+    qos = _parse_qos(body["qos"]) if "qos" in body else None
+    return uuid, path, size, perms, protocols[0], clone, qos
 
 
 def parse_snapshot(body) -> tuple[str, str]:
@@ -153,9 +170,11 @@ def create_app(manager=None, jobs: JobTable | None = None) -> FastAPI:
 
     @app.post("/api/storage/volumes")
     async def post_volume(request: Request):
-        uuid, path, size, perms, protocol, clone = parse_volume(await _json(request))
-        return accepted(f"POST {uuid}", f"POST /api/storage/volumes/{uuid}",
-                        lambda: manager.create(uuid, path, size, perms, protocol, clone=clone), request)
+        uuid, path, size, perms, protocol, clone, qos = parse_volume(await _json(request))
+        # 키에 한도를 넣는다: anf-api가 포기한 job이 아직 돌 때 다른 한도의 요청이 그 job을 받지 않는다 (처리량 결정 8)
+        key = f"POST {uuid}" if qos is None else f"POST {uuid} qos={qos!r}"
+        return accepted(key, f"POST /api/storage/volumes/{uuid}",
+                        lambda: manager.create(uuid, path, size, perms, protocol, clone=clone, qos=qos), request)
 
     # 볼륨 관리자를 부르는 경로는 def로 둔다: 커널 명령을 기다리는 동안 이벤트 루프를 막지 않게 스레드에서 돈다
     @app.get("/api/storage/volumes")

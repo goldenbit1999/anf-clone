@@ -12,9 +12,11 @@ IP_RANGE=172.30.0.0/25 # Docker가 클라이언트 컨테이너에 주는 범위
 
 [ "$(id -u)" = 0 ] || { echo "run as root (wsl -d Ubuntu -u root ...)" >&2; exit 1; }
 # iptables·nsenter: 되돌리는 동안 볼륨 인스턴스 netns의 입력을 막는다 (되돌리기 결정 3)
-for cmd in lvcreate thin_check mkfs.ext4 docker iptables nsenter; do
+# ip·tc: 볼륨 인스턴스 netns에 처리량 한도(IFB + HTB)를 건다 (처리량 결정 9)
+for cmd in lvcreate thin_check mkfs.ext4 docker iptables nsenter ip tc; do
   command -v "$cmd" >/dev/null || {
-    echo "missing $cmd: apt-get install lvm2 thin-provisioning-tools e2fsprogs docker.io iptables util-linux" >&2
+    echo "missing $cmd: apt-get install lvm2 thin-provisioning-tools e2fsprogs docker.io iptables util-linux" \
+      "iproute2" >&2
     exit 1; }
 done
 # 볼륨 인스턴스(컨테이너)의 knfsd는 호스트 커널의 nfsd 모듈을 쓴다. 호스트 nfs-server는 볼륨에 쓰지 않는다
@@ -27,10 +29,10 @@ sysctl -qw fs.leases-enable=0
 echo "fs.leases-enable = 0" > /etc/sysctl.d/90-anf-clone.conf
 
 docker build -q -t anf-nfs-server "$REPO/backend/storage_agent/nfs_server" >/dev/null
-# 검증용 NFS 클라이언트 (통합·E2E 테스트, 볼륨 설계 §8)
+# 검증용 NFS 클라이언트 (통합·E2E 테스트, 볼륨 설계 §8). fio: 처리량 한도 측정 (처리량 결정 19)
 docker build -q -t anf-nfs-client - >/dev/null <<'EOF'
 FROM alpine:3.20
-RUN apk add --no-cache nfs-utils coreutils
+RUN apk add --no-cache nfs-utils coreutils fio
 EOF
 
 if docker network inspect "$NET" >/dev/null 2>&1; then

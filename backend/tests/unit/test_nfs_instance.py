@@ -17,6 +17,7 @@ from storage_agent.nfs_instance import (
     NfsInstances,
     StartupError,
     container_name,
+    htb_rate_bits,
 )
 from storage_agent.runner import CommandError, Result
 
@@ -280,6 +281,118 @@ def test_unblock_without_a_running_instance_does_nothing(runner, instances, insp
     assert runner.calls == [PID]
 
 
+# --- 처리량 한도: 인스턴스 netns 안의 IFB + HTB (처리량 설계 결정 9·10·12·13, §6.2) ---
+
+NETNS = ["nsenter", "-t", "4242", "-n"]
+# 새 netns: ifb0이 없고, eth0에는 veth 기본 qdisc만 있다 (WSL에서 본 `tc -j` 출력)
+FRESH_ETH0 = json.dumps([{"kind": "noqueue", "handle": "0:", "root": True, "options": {}}])
+HTB_ROOT = {"kind": "htb", "handle": "1:", "root": True, "options": {"r2q": 10, "default": "0x1"}}
+LEAF = {"kind": "fq_codel", "handle": "10:", "parent": "1:1", "options": {"limit": 10240}}
+CLSACT = {"kind": "clsact", "handle": "ffff:", "parent": "ffff:fff1", "options": {}}
+MATCHALL = json.dumps([{"protocol": "all", "pref": 49152, "kind": "matchall", "chain": 0},
+                       {"protocol": "all", "pref": 49152, "kind": "matchall", "chain": 0,
+                        "options": {"handle": 1, "actions": [{"kind": "mirred", "to_dev": "ifb0"}]}}])
+
+
+def netns(*argv):
+    return [*NETNS, *argv]
+
+
+def class_replace(bits):
+    return netns("tc", "class", "replace", "dev", "ifb0", "parent", "1:", "classid", "1:1",
+                 "htb", "rate", f"{bits}bit", "ceil", f"{bits}bit")
+
+
+QUERIES = [netns("ip", "link", "show", "ifb0"), netns("tc", "-j", "qdisc", "show", "dev", "ifb0"),
+           netns("tc", "-j", "qdisc", "show", "dev", "eth0"),
+           netns("tc", "-j", "filter", "show", "dev", "eth0", "ingress"),
+           netns("tc", "-j", "filter", "show", "dev", "eth0", "egress")]
+
+
+@pytest.mark.parametrize("mibps, bits", [(10, 87710247), (0.062, 543804), (6.312, 55362708), (4500, 39469611041)])
+def test_htb_rate_corrects_for_header_bytes(mibps, bits):
+    # 데이터/wire 이론 상한 1448/1514 = 0.9564로 나눈다. 그래서 데이터가 한도를 넘지 않는다 (결정 12, S7 Q7)
+    assert htb_rate_bits(mibps) == bits
+
+
+def test_limit_builds_ifb_htb_and_filters_inside_the_instance_netns(runner, instances):
+    # ifb0과 HTB를 먼저 만들고 필터는 나중이다. 없는 장치로 redirect하면 트래픽이 버려진다 (S7 L6)
+    runner.respond("docker inspect -f {{.State.Pid}}", 0, "4242\n")
+    runner.respond("nsenter -t 4242 -n ip link show ifb0", 1)
+    runner.respond("nsenter -t 4242 -n tc -j qdisc show dev ifb0", 0, json.dumps(
+        [{"kind": "fq_codel", "handle": "0:", "root": True, "options": {}}]))  # 새 IFB의 기본 qdisc
+    runner.respond("nsenter -t 4242 -n tc -j qdisc show dev eth0", 0, FRESH_ETH0)
+    runner.respond("nsenter -t 4242 -n tc -j filter show", 0, "[]")
+    instances.limit(U, 10)
+    assert [c for c in runner.calls if c not in QUERIES] == [
+        PID,
+        netns("ip", "link", "add", "ifb0", "type", "ifb"),
+        netns("ip", "link", "set", "ifb0", "up"),
+        netns("tc", "qdisc", "add", "dev", "ifb0", "root", "handle", "1:", "htb", "default", "1"),
+        class_replace(87710247),
+        netns("tc", "qdisc", "add", "dev", "ifb0", "parent", "1:1", "handle", "10:", "fq_codel"),
+        netns("tc", "qdisc", "add", "dev", "eth0", "clsact"),
+        netns("tc", "filter", "add", "dev", "eth0", "ingress", "matchall", "action", "mirred", "egress",
+              "redirect", "dev", "ifb0"),
+        netns("tc", "filter", "add", "dev", "eth0", "egress", "matchall", "action", "mirred", "egress",
+              "redirect", "dev", "ifb0"),
+    ]
+
+
+def test_limit_again_only_replaces_the_class_rate(runner, instances):
+    # 이미 걸린 인스턴스: 장치·qdisc·필터는 그대로 두고 rate만 바꾼다. HTB 루트에 replace는 실패한다 (S7 N8)
+    runner.respond("docker inspect -f {{.State.Pid}}", 0, "4242\n")
+    runner.respond("nsenter -t 4242 -n tc -j qdisc show dev ifb0", 0, json.dumps([HTB_ROOT, LEAF]))
+    runner.respond("nsenter -t 4242 -n tc -j qdisc show dev eth0", 0,
+                   json.dumps([json.loads(FRESH_ETH0)[0], CLSACT]))
+    runner.respond("nsenter -t 4242 -n tc -j filter show", 0, MATCHALL)
+    instances.limit(U, 30)
+    assert [c for c in runner.calls if c not in QUERIES] == [
+        PID, netns("ip", "link", "set", "ifb0", "up"), class_replace(htb_rate_bits(30))]
+
+
+def test_limit_adds_only_what_is_missing(runner, instances):
+    # 중간에 멈춘 걸기: HTB 루트는 있고 leaf·필터 하나가 없다
+    runner.respond("docker inspect -f {{.State.Pid}}", 0, "4242\n")
+    runner.respond("nsenter -t 4242 -n tc -j qdisc show dev ifb0", 0, json.dumps([HTB_ROOT]))
+    runner.respond("nsenter -t 4242 -n tc -j qdisc show dev eth0", 0,
+                   json.dumps([json.loads(FRESH_ETH0)[0], CLSACT]))
+    runner.respond("nsenter -t 4242 -n tc -j filter show dev eth0 ingress", 0, MATCHALL)
+    runner.respond("nsenter -t 4242 -n tc -j filter show dev eth0 egress", 0, "[]")
+    instances.limit(U, 10)
+    assert [c for c in runner.calls if c not in QUERIES] == [
+        PID, netns("ip", "link", "set", "ifb0", "up"), class_replace(87710247),
+        netns("tc", "qdisc", "add", "dev", "ifb0", "parent", "1:1", "handle", "10:", "fq_codel"),
+        netns("tc", "filter", "add", "dev", "eth0", "egress", "matchall", "action", "mirred", "egress",
+              "redirect", "dev", "ifb0"),
+    ]
+
+
+def test_limit_without_a_limit_does_nothing(runner, instances):
+    # 한도 태그가 없는 볼륨은 제한하지 않는다. 걸린 tc를 지우는 경로는 없다 (결정 11)
+    instances.limit(U, None)
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("inspect", [(1, ""), (0, "0\n")])
+def test_limit_without_a_running_instance_fails(runner, instances, inspect):
+    runner.respond("docker inspect -f {{.State.Pid}}", *inspect)
+    with pytest.raises(InstanceError, match="not running"):
+        instances.limit(U, 10)
+
+
+def test_ensure_applies_the_limit_after_start_and_before_ready(runner, instances):
+    # knfsd가 서비스하기 전에 제한이 걸린다. 준비 뒤에 걸면 그사이 제한 없이 흐른다 (결정 10, S7 L1·L2·L5)
+    runner.respond("docker inspect -f {{.State.Pid}}", 0, "4242\n")
+    runner.respond("docker inspect", 0, "false\n")
+    runner.respond("nsenter -t 4242 -n tc -j qdisc show dev ifb0", 0, json.dumps([HTB_ROOT, LEAF]))
+    runner.respond("nsenter -t 4242 -n tc -j qdisc show dev eth0", 0, json.dumps([CLSACT]))
+    runner.respond("nsenter -t 4242 -n tc -j filter show", 0, MATCHALL)
+    instances.ensure(U, "vol1", "172.30.0.129", "nfs4.1", 10)
+    order = [c for c in runner.calls if c in (["docker", "start", NAME], class_replace(87710247), READY_CHECK)]
+    assert order == [["docker", "start", NAME], class_replace(87710247), READY_CHECK]
+
+
 # --- ns 공유 마운트 ---
 
 
@@ -310,6 +423,17 @@ def test_check_host_passes(runner, instances):
     runner.respond("sysctl -n fs.leases-enable", 0, "0\n")
     instances.check_host()
     assert ["sysctl", "-n", "fs.leases-enable"] in runner.calls
+    # 모듈이 저절로 올라가면 호스트 netns에 ifb0·ifb1이 덤으로 생긴다. 이미 올라와 있으면 modprobe는 아무것도 하지 않는다
+    # (처리량 결정 14, S7 N1)
+    assert ["modprobe", "ifb", "numifbs=0"] in runner.calls
+
+
+def test_check_host_fails_when_ifb_cannot_be_loaded(runner, instances):
+    runner.respond("docker network inspect", 0, GOOD_NETWORK)
+    runner.respond("sysctl -n fs.leases-enable", 0, "0\n")
+    runner.respond("modprobe", 1)
+    with pytest.raises(StartupError, match="ifb"):
+        instances.check_host()
 
 
 @pytest.mark.parametrize("prefix, returncode, stdout, words", [

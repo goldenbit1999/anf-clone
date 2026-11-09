@@ -3,7 +3,9 @@
 
 ONTAP과의 대응:
 - aggregate = 씬 풀 `anf/aggr0`. 스토리지 루트의 희소 파일 → 루프 장치 → VG `anf`
-- FlexVol = thin LV `vol_<uuid 32자리>` + ext4. junction path, uuid, IP, 프로토콜은 LVM 태그에 둔다 (agent에는 DB가 없다)
+- FlexVol = thin LV `vol_<uuid 32자리>` + ext4. junction path, uuid, IP, 프로토콜, 처리량 한도는 LVM 태그에 둔다
+  (agent에는 DB가 없다)
+- QoS 상한(`qos.policy.max_throughput_mbps`) = 볼륨 인스턴스 netns의 tc HTB (처리량 설계 결정 8~11)
 - Snapshot copy = 읽기 전용 thin 스냅샷 LV `snap_<uuid 32자리>`. 이름, 볼륨, 만든 시각도 LVM 태그에 둔다.
   WAFL처럼 블록을 공유하고 바뀐 블록만 새로 쓴다(dm-thin). 공간은 볼륨 할당량이 아니라 씬 풀에서 나간다 (R-09)
 - FlexClone(스냅샷에서 새 볼륨) = 스냅샷 LV의 쓰기 가능 thin 스냅샷. 처음부터 split된 볼륨처럼 독립이다
@@ -77,13 +79,15 @@ class _Volume:
     pending: _Restore | None = None  # 끝나지 않은 되돌리기
     restored: str | None = None  # 마지막으로 끝낸 되돌리기의 키 (`anf_rv_done`)
     clone: _Clone | None = None  # 끝나지 않은 스냅샷에서 만들기
+    qos: float | None = None  # 처리량 한도 MiB/s (`anf_qos`). 없으면 제한하지 않는다 (처리량 결정 11)
 
     @property
     def device(self) -> str:
         return f"/dev/{VG}/{self.lv}"
 
     def tags(self) -> list[str]:
-        return [f"anf_path={self.token}", f"anf_uuid={self.uuid}", f"anf_ip={self.ip}", f"anf_proto={self.protocol}"]
+        tags = [f"anf_path={self.token}", f"anf_uuid={self.uuid}", f"anf_ip={self.ip}", f"anf_proto={self.protocol}"]
+        return tags + ([_qos_tag(self.qos)] if self.qos is not None else [])
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,10 @@ def snapshot_lv_name(uuid: str) -> str:
 
 def _tag_args(flag: str, tags: list[str]) -> list[str]:
     return [arg for tag in tags for arg in (flag, tag)]
+
+
+def _qos_tag(qos: float) -> str:
+    return f"anf_qos={qos!r}"  # repr는 float로 되읽으면 같은 값이다 (0.062, 12.5, 10.0)
 
 
 class FlexVolManager:
@@ -176,6 +184,8 @@ class FlexVolManager:
                 self._ensure_snapshot_mounted(vol, snap)
             self._write_exports(vol, mine)
             self.instances.start(vol.uuid, vol.token, vol.ip, vol.protocol)
+            # 새 netns에는 tc가 없다. 서비스 전에 태그의 한도를 건다 (처리량 결정 10, S7 L5)
+            self.instances.limit(vol.uuid, vol.qos)
             started.append(vol.uuid)
         for uuid in started:
             self.instances.wait_ready(uuid)
@@ -183,17 +193,20 @@ class FlexVolManager:
     # --- 볼륨 ---
 
     def create(self, uuid: str, junction_path: str, size: int, unix_permissions: int, protocol: str,
-               clone: tuple[str, str] | None = None) -> None:
+               clone: tuple[str, str] | None = None, qos: float | None = None) -> None:
         """(1) LV → (2) 파일시스템 → (3) 마운트 → (4) 루트 초기화 → (5) `.snapshot` → (6) export 파일 → (7) 인스턴스.
         입력은 agent_app이 검사했다. 끝나지 않은 되돌리기가 있으면 그것부터 끝낸다 (되돌리기 결정 2·4).
         clone = (부모 볼륨 uuid, 부모 스냅샷 uuid)면 그 스냅샷에서 만든다 (ONTAP FlexClone, 복원 §6.2). 진행 표시가 있는
-        볼륨은 clone과 상관없이 남은 단계를 이어서 하고, 진행 표시가 없는 볼륨에서는 clone을 무시한다 (복원 결정 10)."""
-        vol = self._ensure_lv(uuid, junction_path[1:], size, protocol, clone)
+        볼륨은 clone과 상관없이 남은 단계를 이어서 하고, 진행 표시가 없는 볼륨에서는 clone을 무시한다 (복원 결정 10).
+        qos는 처리량 한도(MiB/s)다. 있는 볼륨이면 태그를 그 값으로 바꾸고, None이면 태그를 그대로 둔다. 인스턴스에는
+        태그의 한도를 건다 (처리량 결정 8·11)."""
+        vol = self._ensure_lv(uuid, junction_path[1:], size, protocol, clone, qos)
         if vol.clone is not None:
-            self._finish_clone(vol, size, unix_permissions)
+            self._finish_clone(self._ensure_qos(vol, qos), size, unix_permissions)
             return
         if vol.pending is not None:
-            vol = self._resume_restore(vol)
+            vol = self._resume_restore(vol)  # 새 LV가 옛 태그를 물려받은 뒤에 한도를 바꾼다
+        vol = self._ensure_qos(vol, qos)
         fs = self._filesystem(vol)
         if fs is None:
             self._run(["mkfs.ext4", "-q", "-m", "0", "-U", uuid, vol.device])
@@ -207,7 +220,15 @@ class FlexVolManager:
             lost_found.rmdir()
         self._ensure_snapshot_dir(vol)
         self._write_exports(vol, [s for s in self._report()[2] if s.volume == uuid])
-        self.instances.ensure(uuid, vol.token, vol.ip, vol.protocol)
+        self.instances.ensure(uuid, vol.token, vol.ip, vol.protocol, vol.qos)
+
+    def _ensure_qos(self, vol: _Volume, qos: float | None) -> _Volume:
+        """볼륨 LV의 한도 태그를 요청 값으로 맞춘다. 옛 값을 지우고 새 값을 붙이는 것이 한 명령이다."""
+        if qos is None or qos == vol.qos:
+            return vol
+        old = _tag_args("--deltag", [_qos_tag(vol.qos)]) if vol.qos is not None else []
+        self._run(["lvchange", *old, "--addtag", _qos_tag(qos), f"{VG}/{vol.lv}"])
+        return replace(vol, qos=qos)
 
     def _finish_clone(self, vol: _Volume, size: int, unix_permissions: int) -> None:
         """스냅샷에서 만드는 볼륨의 (2) 크기 → (3) 마운트 → (4) 파일시스템 크기 → (5) `.snapshot` 정리 → (6) base 스냅샷 →
@@ -230,7 +251,7 @@ class FlexVolManager:
         # 루트 inode는 원본 스냅샷에서 왔다. base 스냅샷 뒤에 요청 권한으로 맞춘다 (복원 결정 11)
         self._run(["chmod", f"{unix_permissions:04d}", str(mp)])
         self._write_exports(vol, mine)
-        self.instances.ensure(vol.uuid, vol.token, vol.ip, vol.protocol)
+        self.instances.ensure(vol.uuid, vol.token, vol.ip, vol.protocol, vol.qos)
         self._run(["lvchange", *_tag_args("--deltag", vol.clone.tags()), f"{VG}/{vol.lv}"])
 
     def delete(self, uuid: str) -> None:
@@ -329,7 +350,7 @@ class FlexVolManager:
             pending = vol.pending
             vol = self._resume_restore(vol)
             if pending.request == request_uuid:
-                self.instances.ensure(vol.uuid, vol.token, vol.ip, vol.protocol)
+                self.instances.ensure(vol.uuid, vol.token, vol.ip, vol.protocol, vol.qos)
                 return
         if vol.restored == request_uuid:  # 이미 끝냈다. 그 뒤에 클라이언트가 쓴 것을 지우지 않는다
             return
@@ -341,7 +362,7 @@ class FlexVolManager:
         pending = _Restore(request_uuid, snap.uuid)
         self._run(["lvchange", *_tag_args("--addtag", pending.tags()), f"{VG}/{vol.lv}"])
         self._resume_restore(replace(vol, pending=pending))
-        self.instances.ensure(vol.uuid, vol.token, vol.ip, vol.protocol)
+        self.instances.ensure(vol.uuid, vol.token, vol.ip, vol.protocol, vol.qos)
 
     def _resume_restore(self, vol: _Volume) -> _Volume:
         """진행 표시의 되돌리기를 남은 단계부터 끝내고 끝난 볼륨을 돌려준다. 새 LV가 없으면 만들기부터, 옛 LV가 있으면
@@ -447,7 +468,8 @@ class FlexVolManager:
         self._run(["lvremove", "-y", f"{VG}/{snap.lv}"])
 
     def _ensure_lv(self, uuid: str, token: str, size: int, protocol: str,
-                   clone: tuple[str, str] | None = None) -> _Volume:
+                   clone: tuple[str, str] | None = None, qos: float | None = None) -> _Volume:
+        """있는 볼륨은 그대로 돌려준다(한도는 `_ensure_qos`가 맞춘다). 새 LV는 만들 때부터 한도 태그를 갖는다."""
         pool_size, volumes, snapshots = self._report()
         for vol in volumes:
             if vol.uuid == uuid:
@@ -485,11 +507,11 @@ class FlexVolManager:
             # 쓰기 가능 thin 스냅샷: 원본과 블록을 공유하고 스냅샷 크기로 생긴다. 볼륨 태그와 진행 표시를 처음부터 갖는다.
             # 되돌리기의 새 볼륨 LV와 같은 명령이다 (S5 L2, S6 C1, 복원 결정 5·10)
             vol = _Volume(uuid, token, source.size, lv_name(uuid), ip, protocol,
-                          clone=_Clone(source.uuid, source.name, source.create_time))
+                          clone=_Clone(source.uuid, source.name, source.create_time), qos=qos)
             self._run(["lvcreate", "-s", "-kn", "-p", "rw", "-n", vol.lv,
                        *_tag_args("--addtag", vol.tags() + vol.clone.tags()), f"{VG}/{source.lv}"])
             return vol
-        vol = _Volume(uuid, token, size, lv_name(uuid), ip, protocol)
+        vol = _Volume(uuid, token, size, lv_name(uuid), ip, protocol, qos=qos)
         self._run([
             "lvcreate", "--type", "thin", "-V", f"{size}b", "--thinpool", POOL, "-n", vol.lv,
             *_tag_args("--addtag", vol.tags()), VG,
@@ -515,8 +537,9 @@ class FlexVolManager:
                 clone = None
                 if "anf_cl_snap" in tags:
                     clone = _Clone(tags["anf_cl_snap"], tags["anf_cl_name"], tags["anf_cl_time"])
+                qos = float(tags["anf_qos"]) if "anf_qos" in tags else None
                 found.append(_Volume(tags["anf_uuid"], tags["anf_path"], int(row["lv_size"]), row["lv_name"],
-                                     tags["anf_ip"], tags["anf_proto"], pending, tags.get("anf_rv_done"), clone))
+                                     tags["anf_ip"], tags["anf_proto"], pending, tags.get("anf_rv_done"), clone, qos))
             elif "anf_snap_uuid" in tags:
                 snapshots.append(_Snapshot(tags["anf_snap_uuid"], tags["anf_snap_name"], tags["anf_snap_vol"],
                                            row["lv_name"], tags["anf_snap_time"], int(row["thin_id"]),
@@ -552,11 +575,14 @@ class FlexVolManager:
     def _record(self, vol: _Volume, mounted: set[str]) -> dict:
         """ONTAP 볼륨 레코드의 부분집합. 마운트돼 있으면 online이다. data_lif는 클론 확장이다 (결정 18)."""
         state = "online" if str(self._mountpoint(vol)) in mounted else "offline"
-        return {
+        record = {
             "uuid": vol.uuid, "name": vol.lv, "size": vol.size,
             "nas": {"path": f"/{vol.token}", "protocols": [vol.protocol]},
             "state": state, "data_lif": {"ip": {"address": vol.ip}},
         }
+        if vol.qos is not None:  # ONTAP은 정책 이름·uuid를 보인다. 클론에는 정책 객체가 없어 값을 보인다 (§6.1)
+            record["qos"] = {"policy": {"max_throughput_mbps": vol.qos}}
+        return record
 
     def _mounted(self) -> set[str]:
         return set(self._run(["findmnt", "-rn", "-o", "TARGET"]).stdout.splitlines())

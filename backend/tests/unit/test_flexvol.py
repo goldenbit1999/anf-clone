@@ -54,6 +54,7 @@ class FakeHost:
         self.fail: dict[str, str] = {}  # 프로그램(또는 "instance") → stderr (다음 한 번 실패)
         self.busy = 0  # 인스턴스가 없어도 umount가 busy인 남은 횟수
         self.blocked: set[str] = set()  # 입력을 막고 export 캐시를 비운 인스턴스 (되돌리기 창)
+        self.limits: dict[str, float] = {}  # 인스턴스 netns에 건 처리량 한도 (MiB/s). netns와 함께 사라진다
 
     # --- 실행기 ---
 
@@ -74,9 +75,18 @@ class FakeHost:
             self.calls.append(["shared-ns"])
             self.shared_ns = True
 
-    def ensure(self, uuid, token, ip, protocol):
+    def ensure(self, uuid, token, ip, protocol, qos=None):
         self.start(uuid, token, ip, protocol)
+        self.limit(uuid, qos)
         self.wait_ready(uuid)
+
+    def limit(self, uuid, qos):
+        # 한도는 인스턴스 netns 안에 건다. 인스턴스가 돌고 있어야 한다 (처리량 결정 9·10)
+        if qos is None:
+            return
+        assert uuid in self.instances, "limit applied to an instance that is not running"
+        self.calls.append(["instance-limit", uuid, qos])
+        self.limits[uuid] = qos
 
     def start(self, uuid, token, ip, protocol):
         if uuid in self.instances:
@@ -95,6 +105,7 @@ class FakeHost:
     def remove(self, uuid):
         if self.instances.pop(uuid, None) is not None:
             self.calls.append(["instance-remove", uuid])
+            self.limits.pop(uuid, None)
 
     def write_exports(self, uuid, token, snapshots):
         names = sorted(name for name, _ in snapshots)
@@ -132,6 +143,7 @@ class FakeHost:
         self.shared_ns = False
         self.instances.clear()
         self.blocked.clear()  # 차단 규칙은 인스턴스 netns와 함께 사라진다
+        self.limits.clear()  # tc도 netns와 함께 사라진다 (S7 L5)
         self.calls.clear()
 
     def _detach(self, target):
@@ -1342,3 +1354,92 @@ def test_recover_skips_a_pending_clone_and_the_next_post_finishes_it(host, mgr, 
     assert not any(t.startswith(mountpoint(tmp_path, "vol2")) for t in host.mounts)
     clone(mgr)
     assert_cloned_from_s2(host, mgr, tmp_path)
+
+
+# --- 처리량 한도 (처리량 설계 결정 8~11, §6.2) ---
+
+QOS10 = "anf_qos=10.0"
+
+
+def test_create_with_a_limit_tags_the_lv_and_limits_the_instance_before_ready(host, mgr, tmp_path):
+    # 한도는 볼륨 LV 태그다(agent에 DB가 없다). 인스턴스를 띄운 뒤, 준비를 기다리기 전에 건다 (결정 10·11)
+    mgr.create(U1, "/vol1", GIB, 770, "nfs3", qos=10.0)
+    assert changes(host)[0] == [
+        "lvcreate", "--type", "thin", "-V", f"{GIB}b", "--thinpool", "aggr0", "-n", LV1,
+        *tag_args("--addtag", VOLUME_TAGS + [QOS10]), "anf"]
+    assert changes(host)[-3:] == [["instance-start", U1], ["instance-limit", U1, 10.0], ["instance-ready", U1]]
+    assert mgr.record(U1)["qos"] == {"policy": {"max_throughput_mbps": 10.0}}
+
+
+def test_volume_without_a_limit_has_no_tag_and_no_limit(host, mgr):
+    create(mgr)
+    assert lv_tags(host) == sorted(VOLUME_TAGS)
+    assert "qos" not in mgr.record(U1)
+    assert not any(c[0] == "instance-limit" for c in host.calls)
+
+
+def test_post_with_another_limit_changes_the_tag_in_one_command(host, mgr):
+    # 같은 uuid의 POST는 한도를 맞추는 보장이다. 마운트와 인스턴스는 그대로다 (결정 8, S7 Q3)
+    mgr.create(U1, "/vol1", GIB, 770, "nfs3", qos=10.0)
+    host.calls.clear()
+    mgr.create(U1, "/vol1", GIB, 770, "nfs3", qos=12.5)
+    assert ["lvchange", "--deltag", QOS10, "--addtag", "anf_qos=12.5", f"anf/{LV1}"] in changes(host)
+    assert ["instance-limit", U1, 12.5] in changes(host)
+    assert not any(c[0] in ("mount", "umount", "instance-start", "instance-remove") for c in changes(host))
+    assert lv_tags(host) == sorted(VOLUME_TAGS + ["anf_qos=12.5"])
+
+
+def test_first_limit_on_an_existing_volume_only_adds_the_tag(host, mgr):
+    # 이 FR 전에 만든 볼륨: 다음 보장에서 한도가 생긴다 (결정 11)
+    create(mgr)
+    host.calls.clear()
+    mgr.create(U1, "/vol1", GIB, 770, "nfs3", qos=10.0)
+    assert ["lvchange", "--addtag", QOS10, f"anf/{LV1}"] in changes(host)
+    assert host.limits == {U1: 10.0}
+
+
+def test_post_without_a_limit_keeps_the_tag_and_reapplies_it(host, mgr):
+    mgr.create(U1, "/vol1", GIB, 770, "nfs3", qos=10.0)
+    host.calls.clear()
+    create(mgr)
+    assert not any(c[0] == "lvchange" for c in changes(host))
+    assert ["instance-limit", U1, 10.0] in changes(host)
+    assert lv_tags(host) == sorted(VOLUME_TAGS + [QOS10])
+
+
+def test_recover_limits_each_instance_after_start_and_before_ready(host, mgr):
+    # WSL 재시작이나 인스턴스 정지 뒤: 새 netns에는 tc가 없다 (S7 L5). 태그로 다시 건다
+    mgr.create(U1, "/vol1", GIB, 770, "nfs3", qos=10.0)
+    create(mgr, U2, "/vol2", protocol="nfs4.1")
+    host.reboot()
+    mgr.recover()
+    steps = [c for c in changes(host) if c[0].startswith("instance-")]
+    assert steps == [["instance-start", U1], ["instance-limit", U1, 10.0], ["instance-start", U2],
+                     ["instance-ready", U1], ["instance-ready", U2]]
+    assert host.limits == {U1: 10.0}
+
+
+def test_restore_keeps_the_limit(host, mgr, tmp_path):
+    # 되돌리기의 새 LV는 볼륨 태그를 처음부터 가지므로 한도도 물려받는다. 인스턴스는 그대로라 tc도 그대로다 (S7 L3·M6)
+    create(mgr)
+    mgr.create(U1, "/vol1", GIB, 770, "nfs3", qos=10.0)
+    mgr.create_snapshot(U1, S1, "s1")
+    host.calls.clear()
+    mgr.restore(U1, S1, REQ)
+    new_lv = next(c for c in changes(host) if c[:2] == ["lvcreate", "-s"])
+    assert QOS10 in new_lv
+    assert QOS10 in lv_tags(host)
+    assert ["instance-limit", U1, 10.0] in changes(host)
+
+
+def test_create_from_snapshot_takes_the_requested_limit(host, mgr, tmp_path):
+    # 원본 볼륨의 한도가 아니라 새 볼륨 요청의 한도다 (FR-07 + FR-08)
+    three_snapshots(mgr, tmp_path)
+    mgr.create(U1, "/vol1", GIB, 770, "nfs3", qos=10.0)
+    host.calls.clear()
+    mgr.create(U2, "/vol2", 2 * GIB, 755, "nfs4.1", clone=(U1, S2), qos=20.0)
+    first = changes(host)[0]
+    assert first[:5] == ["lvcreate", "-s", "-kn", "-p", "rw"] and "anf_qos=20.0" in first
+    assert ["instance-limit", U2, 20.0] in changes(host)
+    assert lv_tags(host, LV2) == sorted(VOLUME2_TAGS + ["anf_qos=20.0"])
+    assert host.limits == {U1: 10.0, U2: 20.0}
