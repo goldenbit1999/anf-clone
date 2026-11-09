@@ -29,6 +29,7 @@ from anf_api.arm_rules import (
     volume_id,
 )
 from anf_api.capacity_pools import MIBPS_PER_TIB, TIB
+from anf_api.snapshots import snapshot_not_found
 from anf_api.state_store import Operation, Resource, StateStore, Tx
 
 GIB = 1 << 30
@@ -39,6 +40,9 @@ _TOKEN_CHARS = re.compile(r"[a-zA-Z0-9\-_]*")
 _SUBNET_ID = re.compile(
     r"/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.Network"
     r"/virtualNetworks/[^/]+/subnets/[^/]+", re.IGNORECASE)
+_SNAPSHOT_ID = re.compile(
+    r"/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.NetApp/netAppAccounts/[^/]+"
+    r"/capacityPools/[^/]+/volumes/[^/]+/snapshots/[^/]+", re.IGNORECASE)
 _UNIX_PERMISSIONS = re.compile(r"[0-7]{4}")
 _PROTOCOLS = ("NFSv3", "NFSv4.1")
 _NETWORK_FEATURES = ("Basic", "Standard")
@@ -197,6 +201,24 @@ def parse_patch_body(body, min_size: int = DEFAULT_MIN_SIZE) -> tuple[str | None
         raise invalid_content("The 'location' property must be a string.")
     tags = check_tags(body["tags"]) if "tags" in body else None
     return location, tags, _check_properties(body.get("properties", {}), min_size)
+
+
+def parse_revert_body(body) -> str:
+    """revert 본문 `{"snapshotId": <스냅샷 ARM ID>}`의 스냅샷 ID. 스펙상 선택이지만 클론은 필수다 (되돌리기 설계 결정 6)."""
+    if not isinstance(body, dict):
+        raise invalid_content("The request content must be a JSON object.")
+    for key in body:
+        if key != "snapshotId":
+            raise unknown_property(key)
+    value = body.get("snapshotId")
+    if not isinstance(value, str):
+        raise invalid_content("The 'snapshotId' property is required and must be a snapshot resource ID.")
+    if not _SNAPSHOT_ID.fullmatch(value):
+        raise invalid_content(
+            "The 'snapshotId' property must be a snapshot resource ID: /subscriptions/{id}/resourceGroups/{group}"
+            "/providers/Microsoft.NetApp/netAppAccounts/{account}/capacityPools/{pool}/volumes/{volume}"
+            "/snapshots/{snapshot}.")
+    return value
 
 
 # --- 응답 본문 ---
@@ -429,6 +451,40 @@ def delete_volume(store: StateStore, subscription_id: str, resource_group: str, 
         return op
 
 
+def revert_volume(store: StateStore, subscription_id: str, resource_group: str, account: str, pool: str,
+                  name: str, body, correlation_id: str | None) -> Operation:
+    """볼륨을 스냅샷으로 되돌린다: Reverting + POST 작업(202) [녹화 R3]. 작업 입력에 고른 스냅샷을 남긴다.
+    검사 순서: 이름 → 본문 → 볼륨 존재 → 볼륨 진행 중 작업 → 볼륨 상태 → 스냅샷 존재 → 그 볼륨 스냅샷의
+    진행 중 작업 → 스냅샷 상태 (되돌리기 설계 결정 6, §4.2)."""
+    rid = _id(subscription_id, resource_group, account, pool, name)
+    snapshot_rid = parse_revert_body(body)
+    if not snapshot_rid.lower().startswith(rid.lower() + "/snapshots/"):
+        raise ArmError(400, "BadRequest", f"The snapshot '{snapshot_rid}' does not belong to the volume '{rid}'.")
+    with store.transaction() as tx:
+        res = tx.get_resource(rid)
+        if res is None:
+            raise not_found(rid)
+        _ensure_terminal(tx, res)
+        if res.provisioning_state != "Succeeded":
+            raise ArmError(400, "BadRequest", "Volume cannot be reverted when it isn't in state succeeded.")
+        snap = tx.get_resource(snapshot_rid)
+        if snap is None:
+            raise snapshot_not_found(snapshot_rid.rsplit("/", 1)[-1], account, pool, name)
+        for other in tx.list_children(rid, SNAPSHOT_TYPE):
+            if tx.active_operation(other.id) is not None:
+                raise ArmError(409, "Conflict",
+                               f"Cannot revert volume '{rid}' because an operation is in progress on its snapshot "
+                               f"'{other.id}'. Wait until it is finished, and then retry.")
+        if snap.provisioning_state != "Succeeded":
+            raise ArmError(400, "BadRequest", f"Volume cannot be reverted to snapshot '{snap.id}' because the "
+                                              "snapshot isn't in state succeeded.")
+        op = tx.create_operation(res, "POST", "Reverting", params={"snapshotId": snap.id},
+                                 correlation_id=correlation_id)
+        res.provisioning_state = "Reverting"
+        tx.put_resource(res)
+        return op
+
+
 # --- 처리기: 데이터 플레인 작업 (결정 11·12) ---
 
 _AGENT_PROTOCOL = {"NFSv3": "nfs3", "NFSv4.1": "nfs4.1"}
@@ -453,10 +509,33 @@ def make_handlers(store: StateStore, storage) -> dict:
             res.properties = {**res.properties, "mountTargets": [
                 {"mountTargetId": fsid, "fileSystemId": fsid, "ipAddress": ip}]}
             tx.put_resource(res)
+        # agent가 실패한 되돌리기를 끝냈으면 더 새 스냅샷이 지워졌다 (되돌리기 결정 2·8). 작업 중이 아닌 Succeeded 행만
+        # 맞춘다: 실패 행은 사용자가 지우고, 작업 중인 행은 그 작업이 끝낸다
+        with store.transaction() as tx:
+            settled = [s for s in tx.list_children(op.resource_id, SNAPSHOT_TYPE)
+                       if s.provisioning_state == "Succeeded" and tx.active_operation(s.id) is None]
+        if settled:
+            remaining = await storage.snapshot_uuids(fsid, correlation_id=op.correlation_id)
+            with store.transaction() as tx:
+                for snap in settled:
+                    if snap.properties["snapshotId"] not in remaining and tx.active_operation(snap.id) is None:
+                        tx.delete_resource(snap.id)
 
     async def delete(op: Operation) -> None:
         props = store.get_resource(op.resource_id).properties
         await storage.delete_volume(props["fileSystemId"], correlation_id=op.correlation_id)
 
+    async def revert(op: Operation) -> None:
+        """agent가 되돌리고 더 새 스냅샷을 지운다. 작업 ID가 멱등 키라 재시작 뒤 다시 실행해도 한 번만
+        되돌린다 (되돌리기 설계 결정 4). agent에 남지 않은 스냅샷의 행을 지운다 (결정 8)."""
+        props = store.get_resource(op.resource_id).properties
+        snap = store.get_resource(op.params["snapshotId"])
+        remaining = await storage.revert_volume(props["fileSystemId"], snap.properties["snapshotId"], op.id,
+                                                correlation_id=op.correlation_id)
+        with store.transaction() as tx:
+            for other in tx.list_children(op.resource_id, SNAPSHOT_TYPE):
+                if other.properties["snapshotId"] not in remaining:
+                    tx.delete_resource(other.id)
+
     return {(VOLUME_TYPE, "CREATE"): ensure, (VOLUME_TYPE, "UPDATE"): ensure,
-            (VOLUME_TYPE, "PATCH"): ensure, (VOLUME_TYPE, "DELETE"): delete}
+            (VOLUME_TYPE, "PATCH"): ensure, (VOLUME_TYPE, "DELETE"): delete, (VOLUME_TYPE, "POST"): revert}

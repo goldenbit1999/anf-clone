@@ -234,6 +234,52 @@ def test_unlock_without_a_running_instance_does_nothing(runner, instances, inspe
     assert len(runner.calls) == 1
 
 
+# --- 되돌리기 창: 인스턴스 입력 차단 (되돌리기 설계 결정 3·13) ---
+
+PID = ["docker", "inspect", "-f", "{{.State.Pid}}", NAME]
+RULE = ["INPUT", "-i", "eth0", "-j", "DROP"]
+
+
+def iptables(op):
+    return ["nsenter", "-t", "4242", "-n", "iptables", op, *RULE]
+
+
+def test_block_drops_input_in_the_instance_netns_and_flushes_exports(runner, instances):
+    # 클라이언트는 hard 마운트 재전송으로 기다린다. export 캐시를 비워야 언마운트된다 (S5)
+    runner.respond("docker inspect -f {{.State.Pid}}", 0, "4242\n")
+    runner.respond("nsenter -t 4242 -n iptables -C", 1)  # 아직 규칙이 없다
+    assert instances.block(U) is True
+    assert runner.calls == [PID, iptables("-C"), iptables("-I"), ["docker", "exec", NAME, "exportfs", "-f"]]
+
+
+def test_block_again_does_not_add_a_second_rule(runner, instances):
+    runner.respond("docker inspect -f {{.State.Pid}}", 0, "4242\n")
+    assert instances.block(U) is True
+    assert iptables("-I") not in runner.calls
+
+
+@pytest.mark.parametrize("inspect", [(1, ""), (0, "0\n")])
+def test_block_without_a_running_instance_does_nothing(runner, instances, inspect):
+    runner.respond("docker inspect -f {{.State.Pid}}", *inspect)
+    assert instances.block(U) is False
+    assert runner.calls == [PID]
+
+
+def test_unblock_removes_every_copy_of_the_rule(runner, instances):
+    runner.respond("docker inspect -f {{.State.Pid}}", 0, "4242\n")
+    runner.sequence("nsenter -t 4242 -n iptables -C", (0, ""), (0, ""), (1, ""))
+    instances.unblock(U)
+    assert runner.calls == [PID, iptables("-C"), iptables("-D"), iptables("-C"), iptables("-D"), iptables("-C")]
+
+
+@pytest.mark.parametrize("inspect", [(1, ""), (0, "0\n")])
+def test_unblock_without_a_running_instance_does_nothing(runner, instances, inspect):
+    # 멈춘 인스턴스의 netns와 규칙은 컨테이너와 함께 사라졌다
+    runner.respond("docker inspect -f {{.State.Pid}}", *inspect)
+    instances.unblock(U)
+    assert runner.calls == [PID]
+
+
 # --- ns 공유 마운트 ---
 
 
@@ -261,7 +307,9 @@ def test_shared_ns_already_shared(runner, instances):
 
 def test_check_host_passes(runner, instances):
     runner.respond("docker network inspect", 0, GOOD_NETWORK)
+    runner.respond("sysctl -n fs.leases-enable", 0, "0\n")
     instances.check_host()
+    assert ["sysctl", "-n", "fs.leases-enable"] in runner.calls
 
 
 @pytest.mark.parametrize("prefix, returncode, stdout, words", [
@@ -269,9 +317,12 @@ def test_check_host_passes(runner, instances):
     ("docker image inspect", 1, "", "anf-nfs-server"),
     ("docker network inspect", 1, "", "anf-vnet"),
     ("docker network inspect", 0, json.dumps([{"Subnet": "172.30.0.0/24", "IPRange": ""}]), "ip-range"),
+    # NFSv4 위임이 켜져 있으면 되돌린 뒤 v4.1 클라이언트가 옛 캐시를 읽는다 (되돌리기 설계 결정 1, S5 B2)
+    ("sysctl -n fs.leases-enable", 0, "1\n", "fs.leases-enable"),
 ])
 def test_check_host_fails_with_a_hint(runner, instances, prefix, returncode, stdout, words):
     runner.respond("docker network inspect", 0, GOOD_NETWORK)
+    runner.respond("sysctl -n fs.leases-enable", 0, "0\n")
     runner.respond(prefix, returncode, stdout)
     with pytest.raises(StartupError) as e:
         instances.check_host()

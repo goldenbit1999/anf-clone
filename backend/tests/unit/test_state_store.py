@@ -205,6 +205,51 @@ def test_finished_operation_allows_next_operation(store):
     assert store.active_operations()[0].previous == {"tags": {}, "properties": {}}
 
 
+def test_operation_params_round_trip(store):
+    # 작업 입력: revert는 고른 스냅샷을 작업 행에 남기고 처리기가 읽는다 (되돌리기 설계 결정 11)
+    with store.transaction() as tx:
+        res = make_account()
+        tx.put_resource(res)
+        op = tx.create_operation(res, "POST", "Reverting", params={"snapshotId": "/x/snapshots/s1"})
+        assert tx.active_operation(ACC).params == {"snapshotId": "/x/snapshots/s1"}
+    assert store.get_operation(op.id).params == {"snapshotId": "/x/snapshots/s1"}
+
+
+def test_operation_without_params_has_none(store):
+    with store.transaction() as tx:
+        res = make_account()
+        tx.put_resource(res)
+        op = tx.create_operation(res, "CREATE", "Creating")
+    assert store.get_operation(op.id).params is None
+
+
+def test_existing_database_gains_params_column(tmp_path):
+    # 앞 사이클이 만든 DB 파일에는 params 열이 없다. 시작할 때 더하고 기존 작업은 그대로 읽힌다
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old_schema = """
+    CREATE TABLE operations (
+        id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, location TEXT NOT NULL,
+        resource_id TEXT NOT NULL, resource_type TEXT NOT NULL, action TEXT NOT NULL,
+        status TEXT NOT NULL, previous TEXT, error TEXT, correlation_id TEXT,
+        start_time TEXT NOT NULL, end_time TEXT);
+    INSERT INTO operations VALUES ('op1', 's1', 'westus2', '/r', 't', 'CREATE', 'Succeeded',
+        NULL, NULL, NULL, '2026-11-07T00:00:00.000000Z', '2026-11-07T00:00:01.000000Z');
+    """
+    conn = sqlite3.connect(path)
+    conn.executescript(old_schema)
+    conn.close()
+    store = StateStore(path)
+    assert store.get_operation("op1").params is None
+    StateStore(path)  # 두 번째 시작은 열을 다시 더하지 않는다
+    with store.transaction() as tx:
+        res = make_account()
+        tx.put_resource(res)
+        op = tx.create_operation(res, "POST", "Reverting", params={"k": 1})
+    assert store.get_operation(op.id).params == {"k": 1}
+
+
 def test_active_operation_for_resource(store):
     with store.transaction() as tx:
         res = make_account()

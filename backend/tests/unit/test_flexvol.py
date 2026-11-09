@@ -52,6 +52,7 @@ class FakeHost:
         self.held: set[str] = set()  # 클라이언트가 열고 있는 ns 기준 경로. 인스턴스 안 unlock으로 풀린다
         self.fail: dict[str, str] = {}  # 프로그램(또는 "instance") → stderr (다음 한 번 실패)
         self.busy = 0  # 인스턴스가 없어도 umount가 busy인 남은 횟수
+        self.blocked: set[str] = set()  # 입력을 막고 export 캐시를 비운 인스턴스 (되돌리기 창)
 
     # --- 실행기 ---
 
@@ -108,6 +109,18 @@ class FakeHost:
             self.calls.append(["unlock", uuid, path])
             self.held.discard(path)
 
+    def block(self, uuid):
+        if uuid not in self.instances:
+            return False
+        self.calls.append(["block", uuid])
+        self.blocked.add(uuid)
+        return True
+
+    def unblock(self, uuid):
+        if uuid in self.instances:
+            self.calls.append(["unblock", uuid])
+            self.blocked.discard(uuid)
+
     # --- 흉내 ---
 
     def reboot(self):
@@ -117,6 +130,7 @@ class FakeHost:
         self.loop = None
         self.shared_ns = False
         self.instances.clear()
+        self.blocked.clear()  # 차단 규칙은 인스턴스 netns와 함께 사라진다
         self.calls.clear()
 
     def _detach(self, target):
@@ -132,8 +146,22 @@ class FakeHost:
         if path.parent.name != ".snapshot":
             return False
         token = path.parent.parent.name
-        return any(uuid in self.instances and t == token and path.name in names
+        return any(uuid in self.instances and uuid not in self.blocked and t == token and path.name in names
                    for uuid, (t, names) in self.exports.items())
+
+    def _tree(self, name):
+        """LV 파일시스템 안의 디렉터리들. 마운트돼 있으면 디스크에서 읽고, 그 아래 다른 마운트의 내용은 뺀다."""
+        target = next((t for t, d in self.mounts.items() if d == f"/dev/anf/{name}"), None)
+        if target is None:
+            return list(self.lvs[name]["tree"])
+        root = Path(target)
+        nested = [Path(t) for t in self.mounts if t != target and root in Path(t).parents]
+        return sorted(p.relative_to(root).as_posix() for p in root.rglob("*")
+                      if p.is_dir() and not any(n in p.parents for n in nested))
+
+    def _next_thin_id(self):
+        # dm-thin 장치 id는 남은 것 중 최댓값 + 1이다 (S5 L3)
+        return max((lv["thin_id"] for lv in self.lvs.values()), default=0) + 1
 
     @staticmethod
     def ok(stdout=""):
@@ -163,19 +191,24 @@ class FakeHost:
         if args == ["anf/aggr0"]:
             return self.ok() if self.pool else Result(5, "", "  Failed to find logical volume\n")
         assert args[-1] == "anf"
-        rows = [{"lv_name": "aggr0", "lv_size": str(self.POOL_SIZE), "lv_tags": ""}] if self.pool else []
+        assert "thin_id" in args[args.index("-o") + 1].split(",")
+        rows = [{"lv_name": "aggr0", "lv_size": str(self.POOL_SIZE), "lv_tags": "", "thin_id": ""}] if self.pool else []
         rows += [
-            {"lv_name": name, "lv_size": str(lv["size"]), "lv_tags": ",".join(sorted(lv["tags"]))}
+            {"lv_name": name, "lv_size": str(lv["size"]), "lv_tags": ",".join(sorted(lv["tags"])),
+             "thin_id": str(lv["thin_id"])}
             for name, lv in self.lvs.items()
         ]
         return self.ok(json.dumps({"report": [{"lv": rows}]}))
 
     def _lvcreate(self, args):
         if args[0] == "-s":  # thin 스냅샷: 원본의 파일시스템을 갖고, 원본의 태그는 물려받지 않는다 (WSL 확인)
-            assert args[1:4] == ["-kn", "-p", "r"] and args[4] == "-n"
-            origin = self.lvs[args[-1].removeprefix("anf/")]
+            # 읽기 전용 스냅샷, 또는 되돌리기의 새 볼륨 LV(스냅샷의 쓰기 가능 스냅샷, S5 L2)
+            assert args[1:4] in (["-kn", "-p", "r"], ["-kn", "-p", "rw"]) and args[4] == "-n"
+            origin_name = args[-1].removeprefix("anf/")
+            origin = self.lvs[origin_name]
             tags = [value for flag, value in zip(args[6:-1:2], args[7:-1:2]) if flag == "--addtag"]
-            self.lvs[args[5]] = {"size": origin["size"], "tags": tags, "fs": origin["fs"], "tree": []}
+            self.lvs[args[5]] = {"size": origin["size"], "tags": tags, "fs": origin["fs"],
+                                 "tree": self._tree(origin_name), "thin_id": self._next_thin_id()}
             return self.ok()
         assert args[-1] == "anf"
         pairs = list(zip(args[:-1:2], args[1:-1:2]))
@@ -185,7 +218,26 @@ class FakeHost:
         else:
             assert opts["--type"] == "thin" and opts["--thinpool"] == "aggr0"
             tags = [value for flag, value in pairs if flag == "--addtag"]
-            self.lvs[opts["-n"]] = {"size": int(opts["-V"].removesuffix("b")), "tags": tags, "fs": None, "tree": []}
+            self.lvs[opts["-n"]] = {"size": int(opts["-V"].removesuffix("b")), "tags": tags, "fs": None, "tree": [],
+                                    "thin_id": self._next_thin_id()}
+        return self.ok()
+
+    def _lvrename(self, args):
+        """마운트된 LV도 이름을 바꿀 수 있다 (device-mapper 이름만 바뀐다). 마운트 표의 장치 이름도 따라 바뀐다."""
+        old, new = args[0].removeprefix("anf/"), args[1]
+        assert new not in self.lvs
+        self.lvs[new] = self.lvs.pop(old)
+        self.mounts = {t: f"/dev/anf/{new}" if d == f"/dev/anf/{old}" else d for t, d in self.mounts.items()}
+        return self.ok()
+
+    def _lvchange(self, args):
+        lv = self.lvs[args[-1].removeprefix("anf/")]
+        for flag, tag in zip(args[:-1:2], args[1:-1:2]):
+            assert flag in ("--addtag", "--deltag")
+            if flag == "--addtag" and tag not in lv["tags"]:
+                lv["tags"].append(tag)
+            elif flag == "--deltag" and tag in lv["tags"]:
+                lv["tags"].remove(tag)
         return self.ok()
 
     def _blkid(self, args):
@@ -210,8 +262,10 @@ class FakeHost:
 
     def _umount(self, args):
         target = args[0]
-        # 볼륨 인스턴스의 knfsd가 export한 파일시스템, 클라이언트가 연 파일, 하위 마운트가 있으면 내릴 수 없다
-        exported = Path(target).name in {token for token, _, _ in self.instances.values()}
+        # 볼륨 인스턴스의 knfsd가 export한 파일시스템, 클라이언트가 연 파일, 하위 마운트가 있으면 내릴 수 없다.
+        # 되돌리기 창(입력 차단 + export 캐시 비움)에서는 인스턴스가 돌아도 내릴 수 있다 (S5)
+        exported = Path(target).name in {token for uuid, (token, _, _) in self.instances.items()
+                                         if uuid not in self.blocked}
         held = Path(target).relative_to(self.ns).as_posix() in self.held
         nested = any(t.startswith(target + "/") or t.startswith(target + "\\") for t in self.mounts)
         if exported or held or nested or self._exported_snapshot(target) or self.busy:
@@ -433,7 +487,7 @@ def test_volume_ips_are_allocated_lowest_first_and_reused(host, mgr):
 
 def test_no_free_volume_ip_fails(host, mgr):
     for i, ip in enumerate(VOLUME_IPS):
-        host.lvs[f"vol_x{i}"] = {"size": 1, "fs": None, "tree": [],
+        host.lvs[f"vol_x{i}"] = {"size": 1, "fs": None, "tree": [], "thin_id": i + 1,
                                  "tags": [f"anf_path=t{i}", f"anf_uuid=u{i}", f"anf_ip={ip}", "anf_proto=nfs3"]}
     with pytest.raises(VolumeError):
         create(mgr)
@@ -682,6 +736,283 @@ def test_delete_snapshot_of_another_volume_does_nothing(host, mgr):
     host.calls.clear()
     mgr.delete_snapshot(U2, S1)
     assert changes(host) == []
+
+
+# --- 되돌리기 (되돌리기 설계 결정 3·4·8~10, §6.2) ---
+
+S3 = "5a000000-0000-4000-8000-000000000003"
+SLV3 = "snap_5a000000000040008000000000000003"
+NEW = LV1 + "_new"  # 고른 스냅샷의 쓰기 가능 스냅샷: 되돌린 볼륨의 새 LV
+REQ = "0c000000-0000-4000-8000-0000000000aa"
+REQ2 = "0c000000-0000-4000-8000-0000000000bb"
+TIME = "2026-11-08T23:07:12Z"
+VOLUME_TAGS = ["anf_path=vol1", f"anf_uuid={U1}", "anf_ip=172.30.0.129", "anf_proto=nfs3"]
+
+
+def three_snapshots(mgr, tmp_path):
+    """볼륨에 s1 → (keep 디렉터리) → s2 → (late 디렉터리) → s3 → (latest 디렉터리). 가짜는 디렉터리만 흉내 낸다."""
+    create(mgr)
+    mp = Path(mountpoint(tmp_path, "vol1"))
+    mgr.create_snapshot(U1, S1, "s1")
+    (mp / "keep").mkdir()
+    mgr.create_snapshot(U1, S2, "s2")
+    (mp / "late").mkdir()
+    mgr.create_snapshot(U1, S3, "s3")
+    (mp / "latest").mkdir()
+    return mp
+
+
+def lv_tags(host, lv=LV1):
+    return sorted(host.lvs[lv]["tags"])
+
+
+def pending_tags(request=REQ, snapshot=S2):
+    return [f"anf_rv_req={request}", f"anf_rv_snap={snapshot}"]
+
+
+def tag_args(flag, tags):
+    return [arg for tag in tags for arg in (flag, tag)]
+
+
+def test_restore_reverts_the_volume_and_keeps_the_chosen_snapshot(host, mgr, tmp_path):
+    mp = three_snapshots(mgr, tmp_path)
+    host.held.add("vol1")  # 클라이언트가 볼륨의 파일을 열고 있다
+    host.calls.clear()
+
+    mgr.restore(U1, S2, REQ)
+
+    sm1, sm2, sm3 = (snapmount(tmp_path, n) for n in ("s1", "s2", "s3"))
+    assert changes(host) == [
+        # 진행 표시 (결정 4)
+        ["lvchange", *tag_args("--addtag", pending_tags()), f"anf/{LV1}"],
+        # 더 새 스냅샷(dm-thin id가 큰 s3)은 스냅샷 삭제 절차로 지운다 (결정 8)
+        ["exports", U1, "s1", "s2"], ["unlock", U1, "vol1/.snapshot/s3"], ["umount", sm3],
+        ["chattr", "-i", snapdir(tmp_path)], ["chattr", "+i", snapdir(tmp_path)], ["lvremove", "-y", f"anf/{SLV3}"],
+        # 고른 스냅샷의 쓰기 가능 스냅샷이 새 볼륨 LV다. 처음부터 볼륨 태그와 진행 표시를 갖는다 (결정 3·9)
+        ["lvcreate", "-s", "-kn", "-p", "rw", "-n", NEW,
+         *tag_args("--addtag", VOLUME_TAGS + pending_tags() + ["anf_rv_new=1"]), f"anf/{SLV2}"],
+        # 창: 입력 차단 → 잠금 해제·언마운트(스냅샷 → 볼륨) → 새 LV와 스냅샷 마운트 → export → 차단 풀기
+        ["block", U1],
+        ["unlock", U1, "vol1/.snapshot/s2"], ["umount", sm2],
+        ["unlock", U1, "vol1/.snapshot/s1"], ["umount", sm1],
+        ["unlock", U1, "vol1"], ["umount", str(mp)],
+        ["mount", "-t", "ext4", "-o", "nodelalloc", f"/dev/anf/{NEW}", str(mp)],
+        ["mount", "-t", "ext4", "-o", "ro,noload", f"/dev/anf/{SLV1}", sm1],
+        # s2의 마운트 지점은 s2 시점에 없었다
+        ["chattr", "-i", snapdir(tmp_path)], ["chattr", "+i", snapdir(tmp_path)],
+        ["mount", "-t", "ext4", "-o", "ro,noload", f"/dev/anf/{SLV2}", sm2],
+        ["exports", U1, "s1", "s2"],
+        ["unblock", U1],
+        # 창 밖: 옛 볼륨 LV 삭제 → 새 LV가 이름을 넘겨받음 → 끝난 표시
+        ["lvremove", "-y", f"anf/{LV1}"],
+        ["lvrename", f"anf/{NEW}", LV1],
+        ["lvchange", *tag_args("--deltag", pending_tags() + ["anf_rv_new=1"]), "--addtag", f"anf_rv_done={REQ}",
+         f"anf/{LV1}"],
+        ["instance-ready", U1],
+    ]
+    # 볼륨은 s2 시점이다: s2 전에 만든 keep만 있고 그 뒤의 late·latest는 없다
+    assert sorted(p.name for p in mp.iterdir()) == [".snapshot", "keep"]
+    assert sorted(p.name for p in (mp / ".snapshot").iterdir()) == ["s1", "s2"]
+    assert snapdir(tmp_path) in host.immutable
+    # s1·s2는 그대로 남는다. 고른 스냅샷은 쓰이지 않고 새 LV의 원본이 될 뿐이다
+    assert mgr.snapshot_records(U1) == [
+        {"uuid": S1, "name": "s1", "create_time": TIME, "volume": {"uuid": U1}},
+        {"uuid": S2, "name": "s2", "create_time": TIME, "volume": {"uuid": U1}},
+    ]
+    assert sorted(host.lvs) == sorted([LV1, SLV1, SLV2])
+    assert lv_tags(host) == sorted(VOLUME_TAGS + [f"anf_rv_done={REQ}"])
+    assert host.blocked == set()
+    assert mgr.record(U1)["state"] == "online"
+
+
+def test_restore_again_with_the_same_key_does_nothing(host, mgr, tmp_path):
+    # anf-api가 job 결과를 기록하기 전에 재시작해 같은 키로 다시 보냈다. 그 사이 클라이언트가 쓴 것을 지우지 않는다
+    mp = three_snapshots(mgr, tmp_path)
+    mgr.restore(U1, S2, REQ)
+    (mp / "written-after").mkdir()
+    host.calls.clear()
+    mgr.restore(U1, S2, REQ)
+    assert changes(host) == []
+    assert (mp / "written-after").is_dir()
+
+
+def test_restore_with_a_new_key_reverts_again(host, mgr, tmp_path):
+    mp = three_snapshots(mgr, tmp_path)
+    mgr.restore(U1, S2, REQ)
+    (mp / "written-after").mkdir()
+    host.calls.clear()
+    mgr.restore(U1, S1, REQ2)
+    # 앞선 되돌리기보다 오래된 스냅샷으로도 된다. merge 방식은 여기서 실패했다: merge 뒤 다른 스냅샷은 원본 표시를
+    # 잃어 merge할 수 없다 (실환경 "is not a mergeable logical volume", 구현 중 변경). s2는 s1보다 새 스냅샷이다
+    assert ["lvremove", "-y", f"anf/{SLV2}"] in changes(host)
+    assert changes(host)[-2] == ["lvchange", *tag_args("--deltag", pending_tags(REQ2, S1) + ["anf_rv_new=1"]),
+                                 "--addtag", f"anf_rv_done={REQ2}", f"anf/{LV1}"]
+    assert sorted(p.name for p in mp.iterdir()) == [".snapshot"]
+    assert [r["name"] for r in mgr.snapshot_records(U1)] == ["s1"]
+    # 옛 끝난 표시는 옛 볼륨 LV와 함께 사라졌다
+    assert lv_tags(host) == sorted(VOLUME_TAGS + [f"anf_rv_done={REQ2}"])
+
+
+def test_restore_to_the_newest_snapshot_deletes_nothing(host, mgr, tmp_path):
+    mp = three_snapshots(mgr, tmp_path)
+    mgr.restore(U1, S3, REQ)
+    assert [r["name"] for r in mgr.snapshot_records(U1)] == ["s1", "s2", "s3"]
+    assert sorted(p.name for p in mp.iterdir()) == [".snapshot", "keep", "late"]
+
+
+@pytest.mark.parametrize("volume, snapshot, message", [
+    (U2, S1, "volume .* not found"),
+    (U1, S3, "snapshot .* not found"),
+])
+def test_restore_of_a_missing_volume_or_snapshot_fails(host, mgr, volume, snapshot, message):
+    create(mgr)
+    create(mgr, U3, "/vol3")
+    mgr.create_snapshot(U1, S1, "s1")
+    mgr.create_snapshot(U3, S3, "s1")  # 다른 볼륨의 스냅샷
+    host.calls.clear()
+    with pytest.raises(VolumeError, match=message):
+        mgr.restore(volume, snapshot, REQ)
+    assert changes(host) == []
+
+
+def test_restore_of_an_offline_volume_fails(host, mgr):
+    host.fail["mkfs.ext4"] = "boom"
+    with pytest.raises(CommandError):
+        create(mgr)
+    host.calls.clear()
+    with pytest.raises(VolumeError, match="offline"):
+        mgr.restore(U1, S1, REQ)
+    assert changes(host) == []
+
+
+# --- 되돌리기: 중간에 멈춘 뒤 이어서 끝내기 (결정 4) ---
+
+
+WINDOW = ["block"] + ["unlock", "umount"] * 4  # 입력 차단, s3·s2·s1·볼륨 언마운트
+FINISH = ["exports", "unblock", "lvremove", "lvrename", "lvchange", "instance-ready"]
+
+
+@pytest.mark.parametrize("fail, rest, keeps_writes", [
+    # 새 볼륨 LV를 만들지 못했다: 만들기부터 (창은 아직 열지 않았다)
+    ("lvcreate", ["lvcreate", *WINDOW, "mount", "mount", "mount", "chattr", "chattr", "mount", *FINISH], False),
+    # 창 안에서 새 LV를 마운트하지 못했다: 창이 열린 채다. 차단은 다시 해도 규칙 하나다
+    ("mount", ["block", "mount", "mount", "mount", "chattr", "chattr", "mount", *FINISH], False),
+    # 창을 닫은 뒤 옛 LV를 지우지 못했다: 창을 다시 열고 새 LV를 다시 올린다. 그 사이 클라이언트가 쓴 것은 남는다
+    ("lvremove", [*WINDOW, "mount", "mount", "mount", "mount", *FINISH], True),
+    # 옛 LV를 지운 뒤 이름을 넘겨받지 못했다: 새 LV가 볼륨이다. 이름부터
+    ("lvrename", ["exports", "unblock", "lvrename", "lvchange", "instance-ready"], True),
+])
+def test_restore_resumes_after_stopping_midway(host, mgr, tmp_path, fail, rest, keeps_writes):
+    # 가장 새 스냅샷 s3로 되돌린다: 지울 스냅샷이 없어 lvremove는 옛 볼륨 LV뿐이다
+    mp = three_snapshots(mgr, tmp_path)
+    host.fail[fail] = "boom"
+    with pytest.raises(CommandError):
+        mgr.restore(U1, S3, REQ)
+    if keeps_writes:
+        (mp / "written-after").mkdir()
+    host.calls.clear()
+
+    mgr.restore(U1, S3, REQ)
+
+    assert [c[0] for c in changes(host)] == rest
+    assert sorted(p.name for p in mp.iterdir()) == [".snapshot", "keep", "late"] + ["written-after"] * keeps_writes
+    assert [r["name"] for r in mgr.snapshot_records(U1)] == ["s1", "s2", "s3"]
+    assert sorted(host.lvs) == sorted([LV1, SLV1, SLV2, SLV3])
+    assert lv_tags(host) == sorted(VOLUME_TAGS + [f"anf_rv_done={REQ}"])
+    assert host.blocked == set()
+
+
+def test_restore_after_the_rename_only_finishes_the_tags(host, mgr, tmp_path):
+    # 새 LV가 이름까지 넘겨받고 끝난 표시 전에 멈췄다. 그 사이 클라이언트가 쓴 것을 지우지 않는다
+    mp = three_snapshots(mgr, tmp_path)
+    mgr.restore(U1, S2, REQ)
+    host.lvs[LV1]["tags"] = VOLUME_TAGS + pending_tags() + ["anf_rv_new=1"]
+    (mp / "written-after").mkdir()
+    host.calls.clear()
+
+    mgr.restore(U1, S2, REQ)
+
+    assert [c[0] for c in changes(host)] == ["exports", "unblock", "lvchange", "instance-ready"]
+    assert (mp / "written-after").is_dir()
+
+
+def stop_restore(mgr, host, fail="mount"):
+    """되돌리기를 중간에 멈춘다. mount: 두 LV가 있고 창이 열린 채, lvrename: 옛 LV를 지웠고 새 LV가 볼륨이다."""
+    host.fail[fail] = "boom"
+    with pytest.raises(CommandError):
+        mgr.restore(U1, S2, REQ)
+
+
+def test_restore_with_another_key_finishes_the_pending_one_first(host, mgr, tmp_path):
+    mp = three_snapshots(mgr, tmp_path)
+    stop_restore(mgr, host)
+    mgr.restore(U1, S1, REQ2)
+    assert sorted(p.name for p in mp.iterdir()) == [".snapshot"]
+    assert [r["name"] for r in mgr.snapshot_records(U1)] == ["s1"]
+    assert lv_tags(host) == sorted(VOLUME_TAGS + [f"anf_rv_done={REQ2}"])
+
+
+@pytest.mark.parametrize("fail", ["mount", "lvrename"])
+def test_volume_post_finishes_a_pending_restore(host, mgr, tmp_path, fail):
+    # 실패한 되돌리기 뒤 anf-api의 볼륨 PUT이 agent 볼륨 POST로 남은 일을 끝낸다 (결정 2)
+    mp = three_snapshots(mgr, tmp_path)
+    stop_restore(mgr, host, fail)
+    create(mgr)
+    assert sorted(p.name for p in mp.iterdir()) == [".snapshot", "keep"]
+    assert sorted(host.lvs) == sorted([LV1, SLV1, SLV2])
+    assert lv_tags(host) == sorted(VOLUME_TAGS + [f"anf_rv_done={REQ}"])
+    assert host.blocked == set()
+
+
+@pytest.mark.parametrize("fail", ["mount", "lvrename"])
+def test_recover_finishes_a_pending_restore(host, mgr, tmp_path, fail):
+    mp = three_snapshots(mgr, tmp_path)
+    stop_restore(mgr, host, fail)
+    host.reboot()
+    mgr.recover()
+    assert sorted(p.name for p in mp.iterdir()) == [".snapshot", "keep"]
+    assert sorted(p.name for p in (mp / ".snapshot").iterdir()) == ["s1", "s2"]
+    assert {snapmount(tmp_path, "s1"), snapmount(tmp_path, "s2")} <= set(host.mounts)
+    assert host.instances[U1] == ("vol1", "172.30.0.129", "nfs3")
+    assert lv_tags(host) == sorted(VOLUME_TAGS + [f"anf_rv_done={REQ}"])
+
+
+@pytest.mark.parametrize("fail", ["mount", "lvrename"])
+def test_delete_during_a_pending_restore_removes_both_lvs(host, mgr, tmp_path, fail):
+    three_snapshots(mgr, tmp_path)
+    stop_restore(mgr, host, fail)
+    mgr.delete(U1)
+    assert host.lvs == {}
+    assert mgr.record(U1) is None
+
+
+def test_snapshot_changes_wait_for_a_pending_restore(host, mgr, tmp_path):
+    # 끝나지 않은 되돌리기가 있으면 스냅샷을 바꾸지 않는다. 새 LV를 만들기 전이면 새 스냅샷이 지워질 더 새 스냅샷이 된다
+    three_snapshots(mgr, tmp_path)
+    stop_restore(mgr, host)
+    host.calls.clear()
+    with pytest.raises(VolumeError, match="unfinished restore"):
+        mgr.delete_snapshot(U1, S2)
+    with pytest.raises(VolumeError, match="unfinished restore"):
+        mgr.create_snapshot(U1, "5a000000-0000-4000-8000-000000000009", "s9")
+    assert changes(host) == []
+
+
+def test_restore_removes_mountpoints_of_snapshots_deleted_since(host, mgr, tmp_path):
+    # s2 시점의 .snapshot에는 그 뒤에 지운 s0의 빈 마운트 지점이 있다. 남은 스냅샷에 맞춘다 (결정 10)
+    create(mgr)
+    mp = Path(mountpoint(tmp_path, "vol1"))
+    s0 = "5a000000-0000-4000-8000-000000000000"
+    mgr.create_snapshot(U1, s0, "s0")
+    mgr.create_snapshot(U1, S1, "s1")
+    mgr.create_snapshot(U1, S2, "s2")
+    mgr.delete_snapshot(U1, s0)
+    host.calls.clear()
+
+    mgr.restore(U1, S2, REQ)
+
+    assert sorted(p.name for p in (mp / ".snapshot").iterdir()) == ["s1", "s2"]
+    assert snapdir(tmp_path) in host.immutable
 
 
 # --- 시작 복구 ---

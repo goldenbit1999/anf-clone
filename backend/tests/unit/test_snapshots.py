@@ -163,7 +163,26 @@ def test_volume_being_deleted_is_conflict(store):
                              f"volume '{VOL}' is being deleted.")
 
 
-@pytest.mark.parametrize("state", ["Creating", "Updating", "Patching", "Failed"])
+def test_existing_snapshot_of_a_reverting_volume_is_conflict(store):
+    # 되돌리기가 더 새 스냅샷을 지우는 동안 기존 스냅샷을 다시 만들거나 지우지 못한다 (되돌리기 설계 결정 7)
+    old = create(store, "old")
+    with store.transaction() as tx:
+        vol = tx.get_resource(VOL)
+        vol.provisioning_state = "Reverting"
+        tx.put_resource(vol)
+    for fn in (put, delete):
+        e = arm_error(fn, store, name="old")
+        assert (e.status, e.code) == (409, "Conflict")
+        assert e.message == (f"Cannot change snapshot '{old.id}' because its parent volume '{VOL}' "
+                             "is being reverted.")
+    # 새 스냅샷은 기존 규칙대로 400 (ONTAP 1638532의 자리)
+    e = arm_error(put, store, name="new")
+    assert (e.status, e.code) == (400, "BadRequest")
+    assert delete(store, name="new") is None
+    assert store.active_operations() == []
+
+
+@pytest.mark.parametrize("state", ["Creating", "Updating", "Patching", "Failed", "Reverting"])
 def test_volume_not_succeeded_is_bad_request(store, state):
     make_volume(store, "vol2", state)
     e = arm_error(put, store, volume="vol2")

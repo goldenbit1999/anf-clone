@@ -21,7 +21,7 @@ import pytest
 
 from storage_agent.flexvol import FlexVolManager, VolumeError
 from storage_agent.nfs_instance import NETWORK, VOLUME_IPS, container_name
-from storage_agent.runner import Runner
+from storage_agent.runner import CommandError, Result, Runner
 
 pytestmark = [
     pytest.mark.integration,
@@ -56,13 +56,13 @@ def long_client():
     """마운트를 유지하는 클라이언트 컨테이너. 이름을 돌려주고 끝나면 지운다."""
     names = []
 
-    def start(ip, token, vers):
+    def start(ip, token, vers, options=None):
         name = f"it-client-{uuid.uuid4().hex[:8]}"
         names.append(name)
         assert sh("docker", "run", "-d", "--name", name, "--privileged", "--network", NETWORK,
                   "anf-nfs-client", "sleep", "infinity").returncode == 0
         mounted = sh("docker", "exec", name, "sh", "-c",
-                     f"mkdir /m && mount -t nfs -o {mount_options(vers)} {ip}:/{token} /m")
+                     f"mkdir /m && mount -t nfs -o {options or mount_options(vers)} {ip}:/{token} /m")
         assert mounted.returncode == 0, mounted.stderr
         return name
 
@@ -267,6 +267,138 @@ def test_recover_snapshots_after_wsl_restart(mgr, vol, protocol):
     read = client(ip, token, VERSION[protocol], "cat /m/f /m/.snapshot/s1/f")
     assert read.returncode == 0, read.stdout + read.stderr
     assert read.stdout == "afterbefore"
+
+
+# --- 되돌리기 (되돌리기 설계 §6.2, 결정 3·4·8·9) ---
+
+
+def hard_options(vers):
+    """되돌리는 동안의 멈춤을 재전송으로 기다리는 hard 마운트 (ANF가 권하는 마운트, S5)."""
+    return f"vers={vers},hard" + (",nolock" if vers == "3" else "")
+
+
+def volume_tags(vid):
+    out = sh("lvs", "--noheadings", "-o", "lv_tags", "anf/vol_" + vid.replace("-", "")).stdout
+    return out.strip().split(",")
+
+
+def volume_lvs(vid):
+    """그 볼륨의 LV 이름들 (되돌리는 동안에는 옛 LV와 새 LV `_new`가 함께 있다)."""
+    out = sh("lvs", "--noheadings", "-o", "lv_name", "anf").stdout.split()
+    return sorted(n for n in out if n.startswith("vol_" + vid.replace("-", "")))
+
+
+def blocked(vid):
+    """인스턴스 netns에 되돌리기 창의 입력 차단 규칙이 남아 있는가."""
+    pid = sh("docker", "inspect", "-f", "{{.State.Pid}}", container_name(vid)).stdout.strip()
+    return sh("nsenter", "-t", pid, "-n", "iptables", "-C", "INPUT", "-i", "eth0", "-j", "DROP").returncode == 0
+
+
+def three_snapshots(mgr, vid, write):
+    """a=one → s1 → a=two, b → s2 → a=three, c → s3 → a=four. write(script)는 클라이언트나 호스트에서 쓴다."""
+    sids = [str(uuid.uuid4()) for _ in range(3)]
+    write("echo one > a")
+    mgr.create_snapshot(vid, sids[0], "s1")
+    write("echo two > a && echo b > b")
+    mgr.create_snapshot(vid, sids[1], "s2")
+    write("echo three > a && echo c > c")
+    mgr.create_snapshot(vid, sids[2], "s3")
+    write("echo four > a && cat a")  # 클라이언트 캐시에 올린다
+    return sids
+
+
+@pytest.mark.parametrize("protocol", ["nfs3", "nfs4.1"])
+def test_restore_reverts_under_a_mounted_client(mgr, vol, protocol, long_client):
+    vid, token = vol
+    vers = VERSION[protocol]
+    mgr.create(vid, f"/{token}", GIB, 770, protocol)
+    ip = mgr.record(vid)["data_lif"]["ip"]["address"]
+    holder = long_client(ip, token, vers, hard_options(vers))
+
+    def run(script):
+        result = sh("docker", "exec", holder, "sh", "-c", f"cd /m && {script}")
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout
+
+    s1, s2, s3 = three_snapshots(mgr, vid, run)
+    before = mgr.snapshot_record(vid, s2)
+    key = str(uuid.uuid4())
+
+    mgr.restore(vid, s2, key)
+
+    # 다시 마운트하지 않은 클라이언트가 s2 시점을 본다. 더 새 스냅샷 s3는 지워지고 s1·s2는 남는다
+    assert run("cat a b && ls && ls .snapshot && cat .snapshot/s2/a").split() == [
+        "two", "b", "a", "b", "s1", "s2", "two"]
+    assert mgr.snapshot_record(vid, s2) == before  # 같은 uuid·이름·시각으로 다시 만들었다
+    assert mgr.snapshot_record(vid, s3) is None
+    assert sh("lvs", "anf/snap_" + s3.replace("-", "")).returncode != 0
+    tags = volume_tags(vid)
+    assert f"anf_rv_done={key}" in tags and not any(t.startswith("anf_rv_req=") for t in tags)
+    assert not blocked(vid)
+
+    # 같은 키는 아무것도 하지 않는다: 그 뒤에 쓴 파일이 남는다 (AC-08b)
+    run("echo after > after")
+    mgr.restore(vid, s2, key)
+    assert run("cat after") == "after\n"
+    # 앞선 되돌리기보다 오래된 s1로도 되돌릴 수 있다 (merge 방식은 여기서 "is not a mergeable logical volume").
+    # 이제 s2가 s1보다 새 스냅샷이라 지워진다
+    mgr.restore(vid, s1, str(uuid.uuid4()))
+    assert run("cat a && ls && ls .snapshot").split() == ["one", "a", "s1"]
+    # 볼륨 LV의 원본이 된 s1도 지울 수 있다. 볼륨은 그대로다
+    mgr.delete_snapshot(vid, s1)
+    assert run("cat a && ls -A .snapshot").split() == ["one"]
+
+
+class FailAt(Runner):
+    """program의 (skip + 1)번째 실행이 한 번 실패한다. 되돌리기가 그 단계에서 멈춘 상태를 만든다."""
+
+    def __init__(self, program, skip=0):
+        super().__init__()
+        self.program, self.skip = program, skip
+
+    def run(self, argv, check=True, input=None):
+        if argv[0] == self.program:
+            if self.skip == 0:
+                self.program = None
+                raise CommandError(argv, Result(5, "", "injected failure"))
+            self.skip -= 1
+        return super().run(argv, check=check, input=input)
+
+
+@pytest.mark.parametrize("fail, skip, finish", [
+    ("lvcreate", 0, "restore"),  # 새 볼륨 LV를 만들기 전 (창은 열지 않았다)
+    ("mount", 0, "recover"),  # 창이 열린 채 새 LV를 마운트하기 전: agent 재시작 (AC-08c)
+    ("mount", 0, "create"),  # 같은 상태를 볼륨 POST(보장)가 끝낸다
+    ("lvremove", 1, "restore"),  # 창을 닫은 뒤 옛 볼륨 LV를 지우기 전 (첫 lvremove는 더 새 스냅샷 s3)
+    ("lvrename", 0, "recover"),  # 옛 LV를 지운 뒤 이름을 넘겨받기 전
+])
+def test_restore_resumes_after_stopping_midway(mgr, vol, fail, skip, finish):
+    vid, token = vol
+    mp = ROOT / "ns" / token
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs3")
+    ip = mgr.record(vid)["data_lif"]["ip"]["address"]
+    _, s2, _ = three_snapshots(mgr, vid, lambda script: sh("sh", "-c", f"cd {mp} && {script}"))
+    before = mgr.snapshot_record(vid, s2)
+    key = str(uuid.uuid4())
+    with pytest.raises(CommandError):
+        FlexVolManager(FailAt(fail, skip)).restore(vid, s2, key)
+    with pytest.raises(VolumeError, match="unfinished restore"):
+        mgr.create_snapshot(vid, str(uuid.uuid4()), "s9")
+
+    if finish == "restore":
+        mgr.restore(vid, s2, key)
+    elif finish == "recover":
+        mgr.recover()
+    else:
+        mgr.create(vid, f"/{token}", GIB, 770, "nfs3")
+
+    read = client(ip, token, "3", "cat /m/a && ls /m/.snapshot && cat /m/.snapshot/s2/a")
+    assert read.returncode == 0, read.stdout + read.stderr
+    assert read.stdout.split() == ["two", "s1", "s2", "two"]
+    assert mgr.snapshot_record(vid, s2) == before
+    assert volume_lvs(vid) == ["vol_" + vid.replace("-", "")]
+    assert f"anf_rv_done={key}" in volume_tags(vid)
+    assert not blocked(vid)
 
 
 # --- NFSv4.1 인스턴스 재시작 (스냅샷 설계 결정 1, AC-15) ---

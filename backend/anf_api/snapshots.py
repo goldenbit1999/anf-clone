@@ -92,6 +92,21 @@ def _ensure_volume_not_deleting(vol: Resource, rid: str) -> None:
                                         f"'{vol.id}' is being deleted.")
 
 
+def _ensure_volume_not_reverting(vol: Resource, snap: Resource) -> None:
+    """되돌리기가 더 새 스냅샷을 지우는 동안 기존 스냅샷을 바꾸지 못한다 (되돌리기 설계 결정 7)."""
+    if vol.provisioning_state == "Reverting":
+        raise ArmError(409, "Conflict", f"Cannot change snapshot '{snap.id}' because its parent volume "
+                                        f"'{vol.id}' is being reverted.")
+
+
+def snapshot_not_found(name: str, account: str, pool: str, volume: str) -> ArmError:
+    return ArmError(  # 녹화 R1의 문구
+        404, "ResourceNotFound",
+        f"The requested snapshot '{name}' was not found on the volume '{account}/{pool}/{volume}'. "
+        "Please check the requested snapshot. Please note: The snapshot may no longer be available "
+        "based on configured snapshot policies.")
+
+
 def _new_snapshot(tx: Tx, rid: str, vol: Resource, name: str, location: str) -> Resource:
     if vol.provisioning_state != "Succeeded":
         raise ArmError(400, "BadRequest", "Snapshot cannot be created on a volume that isn't in state succeeded.")
@@ -111,11 +126,7 @@ def get_snapshot(store: StateStore, subscription_id: str, resource_group: str, a
     rid, _ = _ids(subscription_id, resource_group, account, pool, volume, name)
     res = store.get_resource(rid)
     if res is None:
-        raise ArmError(  # 녹화 R1의 문구
-            404, "ResourceNotFound",
-            f"The requested snapshot '{name}' was not found on the volume '{account}/{pool}/{volume}'. "
-            "Please check the requested snapshot. Please note: The snapshot may no longer be available "
-            "based on configured snapshot policies.")
+        raise snapshot_not_found(name, account, pool, volume)
     return res
 
 
@@ -149,6 +160,7 @@ def put_snapshot(store: StateStore, subscription_id: str, resource_group: str, a
             op = tx.create_operation(res, "CREATE", "Creating", correlation_id=correlation_id)
             tx.put_resource(res)
             return True, res, op
+        _ensure_volume_not_reverting(vol, existing)
         tx.ensure_no_active_operation(rid)
         if existing.location.lower() != location.lower():
             raise location_conflict(existing.name, existing.resource_group, existing.location, location)
@@ -166,7 +178,9 @@ def delete_snapshot(store: StateStore, subscription_id: str, resource_group: str
         res = tx.get_resource(rid)
         if res is None:
             return None
-        _ensure_volume_not_deleting(tx.get_resource(parent_id), rid)
+        vol = tx.get_resource(parent_id)
+        _ensure_volume_not_deleting(vol, rid)
+        _ensure_volume_not_reverting(vol, res)
         op = tx.create_operation(res, "DELETE", "Deleting", correlation_id=correlation_id)
         res.provisioning_state = "Deleting"
         tx.put_resource(res)

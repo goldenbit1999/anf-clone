@@ -11,13 +11,20 @@ GATEWAY=172.30.0.1
 IP_RANGE=172.30.0.0/25 # Docker가 클라이언트 컨테이너에 주는 범위. 볼륨 IP .129~.254는 agent가 정한다 (결정 18)
 
 [ "$(id -u)" = 0 ] || { echo "run as root (wsl -d Ubuntu -u root ...)" >&2; exit 1; }
-for cmd in lvcreate thin_check mkfs.ext4 docker; do
+# iptables·nsenter: 되돌리는 동안 볼륨 인스턴스 netns의 입력을 막는다 (되돌리기 결정 3)
+for cmd in lvcreate thin_check mkfs.ext4 docker iptables nsenter; do
   command -v "$cmd" >/dev/null || {
-    echo "missing $cmd: apt-get install lvm2 thin-provisioning-tools e2fsprogs docker.io" >&2; exit 1; }
+    echo "missing $cmd: apt-get install lvm2 thin-provisioning-tools e2fsprogs docker.io iptables util-linux" >&2
+    exit 1; }
 done
 # 볼륨 인스턴스(컨테이너)의 knfsd는 호스트 커널의 nfsd 모듈을 쓴다. 호스트 nfs-server는 볼륨에 쓰지 않는다
 modprobe nfsd
 modprobe dm_thin_pool
+
+# NFSv4 delegation을 끈다. 켜져 있으면 되돌린 뒤에도 v4.1 클라이언트가 열어 둔 파일에서 되돌리기 전 캐시를
+# 16~32 s 읽는다 (S5). knfsd는 lease를 못 얻으면 delegation을 주지 않는다. WSL 재시작 뒤에도 남게 파일로 둔다
+sysctl -qw fs.leases-enable=0
+echo "fs.leases-enable = 0" > /etc/sysctl.d/90-anf-clone.conf
 
 docker build -q -t anf-nfs-server "$REPO/backend/storage_agent/nfs_server" >/dev/null
 # 검증용 NFS 클라이언트 (통합·E2E 테스트, 볼륨 설계 §8)
@@ -40,4 +47,5 @@ fi
 # 앞선 구현 단계(호스트 knfsd가 export하던 방식)가 남긴 설정을 지운다
 rm -f /etc/nfs.conf.d/anf-clone.conf /etc/exports.d/anf-clone.exports
 
-echo "data plane ready: images anf-nfs-server, anf-nfs-client; network $NET ($SUBNET, ip-range $IP_RANGE)"
+echo "data plane ready: images anf-nfs-server, anf-nfs-client; network $NET ($SUBNET, ip-range $IP_RANGE);" \
+  "NFSv4 delegations off"

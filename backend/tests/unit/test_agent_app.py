@@ -75,6 +75,12 @@ class FakeManager:
     def delete_snapshot(self, *args):
         self.calls.append(("delete_snapshot", *args))
 
+    def restore(self, *args):
+        self.gate.wait(5)
+        self.calls.append(("restore", *args))
+        if self.error:
+            raise self.error
+
     def snapshot_records(self, volume_uuid, name=None):
         if volume_uuid not in self.volumes:
             return None
@@ -334,6 +340,71 @@ def test_list_snapshots(client):
 def test_get_snapshot(client):
     assert client.get(f"{SNAPSHOTS}/{S1}").json() == SNAP1
     assert client.get(f"{SNAPSHOTS}/5a000000-0000-4000-8000-000000000009").status_code == 404
+
+
+# --- 되돌리기 (되돌리기 설계 §6.1) ---
+
+VOLUME1 = f"/api/storage/volumes/{U1}"
+REQ = "0c000000-0000-4000-8000-0000000000aa"
+
+
+def restore_query(**changes):
+    q = {"restore_to.snapshot.uuid": S1, "restore_to.request_uuid": REQ}
+    q.update(changes)
+    return {k: v for k, v in q.items() if v is not None}
+
+
+@pytest.mark.parametrize("content", [b"", b"{}"])
+def test_patch_restore_returns_a_job_that_succeeds(manager, client, content):
+    r = client.patch(VOLUME1, params=restore_query(), content=content)
+    assert r.status_code == 202
+    assert wait_job(client, r.json()["job"]["_links"]["self"]["href"])["state"] == "success"
+    assert ("restore", U1, S1, REQ) in manager.calls
+
+
+def test_failed_restore_is_a_failed_job(manager, client):
+    manager.error = VolumeError(f"snapshot {S1} not found")
+    r = client.patch(VOLUME1, params=restore_query())
+    job = wait_job(client, r.json()["job"]["_links"]["self"]["href"])
+    assert job["state"] == "failure"
+    assert "not found" in job["message"]
+
+
+def test_repeated_restore_while_running_returns_the_same_job(manager, client):
+    # 키는 볼륨 + 멱등 키다. 다른 키의 되돌리기는 그 job을 받지 않는다 (결정 4)
+    manager.gate.clear()
+    first = client.patch(VOLUME1, params=restore_query()).json()["job"]["uuid"]
+    second = client.patch(VOLUME1, params=restore_query()).json()["job"]["uuid"]
+    other = client.patch(VOLUME1, params=restore_query(**{"restore_to.request_uuid": REQ.replace("a", "b")}))
+    manager.gate.set()
+    assert first == second
+    assert other.json()["job"]["uuid"] != first
+    wait_job(client, other.json()["job"]["_links"]["self"]["href"])
+
+
+@pytest.mark.parametrize("query, content", [
+    (restore_query(**{"restore_to.snapshot.uuid": None}), b""),
+    (restore_query(**{"restore_to.request_uuid": None}), b""),
+    (restore_query(**{"restore_to.snapshot.uuid": "x"}), b""),
+    (restore_query(**{"restore_to.request_uuid": REQ.upper()}), b""),
+    (restore_query(**{"restore_to.snapshot.name": "daily.1"}), b""),
+    (restore_query(), b'{"size": 1073741824}'),
+    (restore_query(), b"[]"),
+    (restore_query(), b"{"),
+    ({}, b'{"size": 1073741824}'),  # 볼륨 속성 PATCH는 아직 없다
+])
+def test_invalid_patch_is_rejected_without_a_job(manager, client, query, content):
+    r = client.patch(VOLUME1, params=query, content=content)
+    assert r.status_code == 400
+    assert r.json()["error"]["message"]
+    assert not any(isinstance(c, tuple) for c in manager.calls)
+
+
+def test_patch_restore_checks_the_volume_uuid(manager, client):
+    assert client.patch("/api/storage/volumes/x", params=restore_query()).status_code == 400
+    assert client.patch(f"{VOLUME1}?restore_to.snapshot.uuid={S1}&restore_to.snapshot.uuid={S1}"
+                        f"&restore_to.request_uuid={REQ}").status_code == 400
+    assert not any(isinstance(c, tuple) for c in manager.calls)
 
 
 # --- 상관 ID ---

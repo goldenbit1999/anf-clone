@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS operations (
     action          TEXT NOT NULL,
     status          TEXT NOT NULL,
     previous        TEXT,
+    params          TEXT,
     error           TEXT,
     correlation_id  TEXT,
     start_time      TEXT NOT NULL,
@@ -80,11 +81,12 @@ class Operation:
     location: str
     resource_id: str
     resource_type: str
-    action: str  # CREATE | UPDATE | DELETE
-    status: str  # 진행 중: Creating | Updating | Deleting, 종결: TERMINAL_STATES
+    action: str  # CREATE | UPDATE | DELETE | POST (볼륨 revert)
+    status: str  # 진행 중: Creating | Updating | Deleting | Reverting, 종결: TERMINAL_STATES
     start_time: str
     end_time: str | None = None
     previous: dict | None = None  # UPDATE가 실패하면 되돌릴 tags·properties
+    params: dict | None = None  # 작업 입력 (revert: 고른 스냅샷, 되돌리기 설계 결정 11)
     error: dict | None = None  # {httpStatus, code, message}
     correlation_id: str | None = None
 
@@ -111,8 +113,8 @@ def _operation(row: sqlite3.Row) -> Operation:
         id=row["id"], subscription_id=row["subscription_id"], location=row["location"],
         resource_id=row["resource_id"], resource_type=row["resource_type"],
         action=row["action"], status=row["status"], start_time=row["start_time"],
-        end_time=row["end_time"], previous=_load(row["previous"]), error=_load(row["error"]),
-        correlation_id=row["correlation_id"],
+        end_time=row["end_time"], previous=_load(row["previous"]), params=_load(row["params"]),
+        error=_load(row["error"]), correlation_id=row["correlation_id"],
     )
 
 
@@ -223,22 +225,22 @@ class Tx:
             )
 
     def create_operation(self, res: Resource, action: str, status: str, *,
-                         previous: dict | None = None,
+                         previous: dict | None = None, params: dict | None = None,
                          correlation_id: str | None = None) -> Operation:
         """진행 중 작업을 만든다. 이미 진행 중인 작업이 있으면 409로 거절한다."""
         self.ensure_no_active_operation(res.id)
         op = Operation(
             id=str(uuid.uuid4()), subscription_id=res.subscription_id, location=res.location,
             resource_id=res.id, resource_type=res.type, action=action, status=status,
-            start_time=utc_now(), previous=previous, correlation_id=correlation_id,
+            start_time=utc_now(), previous=previous, params=params, correlation_id=correlation_id,
         )
         self._conn.execute(
             """INSERT INTO operations (id, subscription_id, location, resource_id, resource_type,
-                   action, status, previous, error, correlation_id, start_time, end_time)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)""",
+                   action, status, previous, params, error, correlation_id, start_time, end_time)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)""",
             (op.id, op.subscription_id, op.location, op.resource_id, op.resource_type,
              op.action, op.status, None if previous is None else json.dumps(previous),
-             op.correlation_id, op.start_time),
+             None if params is None else json.dumps(params), op.correlation_id, op.start_time),
         )
         return op
 
@@ -257,6 +259,10 @@ class StateStore:
         with closing(self._connect()) as conn:
             conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(_SCHEMA)
+            # 앞 사이클의 DB 파일에는 params 열이 없다 (되돌리기 설계 결정 11)
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(operations)")}
+            if "params" not in columns:
+                conn.execute("ALTER TABLE operations ADD COLUMN params TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         # isolation_level=None: 트랜잭션은 transaction()이 BEGIN IMMEDIATE로 직접 연다.
