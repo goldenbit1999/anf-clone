@@ -76,6 +76,12 @@ class NfsInstances:
             raise StartupError(
                 f"Docker network '{NETWORK}' must have subnet {SUBNET} and ip-range {IP_RANGE} "
                 f"(volume IPs are .129-.254), but has {configs}. {_SETUP_HINT}")
+        # knfsd의 NFSv4 위임은 VFS lease 위에서 돈다. 켜져 있으면 되돌린 뒤 v4.1 클라이언트의 열린 파일이
+        # 16~32 s 동안 되돌리기 전 캐시를 읽는다. netns별 설정이 없어 커널 전역으로 끈다 (되돌리기 설계 결정 1, S5 B2)
+        if self._run(["sysctl", "-n", "fs.leases-enable"], check=False).stdout.strip() != "0":
+            raise StartupError(
+                "NFSv4 delegations must be off: fs.leases-enable must be 0, or NFSv4.1 clients read stale "
+                f"data after a snapshot revert. {_SETUP_HINT}")
 
     def ensure_shared_ns(self) -> None:
         """WSL의 /는 private 마운트라 컨테이너의 rslave 바인드가 거절된다. ns를 자기 자신에 바인드하고
@@ -149,6 +155,36 @@ class NfsInstances:
         if self._state(name) == "running":
             self._run(["docker", "exec", name, "sh", "-c", 'echo "$1" > /proc/fs/nfsd/unlock_filesystem', "unlock",
                        f"/export/{path}"])
+
+    # --- 되돌리기 창 (되돌리기 설계 결정 3·13) ---
+
+    def block(self, uuid: str) -> bool:
+        """인스턴스 netns로 들어오는 요청을 막고 knfsd의 export 캐시를 비운다. 그동안 클라이언트는 hard 마운트
+        재전송으로 기다리고, 창이 닫히면 이어 간다 (S5: 오류 0, 2~5 s 멈춤). 인스턴스가 돌지 않으면 False."""
+        pid = self._pid(uuid)
+        if pid is None:
+            return False
+        if self._iptables(pid, "-C", check=False).returncode != 0:  # 다시 해도 규칙은 하나다
+            self._iptables(pid, "-I")
+        self._run(["docker", "exec", container_name(uuid), "exportfs", "-f"])
+        return True
+
+    def unblock(self, uuid: str) -> None:
+        pid = self._pid(uuid)
+        if pid is None:  # 멈춘 인스턴스의 netns는 규칙과 함께 사라졌다
+            return
+        while self._iptables(pid, "-C", check=False).returncode == 0:
+            self._iptables(pid, "-D")
+
+    def _iptables(self, pid: str, op: str, check: bool = True):
+        # 호스트의 iptables로 인스턴스 netns에 들어간다. 이미지에 iptables가 없어도 된다 (결정 13)
+        return self._run(["nsenter", "-t", pid, "-n", "iptables", op, "INPUT", "-i", "eth0", "-j", "DROP"],
+                         check=check)
+
+    def _pid(self, uuid: str) -> str | None:
+        result = self._run(["docker", "inspect", "-f", "{{.State.Pid}}", container_name(uuid)], check=False)
+        pid = result.stdout.strip()
+        return pid if result.returncode == 0 and pid not in ("", "0") else None
 
     def _exports_dir(self, uuid: str) -> Path:
         return self._exports / uuid.replace("-", "")

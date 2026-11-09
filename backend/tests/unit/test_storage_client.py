@@ -253,6 +253,13 @@ def test_snapshot_list_failure_after_revert_raises(agent, client):
         revert(client)
 
 
+def test_snapshot_uuids_lists_the_agent_snapshots_of_a_volume(agent, client):
+    # 볼륨 보장이 실패한 되돌리기를 끝낸 뒤 ARM 스냅샷 행을 agent에 맞출 때 쓴다 (구현 중 변경)
+    agent.reply("GET", SNAPSHOTS, (200, {"records": [{"uuid": S1, "name": "a"}], "num_records": 1}))
+    assert asyncio.run(client.snapshot_uuids(U1, correlation_id="corr-6")) == {S1}
+    assert agent.requests == [("GET", SNAPSHOTS, None, {"x-ms-correlation-request-id": "corr-6"})]
+
+
 # --- 기본 전송 (urllib) ---
 
 

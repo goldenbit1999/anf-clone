@@ -86,7 +86,11 @@ class StorageClient:
         volume = f"/api/storage/volumes/{volume_uuid}"
         query = f"?restore_to.snapshot.uuid={snapshot_uuid}&restore_to.request_uuid={request_uuid}"
         await self._run_job("PATCH", volume + query, None, correlation_id)
-        path = f"{volume}/snapshots"
+        return await self.snapshot_uuids(volume_uuid, correlation_id)
+
+    async def snapshot_uuids(self, volume_uuid: str, correlation_id: str | None = None) -> set[str]:
+        """agent에 있는 그 볼륨의 스냅샷 uuid."""
+        path = f"/api/storage/volumes/{volume_uuid}/snapshots"
         status, reply = await self._call("GET", path, None, correlation_id)
         if status != 200:
             raise StorageError(f"GET {path}: agent answered {status}: {_message(reply)}")

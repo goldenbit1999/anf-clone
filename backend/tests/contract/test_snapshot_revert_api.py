@@ -53,6 +53,9 @@ class FakeStorage:
 
     async def revert_volume(self, volume_uuid, snapshot_uuid, request_uuid, correlation_id=None):
         self.calls.append(("revert_volume", volume_uuid, snapshot_uuid, request_uuid, correlation_id))
+        return await self.snapshot_uuids(volume_uuid)
+
+    async def snapshot_uuids(self, volume_uuid, correlation_id=None):
         return {u for u, n in self.uuids.items() if self.keep is None or n in self.keep}
 
 

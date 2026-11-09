@@ -509,6 +509,17 @@ def make_handlers(store: StateStore, storage) -> dict:
             res.properties = {**res.properties, "mountTargets": [
                 {"mountTargetId": fsid, "fileSystemId": fsid, "ipAddress": ip}]}
             tx.put_resource(res)
+        # agent가 실패한 되돌리기를 끝냈으면 더 새 스냅샷이 지워졌다 (되돌리기 결정 2·8). 작업 중이 아닌 Succeeded 행만
+        # 맞춘다: 실패 행은 사용자가 지우고, 작업 중인 행은 그 작업이 끝낸다
+        with store.transaction() as tx:
+            settled = [s for s in tx.list_children(op.resource_id, SNAPSHOT_TYPE)
+                       if s.provisioning_state == "Succeeded" and tx.active_operation(s.id) is None]
+        if settled:
+            remaining = await storage.snapshot_uuids(fsid, correlation_id=op.correlation_id)
+            with store.transaction() as tx:
+                for snap in settled:
+                    if snap.properties["snapshotId"] not in remaining and tx.active_operation(snap.id) is None:
+                        tx.delete_resource(snap.id)
 
     async def delete(op: Operation) -> None:
         props = store.get_resource(op.resource_id).properties

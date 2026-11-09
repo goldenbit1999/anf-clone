@@ -77,11 +77,30 @@ def parse_snapshot(body) -> tuple[str, str]:
     return _check_uuid(body["uuid"]), name
 
 
-async def _json(request: Request):
+_RESTORE_QUERY = ("restore_to.snapshot.uuid", "restore_to.request_uuid")
+
+
+def parse_restore(query: list[tuple[str, str]], raw: bytes) -> tuple[str, str]:
+    """볼륨 PATCH → (스냅샷 uuid, 멱등 키). ONTAP처럼 쿼리 `restore_to.snapshot.uuid`로 되돌린다.
+    `restore_to.request_uuid`는 클론 확장이다 (되돌리기 결정 4). 볼륨 속성 PATCH(크기 등)는 아직 없다."""
+    if sorted(k for k, _ in query) != sorted(_RESTORE_QUERY):
+        raise BadRequest("PATCH needs exactly the query parameters restore_to.snapshot.uuid and "
+                         "restore_to.request_uuid; changing volume properties is not supported")
+    if raw.strip() and _parse(raw) != {}:
+        raise BadRequest("body must be empty or {}")
+    values = dict(query)
+    return tuple(_check_uuid(values[k]) for k in _RESTORE_QUERY)
+
+
+def _parse(raw: bytes):
     try:
-        return json.loads(await request.body())
+        return json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise BadRequest("body is not valid JSON") from None
+
+
+async def _json(request: Request):
+    return _parse(await request.body())
 
 
 def _not_found(message: str) -> JSONResponse:
@@ -138,6 +157,14 @@ def create_app(manager=None, jobs: JobTable | None = None) -> FastAPI:
     def delete_volume(uuid: str, request: Request):
         _check_uuid(uuid)
         return accepted(f"DELETE {uuid}", f"DELETE /api/storage/volumes/{uuid}", lambda: manager.delete(uuid), request)
+
+    @app.patch("/api/storage/volumes/{uuid}")
+    async def patch_volume(uuid: str, request: Request):
+        _check_uuid(uuid)
+        snapshot, key = parse_restore(request.query_params.multi_items(), await request.body())
+        # 키에 멱등 키를 넣는다: anf-api가 포기한 job이 아직 돌 때 다른 되돌리기가 그 job을 받지 않는다
+        return accepted(f"PATCH {uuid} {key}", f"PATCH /api/storage/volumes/{uuid}",
+                        lambda: manager.restore(uuid, snapshot, key), request)
 
     @app.post("/api/storage/volumes/{volume}/snapshots")
     async def post_snapshot(volume: str, request: Request):

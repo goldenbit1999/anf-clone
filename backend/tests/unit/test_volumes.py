@@ -473,12 +473,16 @@ class FakeStorage:
         self.ip = ip
         self.calls: list[tuple] = []
         self.error: Exception | None = None
-        self.remaining: set[str] = set()  # 되돌린 뒤 agent에 남은 스냅샷 uuid
+        self.remaining: set[str] = set()  # agent에 있는 스냅샷 uuid (되돌린 뒤 남은 것)
 
     async def revert_volume(self, uuid, snapshot_uuid, request_uuid, correlation_id=None):
         self.calls.append(("revert", uuid, snapshot_uuid, request_uuid, correlation_id))
         if self.error:
             raise self.error
+        return self.remaining
+
+    async def snapshot_uuids(self, uuid, correlation_id=None):
+        self.calls.append(("snapshots", uuid, correlation_id))
         return self.remaining
 
     async def ensure_volume(self, *args, correlation_id=None):
@@ -730,6 +734,7 @@ def test_failed_volume_after_a_revert_recovers_with_put(store):
     v = create(store)
     s = make_snapshot(store, "s1")
     storage = FakeStorage()
+    storage.remaining = {s.properties["snapshotId"]}
     storage.error = RuntimeError("agent down")
     run_operation(store, storage, revert(store, {"snapshotId": s.id}))
     storage.error = None
@@ -737,3 +742,20 @@ def test_failed_volume_after_a_revert_recovers_with_put(store):
     assert run_operation(store, storage, op).status == "Succeeded"
     assert store.get_resource(v.id).provisioning_state == "Succeeded"
     assert revert(store, {"snapshotId": s.id}).status == "Reverting"
+
+
+def test_volume_put_drops_the_snapshots_the_agent_no_longer_has(store):
+    # 볼륨 PUT이 agent에서 실패한 되돌리기를 끝내면 더 새 스냅샷이 지워진다. ARM 목록도 맞춘다 (결정 2·8)
+    v = create(store)
+    kept, gone = make_snapshot(store, "s1"), make_snapshot(store, "s2")
+    make_snapshot(store, "s3", status="Failed")  # 데이터가 없는 실패 행은 사용자가 지운다
+    make_snapshot(store, "s4", status=None)  # 작업 중인 행은 그 작업이 끝낸다
+    storage = FakeStorage()
+    storage.remaining = {kept.properties["snapshotId"]}
+    _, _, op = put(store, body())
+
+    assert run_operation(store, storage, op).status == "Succeeded"
+
+    assert ("snapshots", v.properties["fileSystemId"], "corr-1") in storage.calls
+    assert [s.name for s in store.list_children(v.id, snapshots.SNAPSHOT_TYPE)] == ["s1", "s3", "s4"]
+    assert store.get_resource(gone.id) is None
