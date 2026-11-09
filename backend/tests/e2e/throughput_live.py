@@ -139,7 +139,8 @@ def ifb_tx_bytes(pid: str) -> int | None:
 
 class Sampler(threading.Thread):
     """ifb0 송신 바이트를 0.5초마다 읽는다. 인스턴스가 다시 뜨면(pid가 바뀌면) 새 netns를 따라간다.
-    windows()는 같은 netns의 표본 사이 1초 창: (창 시작 time.time(), MiB/s).
+    windows()는 같은 netns의 표본 사이 1초 창: (창 시작 time.monotonic(), MiB/s). 벽시계는 쓰지 않는다. WSL 벽시계는
+    약 32 s마다 0.85 s씩 뒤로 건너뛸 때가 있어, 건너뜀이 든 창이 한도의 1.7배로 읽혔다(검증 1회차 AC-07).
 
     ifb0 카운터는 GSO 묶음(skb)마다 헤더를 한 번만 센다. 그래서 값이 데이터 처리량에 가깝다(같은 시험의 fio 값보다
     0.5% 안팎 크다). HTB Sent 바이트는 묶음을 세그먼트로 나눈 실제 wire 바이트라 약 4.5% 더 크다(AC-02 기록)."""
@@ -158,7 +159,7 @@ class Sampler(threading.Thread):
                 pid = instance_pid(self.fsid)
                 sent = ifb_tx_bytes(pid) if pid else None
             if sent is not None:
-                self.samples.append((time.time(), pid, sent))
+                self.samples.append((time.monotonic(), pid, sent))
             self._done.wait(0.5)
 
     def stop(self) -> list[tuple[float, float]]:

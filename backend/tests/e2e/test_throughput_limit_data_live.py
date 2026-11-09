@@ -125,7 +125,7 @@ def test_ac04_limit_changes_during_io(agent, api, clients):
         mounts_before = mounts(c)
         s = Sampler(fsid)
         s.start()
-        t_start = time.time()
+        t_start = time.monotonic()  # 창 시각과 같은 시계 (Sampler)
         wait = in_background(fio, c, rw, f"/{name}/f", 150, runtime=12 + len(CHANGES) * (SETTLE + 4) + 10,
                              timeout=300)
         time.sleep(12)
@@ -136,12 +136,13 @@ def test_ac04_limit_changes_during_io(agent, api, clients):
             else:
                 r = call("PUT", vol_url(ACCT, "uc", name), vol_body(tok, size, protocols, throughputMibps=mibps))
             assert r.status in (200, 202), r.raw
-            t_ok, final, seen = fast_poll(r.headers["azure-asyncoperation"])
+            _, final, seen = fast_poll(r.headers["azure-asyncoperation"])  # 돌려주는 시각은 벽시계다
+            t_ok = time.monotonic()  # Succeeded를 본 직후
             changes.append({"how": how, "mibps": mibps, "status": r.status,
                             "state": r.json()["properties"]["provisioningState"], "seen": seen,
                             "final": final["status"], "action": final["properties"]["action"], "t_ok": t_ok})
             time.sleep(SETTLE)
-        t_last = time.time()
+        t_last = time.monotonic()
         io = wait()
         windows = s.stop()
         active = [w for w in windows if t_start + 3 <= w[0] <= t_last - 1]
@@ -293,9 +294,9 @@ def through_step(c, fsid: str, mibps: float, step, runtime: int) -> dict:
     s.start()
     wait = in_background(fio, c, "write", "/m/f", round(mibps * SECONDS), runtime=runtime, timeout=runtime + 300)
     time.sleep(6)
-    t_step = time.time()
+    t_step = time.monotonic()  # 창 시각과 같은 시계 (Sampler)
     detail = step()
-    t_done = time.time()
+    t_done = time.monotonic()
     io = wait()
     windows = s.stop()
     t_resume = resumed(windows, t_done, mibps)
