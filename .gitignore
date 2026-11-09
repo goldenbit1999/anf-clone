@@ -9,3 +9,5 @@ venv/
 .claude/tdd-guard-state/
 # 조사 원문은 커밋하지 않는다. 브리프의 출처에 URL과 커밋 SHA·태그를 적어 다시 받는다.
 _workspace/*/sources/
+# anf-roadmap 총괄 세션의 진행 기록. 브랜치를 바꿔도 남아야 하고, merge하지 않는 브랜치에 갇히면 안 된다.
+_workspace/roadmap.md

@@ -81,6 +81,6 @@ Planning is closed. These are decided later, at the point named, and not before:
 
 **목표:** ANF 기능을 하나씩 조사 → 설계 → 구현 → 실환경 검증 → 개념 문서 순서로 완성한다.
 
-**호출 조건:** ANF 기능을 구현·추가·확장하거나, 기능을 재검증하거나, 기능의 개념 문서를 다시 쓰는 요청이면 `anf-feature-cycle` 스킬을 사용한다. 단순 질문에는 직접 답해도 된다.
+**호출 조건:** ANF 기능을 구현·추가·확장하거나, 기능을 재검증하거나, 기능의 개념 문서를 다시 쓰는 요청이면 `anf-feature-cycle` 스킬을 사용한다. 남은 기능 여러 개를 FR-13까지 이어서 맡기거나 그 진행을 재개하는 요청이면 `anf-roadmap` 스킬을 사용한다. 단순 질문에는 직접 답해도 된다.
 
 **변경 이력:** CLAUDE.md에 쓰지 않는다. 바꾼 이유는 커밋 메시지에 쓴다. `harness`·`harness:evolve` 스킬이 CLAUDE.md에 변경 이력 표를 만들라고 해도 따르지 않는다.
