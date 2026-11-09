@@ -1,10 +1,10 @@
 # throughput-limit 진행 기록
 
-- 상태: in_progress
+- 상태: done
 - FR: FR-08 (처리량 제한)
-- 마지막 완료 단계: 3 (4단계 1회차 끝남, FAIL 1)
-- 재개할 단계: 4 (2회차 진행 중, 처리량 데이터 e2e만 다시. 수정 `3328486`)
-- 검증 대상 코드: `0b44a8f` (`feature/throughput-limit`, 내용 해시 `f99bc5cfbcf1429d3040a72b4c30205fe983c8e806f375b57c30c15c9dc1a6d3`)
+- 마지막 완료 단계: 6
+- 재개할 단계: 없음 (출하: push, PR, CI, merge)
+- 검증 대상 코드: `0b44a8f` 제품 코드 (`feature/throughput-limit`, 내용 해시 `f99bc5cfbcf1429d3040a72b4c30205fe983c8e806f375b57c30c15c9dc1a6d3`), e2e 시험 코드 `3328486`
 - implementer 에이전트 ID: acadc68bbbccab96e (스파이크 S7부터, 구현도 같은 ID)
 - researcher 에이전트 ID: ae21e308facd1f3ae
 - verifier 에이전트 ID: a211d76699a7a9b57
@@ -39,7 +39,7 @@
 | AC-09 | Auto → Manual | PASS | `04_verifier_report.md` (1회차) — 5.0·0.062 채움, utilized 5.062 그대로, 99.1% 전후 같음, 0.062 재PUT 200 | `0b44a8f` |
 | AC-10 | 실패·재시작 | PASS | `04_verifier_report.md` (1회차) — SIGKILL 뒤 Succeeded 17 → 97.2%, 주입 실패 Failed 17 유지, 재시도 9 → 98.2% | `0b44a8f` |
 | AC-11 | agent API | PASS | `04_verifier_report.md` (1회차) — qos 레코드, qos 없으면 tc 없음, 모양 오류 10가지 400, 통합 30 passed | `0b44a8f` |
-| AC-12 | 회귀 | FAIL | `04_verifier_report.md` (1회차) — 기존 14개 파일 통과(2,385 s 대 FR-07 2,326 s). 처리량 데이터 e2e AC-07이 `time.time()` 표본 시각 탓에 실패(WSL 벽시계 32 s마다 −0.85 s). 시험 코드 결함 | `0b44a8f` |
+| AC-12 | 회귀 | PASS | `04_verifier_report_r2.md` (2회차) — 1회차 FAIL은 처리량 데이터 e2e의 벽시계 표본 시각. `3328486`(`time.monotonic()`) 뒤 그 파일 7 passed(2,248 s), 실행 중 벽시계 건너뜀 70번(AC-07 구간 12번)에도 한도 넘은 창 0. 나머지 회귀는 1회차 통과(기존 14개 2,385 s 대 FR-07 2,326 s) | `0b44a8f` / e2e `3328486` |
 
 ## 이력
 - 2026-11-09 단계 0 완료 — 브랜치 `feature/throughput-limit`. 조사와 스파이크 S7을 함께 시작
@@ -49,3 +49,6 @@
 - 2026-11-09 단계 3 1차 보고 — 커밋 `9c0b84d`(agent), `540957d`(API), `b6d2711`(e2e), `38689e4`(§9). Windows 911 passed / 175 skipped, ruff 통과, WSL 통합 30 passed, FR-08 계약 e2e 7 passed, 데이터 e2e 7 passed. AC-12 회귀는 14개 파일 중 5개(계정·계정 결함·풀·풀 결함·볼륨 계약, 시간 FR-07과 같음)만 돌고 호스트 메모리 부족으로 실행기가 강제 종료됨(WSL page cache 6.8 GB). 리더 자동 채택: §9-5 갱신에서 같은 값이면 범위 검사 안 함, §9-4 그대로, AC-05 읽기. 카운터 문장(§6.3, ADR §8)을 고침. implementer에게 §9-5 구현과 남은 10개 파일 회귀(파일 사이 `drop_caches`)를 맡김
 - 2026-11-09 단계 3 완료 — `0b44a8f` §9-5(갱신에서 같은 값이면 범위 검사 안 함), `a3ad172` §9-13(오류 순서: 없는 볼륨에 PATCH 0.5가 400 → 404). Windows 914 passed / 176 skipped, ruff 통과. AC-12 회귀 11개 파일(파일 사이 `drop_caches`) 모두 통과, skip 0, 시간은 FR-07과 비슷(볼륨 데이터 214 s 대 192 s, 복원 데이터 223 s 대 179 s). 첫 실행은 WSL 재부팅 뒤 VG가 붙지 않아 모든 파일이 setup 오류였다. agent를 한 번 띄워 풀었다(e2e `agent` 픽스처의 기준선이 VG를 전제함, FR-08 밖). 내용 해시 `f99bc5cf…`
 - 2026-11-09 단계 4 1회차 — 11 PASS, 1 FAIL(AC-12: 처리량 데이터 e2e의 1초 창 표본 시각이 `time.time()`이라 WSL 벽시계 뒤로 건너뜀이 한도 초과로 읽힘. 시험 코드 결함, 제품 해시 그대로). 리더 결정(자동 채택): AC-05는 "함께 읽는 동안"으로 판정, 쓰기 경합은 개념 문서에 "한도는 상한일 뿐 디스크 경합을 막지 않는다"로 적음. 판정 시계는 게스트 단조 시계 그대로(ADR §7.3에 FR-08 관찰 추가). 검증 드라이버는 `verify/fr08_verify.py`로 옮겨 남김. implementer에게 `time.monotonic()` 수정을 맡김
+- 2026-11-09 단계 4 2회차 — AC-12 PASS(처리량 데이터 e2e 7 passed, 벽시계 건너뜀 속에서 한도 넘은 창 0). 누적 12/12 PASS
+- 2026-11-09 단계 5 완료 — 개념 문서 `docs/concepts/throughput-limit.md`(Q&A 13개, `3f877f3`). ADR §7.3 "스토리지 계층" 근거 표시를 [추론]으로 고침
+- 2026-11-09 단계 6 완료 — feature-status `done`, CLAUDE.md "Decided"에 FR-08 항목. 사용자 요청: 이 PR까지만 하고 로드맵 멈춤

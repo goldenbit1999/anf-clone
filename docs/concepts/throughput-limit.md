@@ -503,7 +503,7 @@ real-env-verifier 1회차, 2026-11-09. **PASS 11 / FAIL 1 / UNVERIFIED 0.** FAIL
 | AC-09 Auto → Manual | PASS | Premium 80 GiB(5.0)와 1 GiB(0.062). 전환 `202` → `Succeeded`(0.04 s) 뒤 GET 5.0/5.0, 0.062/0.062, utilized 5.062 그대로, 같은 pid·같은 rate. 쓰기·읽기 전후 99.1%·99.0%. PATCH 8 → 98.2%. 0.062 볼륨 GET 본문 재PUT → `200 Updating` → `Succeeded`, rate 그대로 |
 | AC-10 실패·재시작 | PASS | (a) PATCH 17에 30 s 지연 주입, `Patching` 중 HTB는 아직 15. anf-api SIGKILL → 재시작 → 같은 작업 `Succeeded`(8.77 s), HTB 17, 97.2%. (b) 실패 주입 → `Failed`, `throughputMibps` 17 유지, HTB 그대로. 주입 없이 같은 PATCH 9 → `Succeeded`, 98.2% |
 | AC-11 agent API | PASS | `qos` POST → job `success`, 레코드·태그·netns tc. 같은 uuid에 20 → 태그가 `anf_qos=20.0` 하나로 바뀌고 HTB rate도 바뀜, 같은 pid. `qos` 없는 볼륨은 netns에 `lo, eth0`뿐. 모양 오류 10가지 `400`. 통합 30 passed(FR-08 다섯: `test_flexvol_linux.py:639`, `:660`, `:668`, `:687`, `:698`) |
-| AC-12 회귀 | 1회차 FAIL → 2회차 (리더가 채운다) | 1회차: 기존 e2e 14개 파일 통과(합 2,384.7 s, FR-07 2,326 s 대비 +2.5%. 데이터 쓰는 6개 +4.2%: 64 MiB/s 한도가 실제로 걸림), FR-08 계약 8 passed, 단위·계약 914 passed(Windows·WSL), 통합 30 passed. FR-08 데이터 e2e는 6 passed / 1 failed(AC-07 `over_limit`, 3.6절). 2회차: |
+| AC-12 회귀 | 1회차 FAIL → 2회차 PASS | 1회차: 기존 e2e 14개 파일 통과(합 2,384.7 s, FR-07 2,326 s 대비 +2.5%. 데이터 쓰는 6개 +4.2%: 64 MiB/s 한도가 실제로 걸림), FR-08 계약 8 passed, 단위·계약 914 passed(Windows·WSL), 통합 30 passed. FR-08 데이터 e2e는 6 passed / 1 failed(AC-07 `over_limit`, 3.6절). 2회차(시험 코드 `3328486`, 1초 창을 `time.monotonic()`으로): 그 파일만 다시 돌려 7 passed(2,248 s). 실행 중 벽시계가 70번 뒤로 건너뛰었고(−0.52~−0.88 s, 32.2~32.3 s 간격) 그중 12번이 AC-07 표본 구간에 들었지만, 한도를 넘은 창은 0개(1회차 단계별 2·8·10·2개). 단계 중앙값 9.945~9.955 MiB/s(한도 10) |
 
 **AC-07 수명 주기** (Manual 10 MiB/s, NFSv4.1, 쓰는 중에 단계를 하고 다시 흐른 때부터 15 s의 1초 창 중앙값)
 
