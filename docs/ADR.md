@@ -87,7 +87,7 @@ ONTAP REST 경로와 필드 이름은 기능마다 조사 단계에서 ONTAP RES
 | 용량 풀 | 직접 대응하는 공개된 객체 없음 [미확인]. 문서상 "용량·처리량 예산이자 과금 단위"이고, 볼륨 처리량 한도는 QoS policy group(Auto는 adaptive QoS)과 닮았다 [추론] | 없음. **풀은 컨트롤 플레인 전용이다** (풀 설계에서 확정, `_workspace/capacity-pool/02_main_design.md` 결정 2) | 없음. S1이 후보 C(dm-thin)를 고르면 볼륨 사이클에서 다시 본다 | 풀 브리프 "ONTAP 대응 개념" |
 | 볼륨 | FlexVol. 볼륨이 담기는 물리 공간은 aggregate | `POST`·`GET`·`DELETE /api/storage/volumes`, job은 `/api/cluster/jobs/{uuid}`. 요청의 `uuid`(멱등 키)는 클론 확장이다 (**볼륨 설계에서 확정**, `_workspace/volume/02_main_design.md` §6) | 씬 풀 하나(`anf/aggr0`, aggregate 역할) 위에 볼륨마다 thin LV + ext4(`nodelalloc`). `/var/lib/anf-clone/ns/<creationToken>`에 마운트하고 그 볼륨의 knfsd 인스턴스로 export ([§7.2](#72-볼륨스냅샷-저장-방식-확정-d-11), [§7.4](#74-nfs)) | ONTAP 대응은 [추론] (볼륨 브리프) |
 | 스냅샷 | 볼륨 스냅샷 (WAFL redirect-on-write) | `POST`·`GET /api/storage/volumes/{volume.uuid}/snapshots`, `GET`·`DELETE .../snapshots/{uuid}`, job 모델. 요청의 `uuid`(멱등 키)는 클론 확장이다 (**스냅샷 설계에서 확정**, `_workspace/snapshot/02_main_design.md` §6) | 읽기 전용 thin 스냅샷 LV를 `ns/<creationToken>/.snapshot/<이름>`에 `ro,noload`로 마운트하고, 볼륨 인스턴스의 export 파일에 자기 `fsid` 줄을 둔다. `.snapshot`은 `chattr +i` (S1, S4) | ONTAP REST 경로·필드는 스냅샷 브리프 [문서 15·16]. 동작 대응은 [추론] |
-| 스냅샷으로 되돌리기 | SnapRestore (볼륨 단위) | `PATCH /api/storage/volumes/{uuid}?restore_to.snapshot.uuid=…`, `202` + job. `restore_to.request_uuid`(멱등 키)는 클론 확장이다 (**되돌리기 설계에서 확정**, `_workspace/snapshot-revert/02_main_design.md` §6) | 인스턴스 netns 입력을 잠깐 막고 언마운트한 뒤 더 새 스냅샷(dm-thin id가 큰 것)을 지우고 `lvconvert --merge`. merge가 소비한 고른 스냅샷은 같은 태그로 다시 만든다. 마운트한 클라이언트는 2~5 s 멈췄다 이어 간다 (S5) | ONTAP REST 경로는 되돌리기 브리프 [문서 10]. 동작 대응은 [추론] |
+| 스냅샷으로 되돌리기 | SnapRestore (볼륨 단위) | `PATCH /api/storage/volumes/{uuid}?restore_to.snapshot.uuid=…`, `202` + job. `restore_to.request_uuid`(멱등 키)는 클론 확장이다 (**되돌리기 설계에서 확정**, `_workspace/snapshot-revert/02_main_design.md` §6) | 더 새 스냅샷(dm-thin id가 큰 것)을 지우고 고른 스냅샷의 쓰기 가능 스냅샷을 새 볼륨 LV로 만든다. 인스턴스 netns 입력을 잠깐 막은 채 옛 볼륨을 내리고 새 LV를 올린 뒤, 옛 LV를 지우고 새 LV가 이름을 넘겨받는다. 고른 스냅샷은 그대로 남는다. 마운트한 클라이언트는 몇 초 멈췄다 이어 간다 (S5, 되돌리기 설계 §9-1) | ONTAP REST 경로는 되돌리기 브리프 [문서 10]. 동작 대응은 [추론] |
 | 새 볼륨으로 복원, 클론 | FlexClone | 볼륨 POST에 클론 원본 지정 | 스냅샷의 쓰기 가능한 thin 스냅샷 (S1에서 0.13초) | [추론] |
 | 처리량 제한 | QoS policy group (최대 처리량) | `/api/storage/qos/policies` | 볼륨 인스턴스 veth의 tc HTB 클래스 하나 (읽기·쓰기 합산, [§7.3](#73-처리량-제한-방식-확정-d-12)) | [추론] |
 | export policy | export policy와 규칙 | `/api/protocols/nfs/export-policies` | `exportfs`의 클라이언트 규칙 | [추론] |
@@ -289,9 +289,10 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 
 **스냅샷 조사 뒤 (2026-11-08).** ANF는 스냅샷이 쓰는 공간을 볼륨 할당량에 넣는다 [스냅샷 브리프 문서 4]. C는 thin 스냅샷 공간이 씬 풀에서 나가서 볼륨 할당량·`df`에 잡히지 않는다. 이 차이는 받아들이고 개념 문서에 적는다. 대신 스냅샷이 커지면 씬 풀(aggregate)이 찰 수 있다 (R-09). 노출 방식은 S4(`_workspace/spikes/S4.md`)에서 정했다: 스냅샷마다 볼륨 인스턴스 안에 자기 `fsid`의 export 줄을 둔다(부모 `crossmnt`만으로는 v3·v4.1 모두 Stale file handle). `.snapshot`은 `chattr +i`로 클라이언트가 바꾸지 못하게 한다.
 
-**되돌리기 (2026-11-08, S5, `_workspace/snapshot-revert/02_main_design.md`).** S1이 고른 `lvconvert --merge`를 쓴다. 볼륨 LV의 이름과 태그가 그대로라 agent의 볼륨 식별이 바뀌지 않는다. 조건이 셋 있다.
-- 무엇이든 열려 있으면 merge가 다음 활성화로 미뤄진다. 그래서 인스턴스 netns의 입력을 잠깐 막은 채 knfsd 상태를 풀고 스냅샷·볼륨을 모두 언마운트한 뒤 merge한다. 인스턴스를 재시작하거나 export를 빼면 클라이언트가 오류나 긴 멈춤을 본다 (S5 R).
-- merge는 고른 스냅샷 LV를 소비한다. ANF에서는 고른 스냅샷이 남으므로, 되돌린 볼륨에서 같은 uuid·이름·시각 태그로 다시 만든다. 다시 만들 정보는 merge 전에 볼륨 LV의 진행 표시 태그에 적어 두어 중간에 멈춰도 잃지 않는다.
+**되돌리기 (2026-11-08, S5, `_workspace/snapshot-revert/02_main_design.md`).** 볼륨 LV를 고른 스냅샷의 쓰기 가능 스냅샷으로 바꾼다(LV 교체, S5 L2). 설계는 S1이 고른 `lvconvert --merge`였지만, 구현 중 통합 테스트에서 merge 방식이 두 번째 되돌리기를 못 했다: merge 뒤 남은 스냅샷은 `origin` 표시를 잃고, LVM은 원본이 지금 볼륨인 스냅샷만 merge한다 (설계 §9-1, S5 "스파이크 뒤 발견"). 교체 방식의 규칙:
+- 새 LV `vol_<uuid>_new`는 창 전에 만들고, 볼륨 태그와 진행 표시를 만들 때부터 갖는다. 그래서 어느 순간에 멈춰도 볼륨 정체성이 LVM 태그에 남고, agent는 남은 LV(옛 LV, 새 LV, 둘 다)로 어디까지 했는지 안다.
+- 창 안(인스턴스 netns 입력 DROP)에서는 knfsd 상태를 풀고 스냅샷·옛 볼륨을 언마운트한 뒤 새 LV와 스냅샷을 마운트하고 export를 적용한다. 인스턴스를 재시작하거나 export를 빼면 클라이언트가 오류나 긴 멈춤을 본다 (S5 R). 옛 LV `lvremove`와 `lvrename`은 창 밖이다.
+- 고른 스냅샷 LV는 원본으로만 쓰이므로 uuid·이름·시각이 그대로 남는다 (ANF와 같다). export `fsid`는 볼륨 UUID로 고정이라 마운트한 클라이언트의 파일 핸들이 이어진다.
 - 더 새 스냅샷은 dm-thin 장치 id로 고른다. id는 "남은 것 중 최댓값 + 1"이라 남은 스냅샷 사이의 순서가 만든 순서와 같다 (S5 L3).
 
 ### 7.3 처리량 제한 방식 (확정, D-12)
@@ -378,7 +379,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | S2 | §7.3의 후보 중 볼륨별 제한이 클라이언트 측정으로 드러나는 것을 찾는다 (`fio`로 측정). 측정 조건(제안): 페이지 캐시 효과를 줄이려고 `fio --direct=1`을 쓰고 측정 전에 캐시를 비운다(클라이언트와 서버가 같은 커널이라 서버 쪽 캐시도 함께 영향을 받는다, R-08). 조건마다 5회 이상 반복하고 각 값과 중앙값을 남긴다. 시계(2026-11-07 관찰): WSL 게스트 단조 시계가 호스트 시계보다 약 10% 느리고, 게스트 벽시계는 약 33초마다 약 3.3초 앞으로 건너뛴다 (`_workspace/capacity-pool/04_verifier_report.md` 추가 관찰 2). 그래서 게스트 안에서 잰 MiB/s와 호스트 실시간 기준 처리량이 다를 수 있다. 어느 시계를 기준으로 잴지 S2에서 정하고, 구간은 벽시계가 아니라 단조 시계로 잰다 | 처리량 설계 전 | — |
 | S3 | GitHub 호스트 러너에서 btrfs·nfsd 모듈을 로드하고 privileged 컨테이너로 마운트할 수 있는가 | CI 기능 전 | 데이터 플레인 테스트는 로컬(또는 self-hosted 러너)에서만 돌리고, 그 사실을 문서에 적는다 |
 | S4 | 볼륨 인스턴스(D-12) 구조에서 `.snapshot/<이름>`이 v3·v4.1로 읽기 전용으로 보이는가, 클라이언트가 `.snapshot`을 바꿀 수 있는가, 인스턴스 재시작 뒤에도 보이는가. **조건부 통과 (2026-11-08, `_workspace/spikes/S4.md`)**: 스냅샷마다 자기 `fsid` export, `.snapshot`에 `chattr +i`, export 표를 파일로. v4.1 인스턴스 재시작 결함도 찾았다 | 스냅샷 설계 전 | — |
-| S5 | 볼륨 인스턴스 구조에서 스냅샷으로 되돌리기: LVM 절차(merge·교체), 클라이언트가 마운트를 유지한 채 무엇을 보는가(다시 마운트, stale handle, 열린 fd, 창 동안의 오류). **조건부 통과 (2026-11-08, `_workspace/spikes/S5.md`)**: 인스턴스 netns 입력을 잠깐 막고 언마운트 → `lvconvert --merge` → 고른 스냅샷 다시 만들기 → 다시 올리면 v3·v4.1 모두 다시 마운트 없이 오류 0(2~5 s 멈춤). 스냅샷 뒤에 만든 파일을 잡은 fd·cwd만 ESTALE. export 제거는 v3에 EACCES, 인스턴스 재시작은 v4.1에 23 s와 틀린 캐시. knfsd 기본 NFSv4 위임에서는 v4.1 열린 fd가 16~32 s 옛 캐시를 읽는다 | 되돌리기 설계 전 | — |
+| S5 | 볼륨 인스턴스 구조에서 스냅샷으로 되돌리기: LVM 절차(merge·교체), 클라이언트가 마운트를 유지한 채 무엇을 보는가(다시 마운트, stale handle, 열린 fd, 창 동안의 오류). **조건부 통과 (2026-11-08, `_workspace/spikes/S5.md`)**: 인스턴스 netns 입력을 잠깐 막고 언마운트 → `lvconvert --merge` → 고른 스냅샷 다시 만들기 → 다시 올리면 v3·v4.1 모두 다시 마운트 없이 오류 0(2~5 s 멈춤). 구현 중 merge가 두 번째 되돌리기를 못 해 LVM 절차는 교체 방식(L2)으로 바꿨다(창 방식은 그대로). 스냅샷 뒤에 만든 파일을 잡은 fd·cwd만 ESTALE. export 제거는 v3에 EACCES, 인스턴스 재시작은 v4.1에 23 s와 틀린 캐시. knfsd 기본 NFSv4 위임에서는 v4.1 열린 fd가 16~32 s 옛 캐시를 읽는다 | 되돌리기 설계 전 | — |
 
 ### 위험
 
@@ -386,7 +387,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | --- | --- | --- | --- |
 | R-01 | knfsd는 커널 스레드라 볼륨별 cgroup에 넣기 어렵다. 그래서 `io.max`로는 볼륨별 제한이 안 될 수 있다. **S2에서 현실화(WSL에서는 커널 스레드가 보이지 않음)** | FR-08 | 해소: D-12 = T1n (네트워크 제한) |
 | R-02 | btrfs 중첩 서브볼륨을 NFS로 내보내면 inode 번호가 겹쳐 `.snapshot`이 이상하게 보일 수 있다. S1에서 확인됐다(같은 dev, 같은 inode). NFSv3로 읽기 전용 스냅샷이 수정되는 문제도 나왔다 | FR-05 | 해소: D-11에서 C를 골라 btrfs 서브볼륨을 쓰지 않는다 |
-| R-03 | 되돌리기를 서브볼륨이나 LV 교체로 구현하면, 이미 마운트한 클라이언트가 stale file handle 오류를 볼 수 있다 | FR-06 | 해소 (S5): merge는 볼륨의 `fsid`·inode 번호·세대를 그대로 두어 스냅샷에 있던 파일·디렉터리의 핸들이 이어진다. 스냅샷 뒤에 만든 것을 잡은 핸들만 `Stale file handle`이다. 이 동작을 되돌리기 개념 문서에 남긴다 |
+| R-03 | 되돌리기를 서브볼륨이나 LV 교체로 구현하면, 이미 마운트한 클라이언트가 stale file handle 오류를 볼 수 있다 | FR-06 | 해소 (S5, 되돌리기 구현): export `fsid`가 볼륨 UUID로 고정이고, merge든 LV 교체든 되돌린 ext4는 고른 스냅샷의 inode 번호·세대를 그대로 가져서 스냅샷에 있던 파일·디렉터리의 핸들이 이어진다. 구현은 LV 교체다 (되돌리기 설계 §9-1). 스냅샷 뒤에 만든 것을 잡은 핸들만 `Stale file handle`이다. 이 동작을 되돌리기 개념 문서에 남긴다 |
 | R-04 | storage agent API가 실제 ONTAP REST와 어긋나면 면접에서 오해를 줄 수 있다 | G2 | 기능 조사에서 ONTAP 문서로 확인하고 다른 점을 표시한다. 선택적으로 실제 ONTAP으로 충실도 테스트를 한다 |
 | R-05 | WSL 메모리(약 7GB)가 모자랄 수 있다 | NFR-06 | 구성요소별 사용량을 잰다. Kubernetes는 FR-14 때만 띄운다 |
 | R-06 | 저장소가 `/mnt/c`에 있어 WSL에서 파일 I/O가 느리고 실행 권한 비트가 다를 수 있다 | 개발 속도 | WSL 가상환경은 저장소 밖(`~/.venvs/anf-clone`)에 두고(D-14), 스토리지 데이터는 스토리지 루트(§5)에 둔다. 그래도 느리면 저장소를 WSL 안에 두는 방법을 검토한다. 이때 TDD 훅이 Windows 가상환경을 쓰는 점도 함께 고려한다 |
