@@ -152,7 +152,11 @@ stateDiagram-v2
 
 ### 6.3 카운터 읽기 (FR-12를 위한 자리)
 
-netns 안 `ifb0`의 송신 바이트가 볼륨의 양방향 wire 바이트다. 헤더를 포함하므로 데이터보다 4.5% 남짓 크다(S7 Q2). 호스트에서는 `/proc/<pid>/net/dev`의 `ifb0` 줄로 읽는다. `nsenter … tc -s class show dev ifb0`의 `Sent N bytes`도 같은 값이다. 이번 FR은 검증에서만 쓰고, 메트릭은 FR-12가 붙인다. ADR §8의 "IFB의 tc 카운터" 문구는 이 자리를 가리키도록 고친다.
+카운터는 둘이고 값이 다르다(§9-12에서 고침, 처음에는 같은 값이라고 썼다).
+- netns 안 `ifb0`의 송신 바이트(호스트에서 `/proc/<pid>/net/dev`의 `ifb0` 줄): skb 길이를 세므로 GSO 묶음마다 헤더를 한 번만 센다. 데이터 바이트에 가깝다(FR-08 e2e에서 fio 값보다 0.5% 안팎 크다).
+- HTB 클래스의 `Sent N bytes`(`nsenter … tc -s class show dev ifb0`): 세그먼트마다 헤더를 더한 wire 바이트이고, rate가 이 값에 걸린다. `ifb0` 송신보다 4.24~4.35% 크다.
+
+이번 FR은 검증에서만 쓰고(e2e 1초 창은 `ifb0` 송신), 어느 값을 메트릭으로 할지는 FR-12가 정한다. ADR §8도 같은 내용으로 고쳤다.
 
 ## 7. 내부 구조
 
@@ -203,8 +207,8 @@ netns 안 `ifb0`의 송신 바이트가 볼륨의 양방향 wire 바이트다. �
 1. **예산 검사는 Manual 풀에서만, 갱신에서는 한도를 올릴 때만 한다 (결정 7).** Auto 풀은 할당량 규칙(할당량 합 ≤ 풀 크기)이 같은 것을 지킨다. 그런데 반올림한 Auto 한도의 합은 총 처리량을 조금 넘을 수 있다(Premium 4 TiB 풀에 3 GiB 볼륨 341개 = 0.188 × 341 = 64.108 > 64). 그 값을 Auto → Manual 전환으로 옮겨 받은 풀에서도 한도를 줄이거나 같은 값으로 두는 PATCH·재PUT은 받아야 하므로, 예산을 더 쓰지 않는 갱신은 보지 않는다(`volumes._check_throughput_change`).
 2. **Manual 풀의 "크기 축소" 검사는 새 크기가 지금보다 작을 때만 한다 (결정 7, §4.2).** 같은 이유다. 태그·같은 크기 PATCH는 배정 합이 총 처리량을 넘는 상태를 새로 만들지 않는다. 문구의 두 수는 소수 셋째 자리로 반올림한 값이다(`capacity_pools._apply_changes`).
 3. **`utilizedThroughputMibps`는 소수 셋째 자리로 반올림한 float다.** 반올림하지 않으면 float 합의 오차가 응답에 보인다(0.062 + 0.188). 예산 비교도 셋째 자리에서 하고, 거절 문구의 남은 예산(`free`)은 0 밑으로 내려가지 않게 한다(옮겨 받은 풀은 합이 총량을 넘을 수 있다, 1번). `throughputMibps`도 float로 저장해 `10`은 `10.0`으로 응답한다.
-4. **Auto → Manual 채우기는 풀 PATCH 요청의 트랜잭션에서 볼륨 행에 쓴다 (결정 6).** 풀 PATCH 작업이 실패하면(풀 PATCH는 agent를 부르지 않으므로 지금은 결함 주입에서만) 워커가 풀만 이전 properties(Auto)로 되돌리고, 볼륨 행의 `throughputMibps`는 남는다. 값이 Auto 공식과 같아 한도는 바뀌지 않는다. 다만 그 볼륨 GET에 `throughputMibps`가 보이고, 그 본문을 그대로 재PUT하면 Auto 풀 거절(400)을 받는다. 주입 실패에서만 생기는 상태라 되돌리는 코드를 두지 않았다.
-5. **채운 Auto 값은 1 미만일 수 있다 (결정 3과의 충돌, 미결).** Standard 50 GiB = 0.781, Premium 1 GiB = 0.062처럼 Auto 한도는 1 MiB/s보다 작을 수 있다. 본문 규칙(1~4,500)은 요청 값만 보므로 전환은 되지만, 전환 뒤 GET 본문을 그대로 PUT하면 `400 InvalidRequestContent`다(`throughputMibps`를 빼거나 1 이상으로 바꾸면 된다). 실서비스가 이 경우 어떻게 하는지는 [미확인]이다.
+4. **Auto → Manual 채우기는 풀 PATCH 요청의 트랜잭션에서 볼륨 행에 쓴다 (결정 6).** 풀 PATCH 작업이 실패하면(풀 PATCH는 agent를 부르지 않으므로 지금은 결함 주입에서만) 워커가 풀만 이전 properties(Auto)로 되돌리고, 볼륨 행의 `throughputMibps`는 남는다. 값이 Auto 공식과 같아 한도는 바뀌지 않는다. 다만 그 볼륨 GET에 `throughputMibps`가 보이고, 그 본문을 그대로 재PUT하면 Auto 풀 거절(400)을 받는다. 주입 실패에서만 생기는 상태라 되돌리는 코드를 두지 않았다. **자동 채택(리더, 3단계): 그대로 둔다.** 풀 PATCH는 agent를 부르지 않고, 재시작 뒤에는 워커가 작업을 다시 돌려 성공시키므로 실제 운영 경로에서는 생기지 않는다. 한도도 바뀌지 않는다. 버린 대안: 실패 되돌리기에서 볼륨 행도 지우기(주입 전용 상태를 위한 코드), Auto 풀 볼륨 응답에서 값 숨기기(볼륨 본문이 풀을 읽어야 한다).
+5. **채운 Auto 값은 1 미만일 수 있다 (결정 3과의 충돌, 미결).** Standard 50 GiB = 0.781, Premium 1 GiB = 0.062처럼 Auto 한도는 1 MiB/s보다 작을 수 있다. 본문 규칙(1~4,500)은 요청 값만 보므로 전환은 되지만, 전환 뒤 GET 본문을 그대로 PUT하면 `400 InvalidRequestContent`다(`throughputMibps`를 빼거나 1 이상으로 바꾸면 된다). 실서비스가 이 경우 어떻게 하는지는 [미확인]이다. **자동 채택(리더, 3단계): 갱신(PUT·PATCH)에서 저장된 값과 같은 값(셋째 자리 비교)이면 1~4,500 범위를 보지 않는다.** 범위 검사는 값을 바꿀 때만 한다. 새 볼륨 생성은 지금대로 1~4,500이다. 이유: ARM 클라이언트(Terraform, Bicep, `az` 재배포)는 GET 본문을 그대로 다시 PUT하므로, 바뀌지 않은 값이 거절되면 전환한 풀의 볼륨을 재배포할 수 없다. 기본 최소 크기(50 GiB)의 Standard 볼륨도 0.781이라 검증 전용 크기만의 문제가 아니다. 버린 대안: (a) 지금대로 400(위 이유), (c) 전환할 때 1로 올림(전환이 한도를 말없이 바꾼다. 결정 6 "직전 한도를 채운다"와 어긋난다).
 6. **`throughputMibps: null`은 없는 것으로 본다** (스펙 `x-nullable`). Manual 풀 생성에서는 필수 거절(결정 3), Auto 풀에서는 무시, 갱신에서는 바꾸지 않음이다. e2e의 `vol_body(..., throughputMibps=None)`이 이 규칙으로 Auto 풀 볼륨을 만든다.
 7. **`pool_body(res, volumes)`가 자식 볼륨 행을 받는다 (§7 "구현자가 정한다").** `arm_app`이 `store.list_children(res.id, VOLUME_TYPE)`을 넘기는 감싼 함수를 풀 본문으로 등록한다. 한도 공식 `volume_throughput_mibps`는 `capacity_pools`에 두고 `volumes`가 가져다 쓴다(순환 import 없음). 지금의 `volumes.actual_throughput_mibps`는 이것으로 바꿨다.
 8. **준비 스크립트: `ip`·`tc` 확인을 더하고 클라이언트 이미지(`anf-nfs-client`)에 fio를 넣었다 (결정 19).** 준비 스크립트를 다시 돌려 이미지를 다시 만들었다. `ifb` 모듈은 결정 14대로 agent 시작 검사(`check_host`)가 올린다.

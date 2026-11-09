@@ -343,7 +343,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 - **메트릭 (Prometheus 형식).**
   - anf-api: 요청 수와 지연 시간(경로 템플릿, 메서드, 상태 코드별), 작업 수와 소요 시간(종류, 결과별), 진행 중 작업 수
   - storage agent: 볼륨 사용량(파일시스템에서 읽은 실제 값), 스냅샷 수, 볼륨별 처리량과 IOPS, knfsd 전체 통계(`/proc/net/rpc/nfsd`)
-  - 볼륨별 처리량은 볼륨 인스턴스 netns 안 `ifb0`의 송신 바이트에서 얻을 수 있다 (D-12, §7.3). 호스트에서 `/proc/<인스턴스 pid>/net/dev`로 읽거나 `nsenter … tc -s class show dev ifb0`의 Sent bytes로 읽는다. 양방향 wire 바이트라 헤더를 포함해 데이터보다 4.5% 남짓 크다 (S7).
+  - 볼륨별 처리량은 볼륨 인스턴스 netns 안의 카운터에서 얻는다 (D-12, §7.3). 값이 다른 둘이 있다. 호스트에서 `/proc/<인스턴스 pid>/net/dev`로 읽는 `ifb0` 송신 바이트는 skb 길이라 데이터 바이트에 가깝다(0.5% 안팎 크다). `nsenter … tc -s class show dev ifb0`의 HTB Sent 바이트는 GSO 묶음을 세그먼트마다 헤더를 더해 센 wire 바이트이고, 한도가 이 값에 걸린다. `ifb0` 송신보다 4.2~4.4% 크다 (S7, FR-08 e2e). 어느 값을 메트릭으로 할지는 FR-12에서 정한다.
   - 메트릭 이름을 ANF의 Azure Monitor 메트릭과 어떻게 대응시킬지는 FR-12 조사에서 정한다.
 - **로그.** JSON 구조 로그를 쓴다. ARM 관례인 `x-ms-request-id`, `x-ms-correlation-request-id` 헤더를 받거나 새로 만든다. 그 값을 워커와 storage agent 호출까지 넘긴다.
 - **대시보드.** 리소스는 anf-api에서, 시계열은 Prometheus 쿼리 API에서 읽는다 (D-08).

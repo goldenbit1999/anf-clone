@@ -2,8 +2,8 @@
 
 - 상태: in_progress
 - FR: FR-08 (처리량 제한)
-- 마지막 완료 단계: 2
-- 재개할 단계: 3 (구현, implementer `acadc68bbbccab96e`에 맡김)
+- 마지막 완료 단계: 2 (3단계 1차 보고 받음)
+- 재개할 단계: 3 (§9-5 구현과 AC-12 남은 회귀, implementer `acadc68bbbccab96e`)
 - 검증 대상 코드: (구현 뒤)
 - implementer 에이전트 ID: acadc68bbbccab96e (스파이크 S7부터, 구현도 같은 ID)
 - researcher 에이전트 ID: ae21e308facd1f3ae
@@ -34,3 +34,4 @@
 - 2026-11-09 단계 1 완료 — 브리프 `01_researcher_brief.md`(조사 상태 "한도 도달": 30턴 상한, 받은 원문으로 SendMessage 이어 쓰기). 미확인(Manual 풀 볼륨의 `throughputMibps` 생략 시 기본값, Auto 풀 볼륨에 보낸 값, 예산 초과 오류 코드, Auto→Manual 전환 뒤 기존 볼륨 값, Manual 풀 축소)은 설계를 막지 않고 클론 규칙으로 정한다. ONTAP 대응(fixed QoS policy, 볼륨 `qos.policy`)은 [추론]으로 채워졌다
 - 2026-11-09 스파이크 S7 조건부 통과 (`_workspace/spikes/S7.md`): 실제 인스턴스에서 T1n 동작, 인스턴스가 다시 뜰 때마다 tc를 다시 걸어야 함, 0.0625 MiB/s에서도 오류 없지만 같은 연결 메타데이터 1분 넘음, netns 안 `ifb0` 변형도 같은 결과
 - 2026-11-09 단계 2 완료 — 설계 `02_main_design.md`. 묻는 결정 없음, 결정 1~19 자동 채택(Auto+Manual 범위, 공식 그대로·하한 없음·셋째 자리 반올림, Manual `throughputMibps` 필수·1~4,500·예산 동기 400, Auto 풀 값 400, Auto→Manual 값 채우기, agent POST `qos.policy.max_throughput_mbps`, tc는 인스턴스 netns 안, `start`→걸기→`wait_ready`, 태그 `anf_qos`, rate ÷ 0.9564, fq_codel, 허용 오차 90~101%, 기존 데이터 e2e는 Manual 풀로). ADR §2.3·§7.3·§8·§10 S7·D-12 상태 갱신
+- 2026-11-09 단계 3 1차 보고 — 커밋 `9c0b84d`(agent), `540957d`(API), `b6d2711`(e2e), `38689e4`(§9). Windows 911 passed / 175 skipped, ruff 통과, WSL 통합 30 passed, FR-08 계약 e2e 7 passed, 데이터 e2e 7 passed. AC-12 회귀는 14개 파일 중 5개(계정·계정 결함·풀·풀 결함·볼륨 계약, 시간 FR-07과 같음)만 돌고 호스트 메모리 부족으로 실행기가 강제 종료됨(WSL page cache 6.8 GB). 리더 자동 채택: §9-5 갱신에서 같은 값이면 범위 검사 안 함, §9-4 그대로, AC-05 읽기. 카운터 문장(§6.3, ADR §8)을 고침. implementer에게 §9-5 구현과 남은 10개 파일 회귀(파일 사이 `drop_caches`)를 맡김
