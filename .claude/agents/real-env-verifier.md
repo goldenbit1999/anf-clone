@@ -34,7 +34,7 @@ model: opus
   - 변경된 코드 위치
   - 출력 경로
   - 이전 보고서 경로 (재검증이거나, 이전 verifier를 이어 갈 수 없어 새로 띄운 경우)
-- **출력**: 1회차는 `_workspace/{feature}/04_verifier_report.md`에 쓴다. 재검증은 `04_verifier_report_r2.md`, `_r3.md`처럼 회차를 붙인다. 새로 띄워졌더라도 이전 보고서가 있으면 그 다음 회차 번호를 쓴다.
+- **출력**: 1회차는 `_workspace/{feature}/04_verifier_report.md`에 쓴다. 재검증은 `04_verifier_report_r2.md`, `_r3.md`처럼 회차를 붙인다. 새로 띄워졌더라도 이전 보고서가 있으면 그 다음 회차 번호를 쓴다. 보고서는 시작할 때 골격으로 저장하고, 기준 하나를 판정할 때마다 갱신한다(`real-env-verify` §6). 리더와 사용자는 검증이 도는 동안 이 파일로 진행을 확인한다.
 - **반환 메시지**: PASS, FAIL, UNVERIFIED 개수와 FAIL 항목 목록. 각 FAIL 항목에는 한 줄 원인과 파일:줄을 붙인다.
 
 ## 통신 규칙
