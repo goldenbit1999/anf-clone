@@ -441,3 +441,156 @@ def test_nfs41_instance_restarts_with_client_records(mgr, vol, long_client):
     wrote = client(ip, token, "4.1", "echo three >> /m/f && cat /m/f")
     assert wrote.returncode == 0, wrote.stderr
     assert wrote.stdout.split() == ["one", "two", "three"]
+
+
+# --- 스냅샷에서 새 볼륨 (복원 설계 §6.2, 결정 5~11) ---
+
+
+@pytest.fixture
+def vol2(mgr):
+    vid = str(uuid.uuid4())
+    yield vid, f"it-{vid[:8]}"
+    mgr.delete(vid)
+
+
+def at(path, script):
+    """호스트에서 path 안에 쓴다 (원본 볼륨 준비)."""
+    result = sh("sh", "-c", f"cd {path} && {script}")
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout
+
+
+def clone_tags(vid):
+    return [t for t in volume_tags(vid) if t.startswith("anf_cl_")]
+
+
+def fs_size(path):
+    st = os.statvfs(path)
+    return st.f_blocks * st.f_frsize
+
+
+def source_with_two_snapshots(mgr, vid, token, protocol):
+    """a=zero, d/b → s0 → a=one → s1 → a=two, d/b 지움, c, 루트 0750. s1의 uuid와 레코드를 돌려준다."""
+    mp = ROOT / "ns" / token
+    mgr.create(vid, f"/{token}", GIB, 770, protocol)
+    at(mp, "echo zero > a && mkdir d && echo b > d/b")
+    mgr.create_snapshot(vid, str(uuid.uuid4()), "s0")
+    at(mp, "echo one > a")
+    s1 = str(uuid.uuid4())
+    mgr.create_snapshot(vid, s1, "s1")
+    at(mp, "echo two > a && rm d/b && echo c > c && chmod 0750 .")
+    return s1, mgr.snapshot_record(vid, s1)
+
+
+@pytest.mark.parametrize("protocol", ["nfs3", "nfs4.1"])
+def test_volume_from_snapshot_has_its_content_and_is_independent(mgr, vol, vol2, protocol):
+    vid, token = vol
+    nid, ntoken = vol2
+    mp, nmp = ROOT / "ns" / token, ROOT / "ns" / ntoken
+    vers = VERSION[protocol]
+    s1, source = source_with_two_snapshots(mgr, vid, token, protocol)
+    ip = mgr.record(vid)["data_lif"]["ip"]["address"]
+
+    mgr.create(nid, f"/{ntoken}", GIB, 755, protocol, clone=(vid, s1))
+
+    record = mgr.record(nid)
+    nip = record["data_lif"]["ip"]["address"]
+    assert (record["state"], record["size"], record["nas"]) == (
+        "online", GIB, {"path": f"/{ntoken}", "protocols": [protocol]})
+    assert nip != ip
+    assert clone_tags(nid) == []  # 진행 표시를 지웠다
+    lv = sh("lvs", "--noheadings", "-o", "lv_attr,origin", "anf/vol_" + nid.replace("-", "")).stdout.split()
+    assert lv[0].startswith("Vwi") and lv[1] == "snap_" + s1.replace("-", "")  # 원본 스냅샷의 쓰기 가능 thin 스냅샷
+    # base 스냅샷: 원본 스냅샷의 이름과 시각, 새 uuid (결정 7)
+    bases = mgr.snapshot_records(nid)
+    assert [(b["name"], b["create_time"]) for b in bases] == [("s1", source["create_time"])]
+    assert bases[0]["uuid"] != s1
+    assert "i" in sh("lsattr", "-d", str(nmp / ".snapshot")).stdout.split()[0]
+
+    # 내용은 s1이다: 그 뒤의 덮어쓰기·지우기·새 파일이 없고, 원본의 다른 스냅샷(s0) 마운트 지점도 없다 (결정 8).
+    # 루트 권한은 원본 스냅샷의 0770이 아니라 요청 값이다 (결정 11)
+    read = client(nip, ntoken, vers, "cat /m/a /m/d/b && ls -A /m && ls -A /m/.snapshot && cat /m/.snapshot/s1/a "
+                                     "&& stat -c %a /m")
+    assert read.returncode == 0, read.stdout + read.stderr
+    assert read.stdout.split() == ["one", "b", ".snapshot", "a", "d", "s1", "one", "755"]
+
+    # 새 볼륨에 쓰고 지워도 원본과 두 볼륨의 스냅샷은 그대로다
+    watched = [mp / "a", mp / ".snapshot" / "s1" / "a", nmp / ".snapshot" / "s1" / "a",
+               nmp / ".snapshot" / "s1" / "d" / "b"]
+    before = [sha256(p) for p in watched]
+    wrote = client(nip, ntoken, vers, "echo new > /m/a && rm -r /m/d && echo e > /m/e")
+    assert wrote.returncode == 0, wrote.stdout + wrote.stderr
+    assert [sha256(p) for p in watched] == before
+    assert sorted(os.listdir(mp)) == [".snapshot", "a", "c", "d"]
+    # 원본에 써도 새 볼륨은 그대로다
+    at(mp, "echo three > a && echo f > f")
+    read = client(nip, ntoken, vers, "cat /m/a && ls -A /m")
+    assert read.stdout.split() == ["new", ".snapshot", "a", "e"], read.stdout + read.stderr
+    # base 스냅샷 안에서는 쓸 수 없다
+    tried = client(nip, ntoken, vers,
+                   "; ".join(f'{c} 2>/dev/null && echo "ALLOWED: {c}"' for c in SNAPSHOT_WRITES) + "; true")
+    assert "ALLOWED" not in tried.stdout, tried.stdout
+
+    # 원본 볼륨을 지워도 새 볼륨은 남고, base 스냅샷으로 되돌릴 수 있다 (결정 9, S6 I)
+    mgr.delete(vid)
+    assert mgr.record(nid)["state"] == "online"
+    mgr.restore(nid, bases[0]["uuid"], str(uuid.uuid4()))
+    read = client(nip, ntoken, vers, "cat /m/a /m/d/b && ls -A /m/.snapshot")
+    assert read.returncode == 0, read.stdout + read.stderr
+    assert read.stdout.split() == ["one", "b", "s1"]
+
+
+def test_volume_from_snapshot_can_be_larger_and_keeps_its_size(mgr, vol, vol2):
+    vid, token = vol
+    nid, ntoken = vol2
+    nmp = ROOT / "ns" / ntoken
+    s1, _ = source_with_two_snapshots(mgr, vid, token, "nfs3")
+    with pytest.raises(VolumeError, match="is smaller than snapshot"):
+        mgr.create(nid, f"/{ntoken}", GIB // 2, 770, "nfs3", clone=(vid, s1))
+    assert mgr.record(nid) is None
+
+    mgr.create(nid, f"/{ntoken}", 2 * GIB, 770, "nfs3", clone=(vid, s1))
+
+    assert mgr.record(nid)["size"] == 2 * GIB
+    assert fs_size(nmp) > 1.5 * GIB  # ext4도 늘었다 (결정 4)
+    assert sh("fallocate", "-l", str(3 * GIB // 2), str(nmp / "big")).returncode == 0
+    (nmp / "big").unlink()
+    # base 스냅샷은 늘린 뒤에 찍었다: 되돌려도 크기가 줄지 않는다 (S6 B2)
+    base = mgr.snapshot_records(nid)[0]["uuid"]
+    mgr.restore(nid, base, str(uuid.uuid4()))
+    assert mgr.record(nid)["size"] == 2 * GIB
+    assert fs_size(nmp) > 1.5 * GIB
+
+
+@pytest.mark.parametrize("fail, finish", [
+    ("lvextend", "create"),  # 새 볼륨 LV만 만든 뒤
+    ("mount", "recover"),  # 늘린 뒤 마운트 전: 시작 복구는 건너뛰고 다음 POST가 끝낸다 (결정 10)
+    ("resize2fs", "create"),  # 마운트한 뒤 파일시스템을 늘리기 전
+    ("chmod", "create"),  # base 스냅샷을 찍은 뒤
+    ("lvchange", "create"),  # 인스턴스까지 띄운 뒤 진행 표시를 지우기 전
+])
+def test_volume_from_snapshot_resumes_after_stopping_midway(mgr, vol, vol2, fail, finish):
+    vid, token = vol
+    nid, ntoken = vol2
+    nmp = ROOT / "ns" / ntoken
+    s1, _ = source_with_two_snapshots(mgr, vid, token, "nfs3")
+    with pytest.raises(CommandError):
+        FlexVolManager(FailAt(fail)).create(nid, f"/{ntoken}", 2 * GIB, 755, "nfs3", clone=(vid, s1))
+    assert clone_tags(nid) != []  # 진행 표시가 남았다
+    with pytest.raises(VolumeError, match="still being created from snapshot"):
+        mgr.create_snapshot(nid, str(uuid.uuid4()), "s9")
+    if finish == "recover":
+        mgr.recover()
+        assert mgr.record(nid)["state"] == "offline"
+
+    mgr.create(nid, f"/{ntoken}", 2 * GIB, 755, "nfs3", clone=(vid, s1))
+
+    record = mgr.record(nid)
+    assert (record["state"], record["size"]) == ("online", 2 * GIB)
+    assert clone_tags(nid) == []
+    assert [b["name"] for b in mgr.snapshot_records(nid)] == ["s1"]  # base 스냅샷은 하나다
+    assert fs_size(nmp) > 1.5 * GIB
+    read = client(record["data_lif"]["ip"]["address"], ntoken, "3",
+                  "cat /m/a && ls -A /m/.snapshot && cat /m/.snapshot/s1/a && stat -c %a /m")
+    assert read.returncode == 0, read.stdout + read.stderr
+    assert read.stdout.split() == ["one", "s1", "one", "755"]

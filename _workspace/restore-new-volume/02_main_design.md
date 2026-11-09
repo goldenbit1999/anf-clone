@@ -168,4 +168,15 @@ stateDiagram-v2
 
 ## 9. 구현 중 변경
 
-(3단계에서 채운다)
+3단계(구현)에서 설계와 달라졌거나 설계가 정하지 않은 것을 정한 기록이다.
+
+1. **스냅샷에서 만드는 생성 `201`만 두 헤더다 (결정 1, §4.1, AC-01).** 결정 1은 "일반 볼륨 PUT 그대로"라고 하면서 응답을 `Azure-AsyncOperation`/`Location`으로 적었는데, 지금 일반 볼륨 생성은 녹화 V1대로 `Azure-AsyncOperation`만 붙인다(볼륨 설계 §4.1). 두 녹화가 다르다: V1(일반 생성)은 한 헤더, R4(스냅샷에서 생성, 엔트리 43~49)는 두 헤더다. §4.1 표와 AC-01이 두 헤더를 요구하므로 `snapshotId`가 있는 생성만 두 헤더(`_tracking_headers`)로 하고, 일반 생성과 모든 갱신(`200`)은 그대로 둔다(`arm_app.put_volume`). 일반 생성까지 바꾸면 확정된 볼륨 계약(V1)이 바뀐다.
+2. **agent의 되돌리기도 진행 표시가 있으면 거절한다** (§6.2는 스냅샷 생성·삭제만). 되돌리기는 볼륨 LV를 고른 스냅샷의 새 LV로 바꾸는데, 그 LV는 볼륨 태그만 갖고 진행 표시가 없어 남은 클론 단계(base 스냅샷, 권한, 진행 표시 지우기)를 잃는다. anf-api는 끝나지 않은 새 볼륨(`Creating`은 진행 중 작업, `Failed`는 상태)의 revert를 이미 거절하지만 agent도 스스로 지킨다. 세 거절이 같은 문구다: "volume X is still being created from snapshot Y; POST the volume again to finish it".
+3. **파일시스템 크기 단계(§6.2 4)는 비교 없이 늘 `resize2fs <장치>`를 부른다.** ext4가 이미 LV 크기면 아무것도 하지 않고 종료 코드 0이다(같은 크기 통합 테스트에서 확인, S6 Z는 0.04 s). ext4 크기를 읽어 비교하려면 `dumpe2fs` 출력을 파싱해야 해서 단계가 늘어난다. 늘린 뒤 `resize2fs` 전에 멈춘 경우도 이 한 줄이 덮는다.
+4. **base 스냅샷 uuid는 `FlexVolManager.new_uuid`(기본 `uuid4`)로 정한다.** 단위 테스트가 값을 고정하려는 것이다. 결정 7대로 agent가 정하고 anf-api는 생성 뒤 스냅샷 목록에서 읽는다.
+5. **anf-api가 저장하는 `snapshotId`는 저장된 스냅샷 리소스의 ID다.** 요청의 대소문자가 달라도(ARM ID는 대소문자를 구분하지 않는다) 응답과 `originatingResourceId`에는 저장된 ID가 나온다. 되돌리기 작업 입력과 같은 방식이다. `snapshotId: null`은 스펙(`x-nullable: true`)대로 없는 것으로 본다.
+6. **base 스냅샷 행과 `originatingResourceId`는 처리기의 한 트랜잭션에서 쓴다.** 기존 "agent에 없는 스냅샷 행 지우기"(되돌리기 §9 5번) 뒤에 한다. 행은 `put_resource`(upsert)라 워커가 끝내기 전에 죽어 같은 작업을 다시 실행해도 겹치지 않는다. 행의 `location`은 새 볼륨의 것, `tags`는 비어 있다. 처리기는 `originatingResourceId`가 없는 동안만 agent에 `clone`을 넘긴다: 끝난 볼륨의 재PUT은 일반 보장이다.
+7. **`StorageClient.snapshot_records()`를 더했다** (§7의 "새 볼륨 스냅샷 레코드 읽기"). 기존 `snapshot_uuids()`는 이것 위에서 uuid만 고른다.
+8. **원본 보호 검사(`snapshots.ensure_not_cloning`)는 한 함수를 세 곳이 부른다**: 스냅샷 DELETE(되돌리기 중 검사 뒤), 볼륨 DELETE와 revert(진행 중 작업 검사 바로 뒤). 대상 ID가 원본 스냅샷이거나 원본 볼륨(`<볼륨 ID>/snapshots/`로 시작)이면 409다. 원본 볼륨의 다른 스냅샷 DELETE, 원본 스냅샷 재PUT, 원본 볼륨 PATCH는 막지 않는다(새 볼륨 생성을 깨지 않는다).
+9. **agent 단위 테스트의 가짜 호스트가 `chattr +i`를 파일시스템마다 기억한다.** 스냅샷에서 만든 LV가 원본의 `+i`를 물려받는 것(S6 D4)을 단위 층에서 재현하려는 것이다. 제품 코드에는 영향이 없다.
+10. 계약 테스트 파일은 `tests/contract/test_restore_new_volume_api.py`다. 다른 계약 테스트의 가짜 agent는 `ensure_volume(..., clone=None)` 키워드만 더했다. 통합 테스트(`test_flexvol_linux.py`)는 내용·독립성·원본 삭제 뒤 base로 되돌리기(v3·v4.1), 더 큰 크기와 되돌린 뒤 크기 유지, 다섯 지점(LV만 만든 뒤, 늘린 뒤 마운트 전(시작 복구가 건너뜀), 마운트 뒤 `resize2fs` 전, base 스냅샷 뒤, 인스턴스 뒤 진행 표시 지우기 전)에서 멈춘 뒤 같은 POST로 끝내기를 확인한다.
