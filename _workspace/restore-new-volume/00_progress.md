@@ -2,8 +2,8 @@
 
 - 상태: in_progress
 - FR: FR-07 (스냅샷에서 새 볼륨으로 복원)
-- 마지막 완료 단계: 0
-- 재개할 단계: 1 (조사)와 스파이크 S6 병행
+- 마지막 완료 단계: 1
+- 재개할 단계: 2 (스파이크 S6 결과를 기다림)
 - 검증 대상 코드: (구현 뒤)
 - implementer 에이전트 ID: a41cc624ee346fccd (스파이크 S6부터)
 - researcher 에이전트 ID: a5124c3e4df55979d
@@ -30,3 +30,4 @@
 
 ## 이력
 - 2026-11-08 단계 0 완료 — 브랜치 `feature/restore-new-volume`. 조사와 스파이크 S6를 함께 시작
+- 2026-11-08 단계 1 완료 — 브리프 `01_researcher_brief.md` (조사 상태 완료). researcher가 30턴 상한에 닿았지만 브리프는 다 썼다. 미확인(다른 풀·프로토콜 허용, 크기 하한, 거절 오류 코드, `deleteBaseSnapshot` 대상)은 설계를 막지 않고 클론 규칙으로 정한다. ONTAP 대응(FlexClone + split)은 [추론]으로 채워졌다
