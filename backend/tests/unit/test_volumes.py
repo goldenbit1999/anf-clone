@@ -162,8 +162,10 @@ def test_mount_targets_are_shown_once_recorded(store):
     {"securityStyle": "Unix"},
     {"kerberosEnabled": False, "ldapEnabled": False, "isLargeVolume": False, "coolAccess": False},
     {"throughputMibps": None, "snapshotId": None, "backupId": None},
+    {"deleteBaseSnapshot": False},
     {"exportPolicy": {"rules": [default_rule()]}},
-    {"provisioningState": "Succeeded", "actualThroughputMibps": 1.0, "mountTargets": []},
+    {"provisioningState": "Succeeded", "actualThroughputMibps": 1.0, "mountTargets": [],
+     "originatingResourceId": "x"},
 ])
 def test_create_accepts_values_the_clone_supports(store, props):
     created, res, _ = put(store, body(**props))
@@ -210,7 +212,7 @@ def test_malformed_body_is_invalid_request_content(store, b):
     {"exportPolicy": {"rules": [{**default_rule(), "allowedClients": "10.0.0.0/24"}]}},
     {"throughputMibps": 10.0},
     {"snapshotDirectoryVisible": False},
-    {"snapshotId": "snap1"},
+    {"deleteBaseSnapshot": True},
     {"backupId": "b1"},
     {"dataProtection": {}},
     {"kerberosEnabled": True},
@@ -474,6 +476,11 @@ class FakeStorage:
         self.calls: list[tuple] = []
         self.error: Exception | None = None
         self.remaining: set[str] = set()  # agent에 있는 스냅샷 uuid (되돌린 뒤 남은 것)
+        self.records: list[dict] = []  # agent에 있는 스냅샷 레코드 (스냅샷에서 만든 볼륨의 base 스냅샷)
+
+    async def snapshot_records(self, uuid, correlation_id=None):
+        self.calls.append(("snapshot_records", uuid, correlation_id))
+        return self.records
 
     async def revert_volume(self, uuid, snapshot_uuid, request_uuid, correlation_id=None):
         self.calls.append(("revert", uuid, snapshot_uuid, request_uuid, correlation_id))
@@ -485,8 +492,8 @@ class FakeStorage:
         self.calls.append(("snapshots", uuid, correlation_id))
         return self.remaining
 
-    async def ensure_volume(self, *args, correlation_id=None):
-        self.calls.append(("ensure", *args, correlation_id))
+    async def ensure_volume(self, *args, correlation_id=None, clone=None):
+        self.calls.append(("ensure", *args, correlation_id, clone))
         if self.error:
             raise self.error
         return self.ip
@@ -517,7 +524,7 @@ def test_create_ensures_the_volume_and_records_the_mount_target(store):
 
     assert run_operation(store, storage, op).status == "Succeeded"
 
-    assert storage.calls == [("ensure", fsid, "/vol1", 2 * GIB, 1777, "nfs4.1", "corr-1")]
+    assert storage.calls == [("ensure", fsid, "/vol1", 2 * GIB, 1777, "nfs4.1", "corr-1", None)]
     props = volumes.volume_body(store.get_resource(res.id))["properties"]
     assert props["provisioningState"] == "Succeeded"
     assert props["mountTargets"] == [{"mountTargetId": fsid, "fileSystemId": fsid, "ipAddress": "172.30.0.129"}]
@@ -759,3 +766,263 @@ def test_volume_put_drops_the_snapshots_the_agent_no_longer_has(store):
     assert ("snapshots", v.properties["fileSystemId"], "corr-1") in storage.calls
     assert [s.name for s in store.list_children(v.id, snapshots.SNAPSHOT_TYPE)] == ["s1", "s3", "s4"]
     assert store.get_resource(gone.id) is None
+
+
+# --- 스냅샷에서 새 볼륨 (FR-07, 복원 설계 §4) ---
+
+VOL2 = POOL + "/volumes/vol2"
+SNAPSHOT_ID_FORMAT = (
+    "The 'properties.snapshotId' property must be a snapshot resource ID: /subscriptions/{id}/resourceGroups/{group}"
+    "/providers/Microsoft.NetApp/netAppAccounts/{account}/capacityPools/{pool}/volumes/{volume}/snapshots/{snapshot}.")
+
+
+def source(store, **kw):
+    """원본 볼륨 vol1(기본 100 GiB, NFSv3, 0770)과 스냅샷 s1."""
+    v = create(store, **kw)
+    return v, make_snapshot(store, "s1")
+
+
+def put_from(store, snapshot_id, name="vol2", pool="pool1", **props):
+    return put(store, body(token=name, snapshotId=snapshot_id, **props), name, pool)
+
+
+def set_state(store, rid, state):
+    with store.transaction() as tx:
+        res = tx.get_resource(rid)
+        res.provisioning_state = state
+        tx.put_resource(res)
+
+
+def test_create_from_snapshot_is_creating_with_the_snapshot_id(store):
+    v, s = source(store, protocolTypes=["NFSv4.1"], unixPermissions="0755")
+
+    created, res, op = put_from(store, s.id)
+
+    assert created and (op.action, op.status) == ("CREATE", "Creating")  # 일반 볼륨 생성과 같다 (결정 1)
+    props = volumes.volume_body(res)["properties"]
+    assert props["provisioningState"] == "Creating"
+    assert props["snapshotId"] == s.id
+    assert "originatingResourceId" not in props and "cloneProgress" not in props
+    assert props["fileSystemId"] != v.properties["fileSystemId"]
+    # 주지 않은 protocolTypes·unixPermissions는 원본 볼륨 값이다 (결정 3)
+    assert (props["protocolTypes"], props["unixPermissions"]) == (["NFSv4.1"], "0755")
+    assert props["exportPolicy"] == {"rules": [default_rule(nfsv3=False, nfsv41=True)]}
+
+
+def test_create_from_snapshot_in_another_pool_with_another_protocol(store):
+    # 같은 계정이면 어느 풀이든 된다. 서비스 수준은 자기 풀을 따른다 (결정 2·3)
+    _, s = source(store)
+    make_pool(store, "pool2", level="Standard")
+    _, res, _ = put_from(store, s.id.upper(), pool="pool2", protocolTypes=["NFSv4.1"], unixPermissions="0700")
+    props = res.properties
+    assert props["serviceLevel"] == "Standard"
+    assert (props["protocolTypes"], props["unixPermissions"]) == (["NFSv4.1"], "0700")
+    assert props["snapshotId"] == s.id  # 대소문자가 달라도 저장된 스냅샷 ID를 남긴다
+
+
+@pytest.mark.parametrize("value", [5, "s1", VOL, VOL + "/snapshots/s1/x", SUBNET])
+def test_snapshot_id_must_be_a_snapshot_resource_id(store, value):
+    source(store)
+    e = arm_error(put_from, store, value, pool="nopool")  # 본문 검사가 풀 검사보다 먼저다 (결정 13)
+    assert (e.status, e.code, e.message) == (400, "InvalidRequestContent", SNAPSHOT_ID_FORMAT)
+    assert store.get_resource(POOL + "/volumes/vol2") is None
+
+
+def test_delete_base_snapshot_must_be_a_boolean(store):
+    _, s = source(store)
+    e = arm_error(put_from, store, s.id, deleteBaseSnapshot="yes")
+    assert (e.status, e.code) == (400, "InvalidRequestContent")
+
+
+@pytest.mark.parametrize("other", [
+    VOL.replace("acc1", "acc2") + "/snapshots/s1",
+    VOL.replace("rg1", "rg2") + "/snapshots/s1",
+    VOL.replace("/subscriptions/s1/", "/subscriptions/s2/") + "/snapshots/s1",
+])
+def test_snapshot_of_another_account_is_bad_request(store, other):
+    source(store)
+    e = arm_error(put_from, store, other)
+    assert (e.status, e.code, e.message) == (
+        400, "BadRequest", f"The snapshot '{other}' must be in the same NetApp account as the new volume '{VOL2}'.")
+    assert store.active_operations() == []
+
+
+def test_missing_snapshot_is_404_with_the_snapshot_wording(store):
+    source(store)
+    e = arm_error(put_from, store, VOL + "/snapshots/nosuch")
+    assert (e.status, e.code) == (404, "ResourceNotFound")
+    assert e.message.startswith("The requested snapshot 'nosuch' was not found on the volume 'acc1/pool1/vol1'.")
+
+
+def test_operation_in_progress_on_the_snapshot_or_its_volume_is_409(store):
+    v = create(store)
+    busy = make_snapshot(store, "s1", status=None)  # 생성 작업이 열려 있다
+    e = arm_error(put_from, store, busy.id)
+    assert (e.status, e.code, e.message) == (
+        409, "Conflict", f"Cannot create volume '{VOL2}' from snapshot '{busy.id}' because an operation is in "
+                         f"progress on '{busy.id}'. Wait until it is finished, and then retry.")
+    finish(store, store.active_operations()[0])
+    patch(store, {"tags": {"a": "b"}})  # 원본 볼륨에 Patching 작업
+    e = arm_error(put_from, store, busy.id)
+    assert (e.status, e.code) == (409, "Conflict")
+    assert f"because an operation is in progress on '{v.id}'." in e.message
+
+
+def test_snapshot_not_succeeded_is_bad_request(store):
+    create(store)
+    s = make_snapshot(store, "s1", status="Failed")
+    e = arm_error(put_from, store, s.id)
+    assert (e.status, e.code, e.message) == (
+        400, "BadRequest", f"Volume cannot be created from snapshot '{s.id}' because the snapshot isn't in state "
+                           "succeeded.")
+
+
+def test_source_volume_not_succeeded_is_bad_request(store):
+    v, s = source(store)
+    set_state(store, v.id, "Failed")
+    e = arm_error(put_from, store, s.id)
+    assert (e.status, e.code, e.message) == (
+        400, "BadRequest", f"Volume cannot be created from snapshot '{s.id}' because its volume isn't in state "
+                           "succeeded.")
+
+
+def test_new_volume_must_be_at_least_the_source_size(store):
+    # ext4 축소는 오프라인뿐이다. 같거나 크면 된다 (결정 4)
+    _, s = source(store)
+    e = arm_error(put_from, store, s.id, size=50 * GIB)
+    assert (e.status, e.code, e.message) == (
+        400, "BadRequest", "The 'properties.usageThreshold' of a volume created from a snapshot must be at least the "
+                           "source volume's 100 GiB.")
+    put_from(store, s.id, size=200 * GIB)
+
+
+def test_new_volume_reserves_its_quota_in_its_pool(store):
+    _, s = source(store, size=3 * TIB)
+    e = arm_error(put_from, store, s.id, size=3 * TIB)
+    assert (e.status, e.code, e.message) == (400, "BadRequest", "Pool size too small for total volume size.")
+
+
+def restored(store, storage=None, **props):
+    """vol1의 s1에서 vol2를 만들고 생성 작업을 처리기로 끝낸다."""
+    _, s = source(store)
+    _, res, op = put_from(store, s.id, **props)
+    run_operation(store, storage or FakeStorage(), op)
+    return store.get_resource(res.id), s
+
+
+def test_snapshot_id_cannot_change(store):
+    n, s = restored(store)
+    other = make_snapshot(store, "s2")
+    for fn in (put, patch):
+        e = arm_error(fn, store, body(token="vol2", snapshotId=other.id), "vol2")
+        assert (e.status, e.code, e.message) == (400, "BadRequest", "SnapshotId cannot be changed.")
+    # 같은 값(대소문자 무시)은 받는다 (결정 12)
+    created, _, op = put(store, body(token="vol2", snapshotId=s.id.upper()), "vol2")
+    assert (created, op.action) == (False, "UPDATE")
+
+
+def test_snapshot_id_cannot_be_added_to_an_existing_volume(store):
+    _, s = source(store)
+    for fn in (put, patch):
+        e = arm_error(fn, store, body(snapshotId=s.id))
+        assert (e.status, e.code, e.message) == (400, "BadRequest", "SnapshotId cannot be changed.")
+
+
+def test_put_back_the_get_body_of_a_restored_volume(store):
+    # originatingResourceId는 읽기 전용이라 무시하고, snapshotId는 같은 값이다
+    n, _ = restored(store)
+    b = volumes.volume_body(n)
+    for key in ("id", "name", "type"):
+        b.pop(key)
+    created, _, _ = put(store, b, "vol2")
+    assert created is False
+
+
+def test_create_handler_clones_and_records_the_base_snapshot(store):
+    storage = FakeStorage()
+    storage.records = [{"uuid": "5b000000-0000-4000-8000-000000000001", "name": "s1",
+                        "create_time": "2026-11-08T23:07:12Z", "volume": {"uuid": "x"}}]
+    v, s = source(store, unixPermissions="0755")
+    _, res, op = put_from(store, s.id)
+    fsid = res.properties["fileSystemId"]
+
+    assert run_operation(store, storage, op).status == "Succeeded"
+
+    # agent에 원본 볼륨 uuid와 원본 스냅샷 uuid를 넘긴다 (결정 14)
+    clone = (v.properties["fileSystemId"], s.properties["snapshotId"])
+    assert storage.calls == [("ensure", fsid, "/vol2", 100 * GIB, 755, "nfs3", "corr-1", clone),
+                             ("snapshot_records", fsid, "corr-1")]
+    props = volumes.volume_body(store.get_resource(res.id))["properties"]
+    assert props["provisioningState"] == "Succeeded"
+    assert props["originatingResourceId"] == s.id  # 끝나면 같은 ARM ID (결정 1)
+    assert props["mountTargets"] == [{"mountTargetId": fsid, "fileSystemId": fsid, "ipAddress": "172.30.0.129"}]
+    # base 스냅샷 행: Creating을 거치지 않고 Succeeded로 생긴다 (결정 7)
+    base = store.list_children(res.id, snapshots.SNAPSHOT_TYPE)
+    assert [b.id for b in base] == [VOL2 + "/snapshots/s1"]
+    assert base[0].provisioning_state == "Succeeded"
+    assert snapshots.snapshot_body(base[0])["properties"] == {
+        "provisioningState": "Succeeded", "snapshotId": "5b000000-0000-4000-8000-000000000001",
+        "created": "2026-11-08T23:07:12Z"}
+    assert (base[0].location, base[0].tags) == ("westus2", {})
+
+
+def test_failed_clone_keeps_protecting_the_source_and_put_finishes_it(store):
+    storage = FakeStorage()
+    storage.error = RuntimeError("agent job failed")
+    n, s = restored(store, storage)
+    assert n.provisioning_state == "Failed"
+    assert "originatingResourceId" not in n.properties
+    assert store.list_children(n.id, snapshots.SNAPSHOT_TYPE) == []
+    # 같은 PUT이 agent에서 남은 단계를 끝낸다 (결정 10). 그때도 클론 필드를 넘긴다
+    storage.error = None
+    _, _, op = put(store, body(token="vol2"), "vol2")
+    assert run_operation(store, storage, op).status == "Succeeded"
+    assert storage.calls[-2][-1] == (store.get_resource(VOL).properties["fileSystemId"], s.properties["snapshotId"])
+    assert store.get_resource(n.id).properties["originatingResourceId"] == s.id
+
+
+def test_finished_restored_volume_is_ensured_as_an_ordinary_volume(store):
+    # originatingResourceId가 있으면 원본을 찾지 않는다. 원본이 지워졌어도 다시 PUT할 수 있다
+    storage = FakeStorage()
+    n, s = restored(store, storage)
+    store_delete(store, s)
+    storage.calls.clear()
+    _, _, op = put(store, body(token="vol2"), "vol2")
+    assert run_operation(store, storage, op).status == "Succeeded"
+    assert storage.calls[0][-1] is None
+    assert "snapshot_records" not in [c[0] for c in storage.calls]
+
+
+def store_delete(store, res):
+    with store.transaction() as tx:
+        tx.delete_resource(res.id)
+
+
+PROTECTED = ("Cannot {} '{}' because volume '" + VOL2 + "' is being created from snapshot '{}'. Wait until it is "
+             "created, or delete it, and then retry.")
+
+
+@pytest.mark.parametrize("state", ["Creating", "Failed"])
+def test_source_volume_cannot_be_deleted_or_reverted_until_the_new_volume_is_created(store, state):
+    # 원본 보호 (결정 9): 새 볼륨이 한 번도 Succeeded가 되지 않은 동안
+    v, s = source(store)
+    _, _, op = put_from(store, s.id)
+    if state == "Failed":
+        finish(store, op, "Failed")
+    e = arm_error(delete, store)
+    assert (e.status, e.code, e.message) == (409, "Conflict", PROTECTED.format("delete", v.id, s.id))
+    e = arm_error(revert, store, {"snapshotId": s.id})
+    assert (e.status, e.code, e.message) == (409, "Conflict", PROTECTED.format("revert", v.id, s.id))
+    assert store.get_resource(v.id).provisioning_state == "Succeeded"
+
+
+def test_source_is_free_once_the_new_volume_is_created_or_deleted(store):
+    restored(store)  # vol1의 s1에서 만든 vol2가 끝났다
+    assert revert(store, {"snapshotId": VOL + "/snapshots/s1"}).status == "Reverting"
+    # 끝나지 않은 새 볼륨을 지우면 보호가 풀린다
+    create(store, "vol3", token="vol3")
+    t1 = make_snapshot(store, "t1", volume="vol3")
+    _, res, op = put_from(store, t1.id, name="vol4")
+    finish(store, op, "Failed")
+    store_delete(store, res)
+    assert volumes.delete_volume(store, "s1", "rg1", "acc1", "pool1", "vol3", None).status == "Deleting"

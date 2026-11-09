@@ -29,7 +29,7 @@ class FakeStorage:
         self.calls: list[tuple] = []
         self.error: Exception | None = None
 
-    async def ensure_volume(self, *args, correlation_id=None):
+    async def ensure_volume(self, *args, correlation_id=None, clone=None):
         self.calls.append(("ensure", *args, correlation_id))
         if self.error:
             raise self.error

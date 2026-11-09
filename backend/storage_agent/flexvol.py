@@ -1,11 +1,12 @@
 """볼륨 관리자: ONTAP FlexVol을 dm-thin thin LV + ext4로 재현한다 (ADR D-11·D-12, 볼륨 설계 결정 5~10, 17, 18,
-스냅샷 설계 결정 2·5~8·13·14).
+스냅샷 설계 결정 2·5~8·13·14, 복원 설계 결정 4~11).
 
 ONTAP과의 대응:
 - aggregate = 씬 풀 `anf/aggr0`. 스토리지 루트의 희소 파일 → 루프 장치 → VG `anf`
 - FlexVol = thin LV `vol_<uuid 32자리>` + ext4. junction path, uuid, IP, 프로토콜은 LVM 태그에 둔다 (agent에는 DB가 없다)
 - Snapshot copy = 읽기 전용 thin 스냅샷 LV `snap_<uuid 32자리>`. 이름, 볼륨, 만든 시각도 LVM 태그에 둔다.
   WAFL처럼 블록을 공유하고 바뀐 블록만 새로 쓴다(dm-thin). 공간은 볼륨 할당량이 아니라 씬 풀에서 나간다 (R-09)
+- FlexClone(스냅샷에서 새 볼륨) = 스냅샷 LV의 쓰기 가능 thin 스냅샷. 처음부터 split된 볼륨처럼 독립이다
 - SVM 네임스페이스 = `<root>/ns`. 볼륨은 `ns/<token>`에, 스냅샷은 `ns/<token>/.snapshot/<이름>`에 마운트되고,
   그 볼륨의 NFS 인스턴스가 `/<token>`과 스냅샷마다 `/<token>/.snapshot/<이름>`을 export한다
 - data LIF = 볼륨 인스턴스의 IP. agent가 VOLUME_IPS에서 골라 태그로 남긴다 (결정 18)
@@ -20,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from storage_agent.nfs_instance import VOLUME_IPS, NfsInstances
 from storage_agent.runner import CommandError
@@ -52,6 +54,19 @@ class _Restore:
 
 
 @dataclass(frozen=True)
+class _Clone:
+    """끝나지 않은 스냅샷에서 새 볼륨 만들기: 새 볼륨 LV의 `anf_cl_*` 태그 (복원 결정 10).
+    이름과 시각은 base 스냅샷에 쓴다. 원본 스냅샷이 사라져도 끝낼 수 있게 LV를 만들 때부터 갖는다."""
+
+    snapshot: str  # 원본 스냅샷 uuid
+    name: str
+    create_time: str
+
+    def tags(self) -> list[str]:
+        return [f"anf_cl_snap={self.snapshot}", f"anf_cl_name={self.name}", f"anf_cl_time={self.create_time}"]
+
+
+@dataclass(frozen=True)
 class _Volume:
     uuid: str
     token: str
@@ -61,6 +76,7 @@ class _Volume:
     protocol: str
     pending: _Restore | None = None  # 끝나지 않은 되돌리기
     restored: str | None = None  # 마지막으로 끝낸 되돌리기의 키 (`anf_rv_done`)
+    clone: _Clone | None = None  # 끝나지 않은 스냅샷에서 만들기
 
     @property
     def device(self) -> str:
@@ -78,6 +94,7 @@ class _Snapshot:
     lv: str
     create_time: str  # UTC ISO 8601
     thin_id: int = 0  # dm-thin 장치 id. 남은 것 중 최댓값 + 1이라 한 볼륨의 스냅샷끼리는 만든 순서다 (S5 L3)
+    size: int = 0  # 찍을 때의 볼륨 크기
 
     @property
     def device(self) -> str:
@@ -116,6 +133,7 @@ class FlexVolManager:
         self._image = Path(root) / "aggr0.img"
         self._aggregate_size = aggregate_size
         self.instances = NfsInstances(runner, self._ns, Path(root) / "exports", sleep)
+        self.new_uuid: Callable[[], str] = lambda: str(uuid4())  # agent가 정하는 uuid (base 스냅샷)
 
     # --- aggregate와 시작 복구 ---
 
@@ -139,7 +157,8 @@ class FlexVolManager:
         """agent 시작 때: aggregate를 붙이고, ns를 공유 마운트로 만들고, 파일시스템이 있는 볼륨과 그 스냅샷을
         마운트해 인스턴스를 띄운다. ns 바인드는 볼륨 마운트보다 먼저다. 나중에 바인드하면 그 아래의 기존 마운트를 가린다.
         인스턴스는 모두 띄운 뒤에 준비를 기다린다. 유예 기간을 기다리는 인스턴스가 여럿이어도 한 번만 기다리게 된다 (결정 14).
-        끝나지 않은 되돌리기는 인스턴스를 띄우기 전에 끝낸다. 인스턴스가 멈춰 있으니 입력 차단은 건너뛴다 (되돌리기 결정 4)."""
+        끝나지 않은 되돌리기는 인스턴스를 띄우기 전에 끝낸다. 인스턴스가 멈춰 있으니 입력 차단은 건너뛴다 (되돌리기 결정 4).
+        스냅샷에서 만들다 멈춘 볼륨은 mkfs 전 볼륨처럼 건너뛴다. 요청 크기와 권한이 태그에 없어 다음 POST가 끝낸다 (복원 결정 10)."""
         self.ensure_aggregate()
         self.instances.ensure_shared_ns()
         for vol in self._report()[1]:
@@ -148,7 +167,7 @@ class FlexVolManager:
         _, volumes, snapshots = self._report()
         started = []
         for vol in volumes:
-            if self._filesystem(vol) != "ext4":
+            if vol.clone is not None or self._filesystem(vol) != "ext4":
                 continue
             self._ensure_mounted(vol)
             self._ensure_snapshot_dir(vol)
@@ -163,10 +182,16 @@ class FlexVolManager:
 
     # --- 볼륨 ---
 
-    def create(self, uuid: str, junction_path: str, size: int, unix_permissions: int, protocol: str) -> None:
+    def create(self, uuid: str, junction_path: str, size: int, unix_permissions: int, protocol: str,
+               clone: tuple[str, str] | None = None) -> None:
         """(1) LV → (2) 파일시스템 → (3) 마운트 → (4) 루트 초기화 → (5) `.snapshot` → (6) export 파일 → (7) 인스턴스.
-        입력은 agent_app이 검사했다. 끝나지 않은 되돌리기가 있으면 그것부터 끝낸다 (되돌리기 결정 2·4)."""
-        vol = self._ensure_lv(uuid, junction_path[1:], size, protocol)
+        입력은 agent_app이 검사했다. 끝나지 않은 되돌리기가 있으면 그것부터 끝낸다 (되돌리기 결정 2·4).
+        clone = (부모 볼륨 uuid, 부모 스냅샷 uuid)면 그 스냅샷에서 만든다 (ONTAP FlexClone, 복원 §6.2). 진행 표시가 있는
+        볼륨은 clone과 상관없이 남은 단계를 이어서 하고, 진행 표시가 없는 볼륨에서는 clone을 무시한다 (복원 결정 10)."""
+        vol = self._ensure_lv(uuid, junction_path[1:], size, protocol, clone)
+        if vol.clone is not None:
+            self._finish_clone(vol, size, unix_permissions)
+            return
         if vol.pending is not None:
             vol = self._resume_restore(vol)
         fs = self._filesystem(vol)
@@ -183,6 +208,30 @@ class FlexVolManager:
         self._ensure_snapshot_dir(vol)
         self._write_exports(vol, [s for s in self._report()[2] if s.volume == uuid])
         self.instances.ensure(uuid, vol.token, vol.ip, vol.protocol)
+
+    def _finish_clone(self, vol: _Volume, size: int, unix_permissions: int) -> None:
+        """스냅샷에서 만드는 볼륨의 (2) 크기 → (3) 마운트 → (4) 파일시스템 크기 → (5) `.snapshot` 정리 → (6) base 스냅샷 →
+        (7) 루트 권한 → (8) export 파일·인스턴스 → (9) 진행 표시 지우기 (복원 §6.2). 파일시스템은 원본 스냅샷의 것이라
+        mkfs와 lost+found 초기화가 없다. 저널 재생 없이 rw로 마운트된다 (S6 C4)."""
+        if vol.size < size:
+            self._run(["lvextend", "-L", f"{size}b", f"{VG}/{vol.lv}"])
+        mp = self._ensure_mounted(vol)
+        # 이미 LV 크기면 resize2fs는 아무것도 하지 않는다. 늘린 뒤 여기 전에 멈췄을 수 있으므로 늘 부른다 (S6 Z)
+        self._run(["resize2fs", vol.device])
+        self._ensure_snapshot_dir(vol)
+        mine = [s for s in self._report()[2] if s.volume == vol.uuid]
+        self._remove_stray_snapshot_dirs(vol, {s.name for s in mine})
+        base = next((s for s in mine if s.name == vol.clone.name), None)
+        if base is None:
+            # 크기를 늘린 뒤에 찍는다: base 스냅샷으로 되돌려도 크기가 줄지 않는다 (S6 B2, 복원 결정 7)
+            base = self._snapshot_lv(vol, self.new_uuid(), vol.clone.name, vol.clone.create_time)
+            mine.append(base)
+        self._ensure_snapshot_mounted(vol, base)
+        # 루트 inode는 원본 스냅샷에서 왔다. base 스냅샷 뒤에 요청 권한으로 맞춘다 (복원 결정 11)
+        self._run(["chmod", f"{unix_permissions:04d}", str(mp)])
+        self._write_exports(vol, mine)
+        self.instances.ensure(vol.uuid, vol.token, vol.ip, vol.protocol)
+        self._run(["lvchange", *_tag_args("--deltag", vol.clone.tags()), f"{VG}/{vol.lv}"])
 
     def delete(self, uuid: str) -> None:
         """인스턴스 제거 → 스냅샷(언마운트, LV) → 볼륨 언마운트 → 마운트 지점 → export 파일 → 볼륨 LV. 없는 볼륨은 성공이다.
@@ -227,6 +276,7 @@ class FlexVolManager:
         if vol is None:
             raise VolumeError(f"volume {volume_uuid} not found")
         self._refuse_during_restore(vol)
+        self._refuse_during_clone(vol)
         if str(self._mountpoint(vol)) not in self._mounted():
             raise VolumeError(f"volume {volume_uuid} is offline")
         mine = [s for s in snapshots if s.volume == volume_uuid]
@@ -236,15 +286,8 @@ class FlexVolManager:
         if any(s.name == name and s.uuid != uuid for s in mine):
             raise VolumeError("A snapshot with the specified name already exists.")  # ONTAP 525059
         if snap is None:
-            snap = _Snapshot(uuid, name, volume_uuid, snapshot_lv_name(uuid),
-                             self._clock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-            # -kn: activation skip을 꺼서 vgchange -ay가 함께 활성화한다. -p r: 블록 장치부터 읽기 전용이다 (결정 5)
-            self._run([
-                "lvcreate", "-s", "-kn", "-p", "r", "-n", snap.lv,
-                "--addtag", f"anf_snap_uuid={uuid}", "--addtag", f"anf_snap_name={name}",
-                "--addtag", f"anf_snap_vol={volume_uuid}", "--addtag", f"anf_snap_time={snap.create_time}",
-                f"{VG}/{vol.lv}",
-            ])
+            snap = self._snapshot_lv(vol, uuid, name,
+                                     self._clock().astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
             mine.append(snap)
         self._ensure_snapshot_dir(vol)
         self._ensure_snapshot_mounted(vol, snap)
@@ -259,6 +302,7 @@ class FlexVolManager:
             return
         vol = next(v for v in volumes if v.uuid == volume_uuid)
         self._refuse_during_restore(vol)
+        self._refuse_during_clone(vol)
         self._remove_snapshot(vol, snap, [s for s in snapshots if s.volume == volume_uuid and s.uuid != uuid])
 
     def snapshot_records(self, volume_uuid: str, name: str | None = None) -> list[dict] | None:
@@ -280,6 +324,7 @@ class FlexVolManager:
         언마운트, 새 LV와 스냅샷 마운트, export, 차단 풀기 → (5) 옛 볼륨 LV 삭제 → (6) 이름 넘겨받기 → (7) 끝난 표시.
         끝나지 않은 되돌리기가 있으면 그것부터 끝낸다."""
         vol = self._volume(volume_uuid)
+        self._refuse_during_clone(vol)  # 새 LV가 진행 표시를 물려받지 않는다
         if vol.pending is not None:
             pending = vol.pending
             vol = self._resume_restore(vol)
@@ -321,11 +366,7 @@ class FlexVolManager:
             old, vol = vol, replace(vol, lv=new_lv)
         self._ensure_mounted(vol)
         self._ensure_snapshot_dir(vol)
-        # 그 시점의 `.snapshot`에는 그 뒤에 지운 스냅샷의 빈 마운트 지점이 있을 수 있다. 남은 스냅샷에 맞춘다 (결정 10)
-        names = {s.name for s in mine}
-        stray = [p for p in (self._mountpoint(vol) / SNAPSHOT_DIR).iterdir() if p.name not in names]
-        if stray:
-            self._change_snapshot_dir(vol, lambda: [p.rmdir() for p in stray])
+        self._remove_stray_snapshot_dirs(vol, {s.name for s in mine})
         for snap in mine:
             self._ensure_snapshot_mounted(vol, snap)
         self._write_exports(vol, mine)
@@ -368,6 +409,31 @@ class FlexVolManager:
             raise VolumeError(f"volume {vol.uuid} has an unfinished restore to snapshot {vol.pending.snapshot}; "
                               "send the restore again or POST the volume to finish it")
 
+    @staticmethod
+    def _refuse_during_clone(vol: _Volume) -> None:
+        """스냅샷에서 만드는 중이면 스냅샷과 되돌리기를 받지 않는다. base 스냅샷 이름을 빼앗거나 진행 표시를 잃는다."""
+        if vol.clone is not None:
+            raise VolumeError(f"volume {vol.uuid} is still being created from snapshot {vol.clone.snapshot}; "
+                              "POST the volume again to finish it")
+
+    def _snapshot_lv(self, vol: _Volume, uuid: str, name: str, create_time: str) -> _Snapshot:
+        snap = _Snapshot(uuid, name, vol.uuid, snapshot_lv_name(uuid), create_time)
+        # -kn: activation skip을 꺼서 vgchange -ay가 함께 활성화한다. -p r: 블록 장치부터 읽기 전용이다 (결정 5)
+        self._run([
+            "lvcreate", "-s", "-kn", "-p", "r", "-n", snap.lv,
+            "--addtag", f"anf_snap_uuid={uuid}", "--addtag", f"anf_snap_name={name}",
+            "--addtag", f"anf_snap_vol={vol.uuid}", "--addtag", f"anf_snap_time={create_time}",
+            f"{VG}/{vol.lv}",
+        ])
+        return snap
+
+    def _remove_stray_snapshot_dirs(self, vol: _Volume, names: set[str]) -> None:
+        """스냅샷에서 온 `.snapshot`은 그 시점의 것이라, 그 뒤에 지운 스냅샷이나 원본 볼륨의 다른 스냅샷의 빈 마운트
+        지점이 있다. names(이 볼륨에 있는 스냅샷)에 맞춘다 (되돌리기 결정 10, 복원 결정 8)."""
+        stray = [p for p in (self._mountpoint(vol) / SNAPSHOT_DIR).iterdir() if p.name not in names]
+        if stray:
+            self._change_snapshot_dir(vol, lambda: [p.rmdir() for p in stray])
+
     def _remove_snapshot(self, vol: _Volume, snap: _Snapshot, others: list[_Snapshot]) -> None:
         """export 줄 제거 → 인스턴스 안 잠금 해제 → 언마운트 → 마운트 지점 → LV (스냅샷 결정 13).
         클라이언트가 스냅샷 안에서 파일을 열고 있어도 export를 빼고 knfsd 상태를 풀면 내릴 수 있다 (S4 E4)."""
@@ -380,16 +446,31 @@ class FlexVolManager:
             self._change_snapshot_dir(vol, smp.rmdir)
         self._run(["lvremove", "-y", f"{VG}/{snap.lv}"])
 
-    def _ensure_lv(self, uuid: str, token: str, size: int, protocol: str) -> _Volume:
-        pool_size, volumes, _ = self._report()
+    def _ensure_lv(self, uuid: str, token: str, size: int, protocol: str,
+                   clone: tuple[str, str] | None = None) -> _Volume:
+        pool_size, volumes, snapshots = self._report()
         for vol in volumes:
             if vol.uuid == uuid:
-                if (vol.token, vol.size, vol.protocol) != (token, size, protocol):
+                # 스냅샷에서 만드는 중이면 아직 요청 크기로 늘리지 않았을 수 있다 (복원 결정 10)
+                size_ok = vol.size <= size if vol.clone is not None else vol.size == size
+                if (vol.token, vol.protocol) != (token, protocol) or not size_ok:
                     raise VolumeError(
                         f"volume {uuid} already exists with path /{vol.token}, size {vol.size}, "
                         f"protocol {vol.protocol}"
                     )
                 return vol
+        source = None
+        if clone is not None:
+            parent, snapshot = clone
+            if not any(v.uuid == parent for v in volumes):
+                raise VolumeError(f"volume {parent} not found")
+            source = next((s for s in snapshots if s.uuid == snapshot), None)
+            if source is None:
+                raise VolumeError(f"snapshot {snapshot} not found")
+            if source.volume != parent:
+                raise VolumeError(f"snapshot {snapshot} is not a snapshot of volume {parent}")
+            if size < source.size:  # ext4 축소는 오프라인뿐이다 (복원 결정 4)
+                raise VolumeError(f"size {size} is smaller than snapshot {snapshot} ({source.size} bytes)")
         for vol in volumes:
             if vol.token.lower() == token.lower():
                 raise VolumeError(f"junction path /{token} is already used by volume {vol.uuid}")
@@ -400,6 +481,14 @@ class FlexVolManager:
         ip = next((ip for ip in VOLUME_IPS if ip not in used), None)
         if ip is None:
             raise VolumeError(f"all {len(VOLUME_IPS)} volume IPs are in use")
+        if source is not None:
+            # 쓰기 가능 thin 스냅샷: 원본과 블록을 공유하고 스냅샷 크기로 생긴다. 볼륨 태그와 진행 표시를 처음부터 갖는다.
+            # 되돌리기의 새 볼륨 LV와 같은 명령이다 (S5 L2, S6 C1, 복원 결정 5·10)
+            vol = _Volume(uuid, token, source.size, lv_name(uuid), ip, protocol,
+                          clone=_Clone(source.uuid, source.name, source.create_time))
+            self._run(["lvcreate", "-s", "-kn", "-p", "rw", "-n", vol.lv,
+                       *_tag_args("--addtag", vol.tags() + vol.clone.tags()), f"{VG}/{source.lv}"])
+            return vol
         vol = _Volume(uuid, token, size, lv_name(uuid), ip, protocol)
         self._run([
             "lvcreate", "--type", "thin", "-V", f"{size}b", "--thinpool", POOL, "-n", vol.lv,
@@ -423,11 +512,15 @@ class FlexVolManager:
                 if "anf_rv_req" in tags:
                     pending = _Restore(tags["anf_rv_req"], tags["anf_rv_snap"],
                                        row["lv_name"] if "anf_rv_new" in tags else None)
+                clone = None
+                if "anf_cl_snap" in tags:
+                    clone = _Clone(tags["anf_cl_snap"], tags["anf_cl_name"], tags["anf_cl_time"])
                 found.append(_Volume(tags["anf_uuid"], tags["anf_path"], int(row["lv_size"]), row["lv_name"],
-                                     tags["anf_ip"], tags["anf_proto"], pending, tags.get("anf_rv_done")))
+                                     tags["anf_ip"], tags["anf_proto"], pending, tags.get("anf_rv_done"), clone))
             elif "anf_snap_uuid" in tags:
                 snapshots.append(_Snapshot(tags["anf_snap_uuid"], tags["anf_snap_name"], tags["anf_snap_vol"],
-                                           row["lv_name"], tags["anf_snap_time"], int(row["thin_id"])))
+                                           row["lv_name"], tags["anf_snap_time"], int(row["thin_id"]),
+                                           int(row["lv_size"])))
         # 되돌리는 동안에는 한 볼륨에 LV가 둘이다: 옛 볼륨 LV와 새 LV(anf_rv_new). 옛 LV가 있으면 그것이 볼륨이다
         volumes = []
         for vol in found:

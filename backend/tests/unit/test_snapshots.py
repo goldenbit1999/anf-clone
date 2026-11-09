@@ -278,6 +278,47 @@ def test_list_of_a_missing_volume_is_not_found(store):
     assert (e.status, e.code) == (404, "ResourceNotFound")
 
 
+# --- 스냅샷에서 새 볼륨을 만드는 동안 원본 보호 (복원 설계 결정 9) ---
+
+NEW = ACC + "/capacityPools/pool1/volumes/vol2"
+
+
+def put_new_volume(store, snapshot_id):
+    _, res, op = volumes.put_volume(store, "s1", "rg1", "acc1", "pool1", "vol2", {
+        "location": "westus2", "properties": {"creationToken": "vol2", "usageThreshold": 100 * GIB,
+                                              "subnetId": SUBNET, "snapshotId": snapshot_id}}, None)
+    return res, op
+
+
+@pytest.mark.parametrize("state", ["Creating", "Failed"])
+def test_source_snapshot_cannot_be_deleted_until_the_new_volume_is_created(store, state):
+    # 새 볼륨이 한 번도 Succeeded가 되지 않은 동안(originatingResourceId가 없는 동안)이다
+    s = create(store)
+    other = create(store, "snap2")
+    _, op = put_new_volume(store, s.id)
+    if state == "Failed":
+        finish(store, op, "Failed")
+    e = arm_error(delete, store)
+    assert (e.status, e.code, e.message) == (
+        409, "Conflict", f"Cannot delete '{s.id}' because volume '{NEW}' is being created from snapshot '{s.id}'. "
+                         "Wait until it is created, or delete it, and then retry.")
+    assert store.get_resource(s.id).provisioning_state == "Succeeded"
+    assert delete(store, "snap2").status == "Deleting"  # 다른 스냅샷은 지울 수 있다
+    assert store.get_resource(other.id).provisioning_state == "Deleting"
+
+
+def test_source_snapshot_can_be_deleted_once_the_new_volume_is_created(store):
+    s = create(store)
+    res, op = put_new_volume(store, s.id)
+    with store.transaction() as tx:  # 처리기가 생성을 끝내면 originatingResourceId를 쓴다
+        new = tx.get_resource(res.id)
+        new.properties = {**new.properties, "originatingResourceId": s.id}
+        new.provisioning_state = "Succeeded"
+        tx.put_resource(new)
+        tx.finish_operation(op.id, "Succeeded")
+    assert delete(store).status == "Deleting"
+
+
 # --- 볼륨 DELETE와 스냅샷 (결정 2) ---
 
 

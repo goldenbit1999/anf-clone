@@ -50,10 +50,15 @@ class StorageClient:
         self._clock = clock
 
     async def ensure_volume(self, uuid: str, junction_path: str, size: int, unix_permissions: int,
-                            protocol: str, correlation_id: str | None = None) -> str:
-        """볼륨이 있게 하고(없으면 만들고) data LIF IP를 돌려준다."""
+                            protocol: str, correlation_id: str | None = None,
+                            clone: tuple[str, str] | None = None) -> str:
+        """볼륨이 있게 하고(없으면 만들고) data LIF IP를 돌려준다. clone = (부모 볼륨 uuid, 부모 스냅샷 uuid)면
+        그 스냅샷에서 만든다 (ONTAP FlexClone 필드, 복원 설계 결정 14)."""
         body = {"uuid": uuid, "name": "vol_" + uuid.replace("-", ""), "size": size,
                 "nas": {"path": junction_path, "unix_permissions": unix_permissions, "protocols": [protocol]}}
+        if clone is not None:
+            body["clone"] = {"is_flexclone": True, "parent_volume": {"uuid": clone[0]},
+                             "parent_snapshot": {"uuid": clone[1]}}
         await self._run_job("POST", "/api/storage/volumes", body, correlation_id)
         path = f"/api/storage/volumes/{uuid}"
         status, record = await self._call("GET", path, None, correlation_id)
@@ -90,11 +95,15 @@ class StorageClient:
 
     async def snapshot_uuids(self, volume_uuid: str, correlation_id: str | None = None) -> set[str]:
         """agent에 있는 그 볼륨의 스냅샷 uuid."""
+        return {record["uuid"] for record in await self.snapshot_records(volume_uuid, correlation_id)}
+
+    async def snapshot_records(self, volume_uuid: str, correlation_id: str | None = None) -> list[dict]:
+        """agent에 있는 그 볼륨의 스냅샷 레코드 (uuid, name, create_time, volume.uuid)."""
         path = f"/api/storage/volumes/{volume_uuid}/snapshots"
         status, reply = await self._call("GET", path, None, correlation_id)
         if status != 200:
             raise StorageError(f"GET {path}: agent answered {status}: {_message(reply)}")
-        return {record["uuid"] for record in reply["records"]}
+        return reply["records"]
 
     async def _run_job(self, method: str, path: str, body: dict | None, correlation_id: str | None) -> None:
         while True:

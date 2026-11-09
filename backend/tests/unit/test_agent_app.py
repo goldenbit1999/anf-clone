@@ -49,9 +49,9 @@ class FakeManager:
     def recover(self):
         self.calls.append("recover")
 
-    def create(self, *args):
+    def create(self, *args, clone=None):
         self.gate.wait(5)
-        self.calls.append(("create", *args))
+        self.calls.append(("create", *args, clone))
         if self.error:
             raise self.error
 
@@ -145,7 +145,48 @@ def test_post_volume_returns_a_job_that_succeeds(manager, client):
     assert href == f"/api/cluster/jobs/{r.json()['job']['uuid']}"
     job = wait_job(client, href)
     assert (job["state"], job["code"], job["message"]) == ("success", 0, "")
-    assert ("create", U1, "/vol1", GIB, 1777, "nfs4.1") in manager.calls
+    assert ("create", U1, "/vol1", GIB, 1777, "nfs4.1", None) in manager.calls
+
+
+# 스냅샷에서 새 볼륨: ONTAP FlexClone 필드 (복원 설계 결정 14, §6.1)
+PARENT = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+CLONE = {"is_flexclone": True, "parent_volume": {"uuid": PARENT}, "parent_snapshot": {"uuid": S1}}
+
+
+def test_post_volume_from_a_snapshot(manager, client):
+    r = client.post("/api/storage/volumes", json=body(clone=CLONE))
+    assert r.status_code == 202
+    job = wait_job(client, r.json()["job"]["_links"]["self"]["href"])
+    assert job["state"] == "success"
+    assert ("create", U1, "/vol1", GIB, 770, "nfs3", (PARENT, S1)) in manager.calls
+
+
+def test_post_volume_from_a_missing_snapshot_is_a_failed_job(manager, client):
+    # 부모 볼륨·스냅샷이 없거나 맞지 않으면 볼륨 관리자가 거절한다 (test_flexvol)
+    manager.error = VolumeError(f"snapshot {S1} not found")
+    r = client.post("/api/storage/volumes", json=body(clone=CLONE))
+    job = wait_job(client, r.json()["job"]["_links"]["self"]["href"])
+    assert (job["state"], job["message"]) == ("failure", f"snapshot {S1} not found")
+
+
+@pytest.mark.parametrize("clone", [
+    None, [], {},
+    {k: v for k, v in CLONE.items() if k != "parent_snapshot"},
+    {**CLONE, "split_initiated": False},
+    {**CLONE, "is_flexclone": False},
+    {**CLONE, "is_flexclone": "true"},
+    {**CLONE, "parent_volume": PARENT},
+    {**CLONE, "parent_volume": {"uuid": PARENT, "name": "vol_x"}},
+    {**CLONE, "parent_volume": {"name": "vol_x"}},
+    {**CLONE, "parent_volume": {"uuid": PARENT.upper()}},
+    {**CLONE, "parent_snapshot": {"uuid": "snap1"}},
+    {**CLONE, "parent_snapshot": {"uuid": S1, "name": "daily.1"}},
+], ids=str)
+def test_invalid_clone_is_rejected_without_a_job(manager, client, clone):
+    r = client.post("/api/storage/volumes", json=body(clone=clone))
+    assert r.status_code == 400
+    assert r.json()["error"]["message"]
+    assert not any(isinstance(c, tuple) for c in manager.calls)
 
 
 def test_failed_create_is_a_failed_job(manager, client):

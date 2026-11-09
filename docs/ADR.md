@@ -88,7 +88,8 @@ ONTAP REST 경로와 필드 이름은 기능마다 조사 단계에서 ONTAP RES
 | 볼륨 | FlexVol. 볼륨이 담기는 물리 공간은 aggregate | `POST`·`GET`·`DELETE /api/storage/volumes`, job은 `/api/cluster/jobs/{uuid}`. 요청의 `uuid`(멱등 키)는 클론 확장이다 (**볼륨 설계에서 확정**, `_workspace/volume/02_main_design.md` §6) | 씬 풀 하나(`anf/aggr0`, aggregate 역할) 위에 볼륨마다 thin LV + ext4(`nodelalloc`). `/var/lib/anf-clone/ns/<creationToken>`에 마운트하고 그 볼륨의 knfsd 인스턴스로 export ([§7.2](#72-볼륨스냅샷-저장-방식-확정-d-11), [§7.4](#74-nfs)) | ONTAP 대응은 [추론] (볼륨 브리프) |
 | 스냅샷 | 볼륨 스냅샷 (WAFL redirect-on-write) | `POST`·`GET /api/storage/volumes/{volume.uuid}/snapshots`, `GET`·`DELETE .../snapshots/{uuid}`, job 모델. 요청의 `uuid`(멱등 키)는 클론 확장이다 (**스냅샷 설계에서 확정**, `_workspace/snapshot/02_main_design.md` §6) | 읽기 전용 thin 스냅샷 LV를 `ns/<creationToken>/.snapshot/<이름>`에 `ro,noload`로 마운트하고, 볼륨 인스턴스의 export 파일에 자기 `fsid` 줄을 둔다. `.snapshot`은 `chattr +i` (S1, S4) | ONTAP REST 경로·필드는 스냅샷 브리프 [문서 15·16]. 동작 대응은 [추론] |
 | 스냅샷으로 되돌리기 | SnapRestore (볼륨 단위) | `PATCH /api/storage/volumes/{uuid}?restore_to.snapshot.uuid=…`, `202` + job. `restore_to.request_uuid`(멱등 키)는 클론 확장이다 (**되돌리기 설계에서 확정**, `_workspace/snapshot-revert/02_main_design.md` §6) | 더 새 스냅샷(dm-thin id가 큰 것)을 지우고 고른 스냅샷의 쓰기 가능 스냅샷을 새 볼륨 LV로 만든다. 인스턴스 netns 입력을 잠깐 막은 채 옛 볼륨을 내리고 새 LV를 올린 뒤, 옛 LV를 지우고 새 LV가 이름을 넘겨받는다. 고른 스냅샷은 그대로 남는다. 마운트한 클라이언트는 몇 초 멈췄다 이어 간다 (S5, 되돌리기 설계 §9-1) | ONTAP REST 경로는 되돌리기 브리프 [문서 10]. 동작 대응은 [추론] |
-| 새 볼륨으로 복원, 클론 | FlexClone | 볼륨 POST에 클론 원본 지정 | 스냅샷의 쓰기 가능한 thin 스냅샷 (S1에서 0.13초) | [추론] |
+| 새 볼륨으로 복원 | FlexClone + clone split [추론] | `POST /api/storage/volumes`에 `clone.is_flexclone`, `clone.parent_volume.uuid`, `clone.parent_snapshot.uuid`, `202` + job. split API는 없다: 처음부터 독립이다 (**새 볼륨 복원 설계에서 확정**, `_workspace/restore-new-volume/02_main_design.md` §6) | 원본 스냅샷 LV의 쓰기 가능 thin 스냅샷을 새 볼륨 LV로 만들고(블록 공유), 필요하면 `lvextend` + 온라인 `resize2fs`, `.snapshot`에 남은 원본 마운트 지점을 지운 뒤 같은 이름의 base 스냅샷을 찍는다. ext4 UUID는 원본과 같고 export `fsid`가 볼륨마다 다르다 (S6) | ONTAP REST 필드는 새 볼륨 복원 브리프 [문서 8, 10]. ANF가 FlexClone을 쓴다는 것은 [추론] |
+| 클론 (FR-18) | FlexClone | 새 볼륨 복원과 같은 API 후보 | 볼륨의 쓰기 가능 thin 스냅샷 | [추론] |
 | 처리량 제한 | QoS policy group (최대 처리량) | `/api/storage/qos/policies` | 볼륨 인스턴스 veth의 tc HTB 클래스 하나 (읽기·쓰기 합산, [§7.3](#73-처리량-제한-방식-확정-d-12)) | [추론] |
 | export policy | export policy와 규칙 | `/api/protocols/nfs/export-policies` | `exportfs`의 클라이언트 규칙 | [추론] |
 | 마운트 대상 IP | data LIF | 볼륨 레코드의 클론 확장 필드 `data_lif.ip.address` (볼륨 설계 결정 12·18). `/api/network/ip/interfaces`는 필요해지면 만든다 | 볼륨 인스턴스의 `anf-vnet` 고정 IP(172.30.0.128/25에서 agent가 고름). ANF와 달리 볼륨마다 IP가 하나씩이다 | [추론] |
@@ -295,6 +296,11 @@ ANF가 스냅샷 공간을 볼륨 사용량에 어떻게 계산하는지는 스�
 - 고른 스냅샷 LV는 원본으로만 쓰이므로 uuid·이름·시각이 그대로 남는다 (ANF와 같다). export `fsid`는 볼륨 UUID로 고정이라 마운트한 클라이언트의 파일 핸들이 이어진다.
 - 더 새 스냅샷은 dm-thin 장치 id로 고른다. id는 "남은 것 중 최댓값 + 1"이라 남은 스냅샷 사이의 순서가 만든 순서와 같다 (S5 L3).
 
+**새 볼륨으로 복원 (2026-11-09, S6, `_workspace/restore-new-volume/02_main_design.md`).** 새 볼륨 LV는 원본 스냅샷 LV의 쓰기 가능 thin 스냅샷이다(되돌리기의 새 LV와 같은 명령, 볼륨 태그와 진행 표시 `anf_cl_*`를 만들 때부터 가짐). 블록을 공유하므로 즉시이고 쓴 만큼만 씬 풀에서 나가며(R-09), 원본 스냅샷·볼륨을 지우거나 되돌려도 남는다(S6 I). 규칙:
+- 저널 재생 없이 rw로 마운트된다(S6 C4). 요청 크기가 스냅샷보다 크면 `lvextend` + 온라인 `resize2fs`, 작으면 거절한다(ext4 축소는 오프라인뿐).
+- `.snapshot`에는 원본 스냅샷을 찍던 때의 다른 스냅샷 마운트 지점이 남아 있어 지운다. 그다음 원본 스냅샷과 같은 이름·시각의 base 스냅샷을 찍는다. 크기를 늘린 뒤에 찍어야 base로 되돌려도 크기가 줄지 않는다(S6 B2).
+- ext4 UUID는 원본과 같게 둔다. export `fsid`가 볼륨마다 `fileSystemId`라 NFS 핸들이 겹치지 않는다(S6 Ua4·Ua5). `tune2fs -U`는 "갓 검사한 파일시스템"을 요구해 `e2fsck -f`가 `lost+found`를 만든다(S6 Ub2·Ub3).
+
 ### 7.3 처리량 제한 방식 (확정, D-12)
 
 S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 계약이다: 한도는 읽기와 쓰기를 합한 값이고, 바꾸면 I/O를 끊지 않고 바로 반영되며, 볼륨마다 따로다. 실제 ONTAP은 QoS policy group으로 스토리지 계층에서 처리량을 제한한다 [추론: 처리량 조사에서 확인]. 클론은 네트워크 경계에서 제한하므로 그 차이를 개념 문서에 남긴다.
@@ -380,6 +386,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | S3 | GitHub 호스트 러너에서 btrfs·nfsd 모듈을 로드하고 privileged 컨테이너로 마운트할 수 있는가 | CI 기능 전 | 데이터 플레인 테스트는 로컬(또는 self-hosted 러너)에서만 돌리고, 그 사실을 문서에 적는다 |
 | S4 | 볼륨 인스턴스(D-12) 구조에서 `.snapshot/<이름>`이 v3·v4.1로 읽기 전용으로 보이는가, 클라이언트가 `.snapshot`을 바꿀 수 있는가, 인스턴스 재시작 뒤에도 보이는가. **조건부 통과 (2026-11-08, `_workspace/spikes/S4.md`)**: 스냅샷마다 자기 `fsid` export, `.snapshot`에 `chattr +i`, export 표를 파일로. v4.1 인스턴스 재시작 결함도 찾았다 | 스냅샷 설계 전 | — |
 | S5 | 볼륨 인스턴스 구조에서 스냅샷으로 되돌리기: LVM 절차(merge·교체), 클라이언트가 마운트를 유지한 채 무엇을 보는가(다시 마운트, stale handle, 열린 fd, 창 동안의 오류). **조건부 통과 (2026-11-08, `_workspace/spikes/S5.md`)**: 인스턴스 netns 입력을 잠깐 막고 언마운트 → `lvconvert --merge` → 고른 스냅샷 다시 만들기 → 다시 올리면 v3·v4.1 모두 다시 마운트 없이 오류 0(2~5 s 멈춤). 구현 중 merge가 두 번째 되돌리기를 못 해 LVM 절차는 교체 방식(L2)으로 바꿨다(창 방식은 그대로). 스냅샷 뒤에 만든 파일을 잡은 fd·cwd만 ESTALE. export 제거는 v3에 EACCES, 인스턴스 재시작은 v4.1에 23 s와 틀린 캐시. knfsd 기본 NFSv4 위임에서는 v4.1 열린 fd가 16~32 s 옛 캐시를 읽는다 | 되돌리기 설계 전 | — |
+| S6 | 볼륨 인스턴스 구조에서 스냅샷으로 새 볼륨 만들기 (FR-07): 읽기 전용 스냅샷 LV의 쓰기 가능 스냅샷, ext4 UUID 중복, `.snapshot`에 남은 원본의 마운트 지점, 원본보다 큰 크기, 다른 프로토콜, 원본 스냅샷·볼륨 삭제와 되돌리기 뒤의 독립성, base 스냅샷 | 새 볼륨 복원 설계 전 (`_workspace/spikes/S6.md`) | — |
 
 ### 위험
 
@@ -409,7 +416,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | D-08 | 메트릭은 Prometheus. 대시보드가 Prometheus 쿼리 API로 차트를 그린다 | 확정 (2026-11-07) |
 | D-09 | 작업 워커는 anf-api 프로세스 안에서 돈다. 작업은 SQLite에 저장한다 | 확정 (2026-11-07) |
 | D-10 | Docker Engine은 Ubuntu 안에 둔다 (`docker.io`). Docker Desktop은 서버가 모든 컨테이너를 같은 Windows NAT IP로 봐서 클라이언트를 구분하지 못한다 | 확정 (2026-11-07, S0: `_workspace/spikes/S0.md`) |
-| D-11 | 볼륨·스냅샷 저장 방식: **C.** 씬 풀 하나(aggregate 역할) 위에 볼륨마다 thin LV + ext4(`nodelalloc`). 스냅샷은 읽기 전용 thin 스냅샷이고 `.snapshot/<이름>`에 마운트해 자기 `fsid`로 export한다. 근거와 버린 대안은 [§7.2](#72-볼륨스냅샷-저장-방식-확정-d-11) | 확정 (2026-11-07, S1: `_workspace/spikes/S1.md`). 스냅샷 노출은 S4로 확정 (2026-11-08, `_workspace/spikes/S4.md`). 되돌리기 절차는 S5로 확정 (2026-11-08, `_workspace/spikes/S5.md`, §7.2) |
+| D-11 | 볼륨·스냅샷 저장 방식: **C.** 씬 풀 하나(aggregate 역할) 위에 볼륨마다 thin LV + ext4(`nodelalloc`). 스냅샷은 읽기 전용 thin 스냅샷이고 `.snapshot/<이름>`에 마운트해 자기 `fsid`로 export한다. 근거와 버린 대안은 [§7.2](#72-볼륨스냅샷-저장-방식-확정-d-11) | 확정 (2026-11-07, S1: `_workspace/spikes/S1.md`). 스냅샷 노출은 S4로 확정 (2026-11-08, `_workspace/spikes/S4.md`). 되돌리기 절차는 S5로 확정 (2026-11-08, `_workspace/spikes/S5.md`, §7.2). 새 볼륨 복원은 S6로 확정 (2026-11-09, `_workspace/spikes/S6.md`, §7.2) |
 | D-12 | 처리량 제한 방식 = T1n: 볼륨마다 knfsd 인스턴스(자기 netns)와 IP를 두고, 인스턴스 veth를 tc HTB로 제한한다(읽기·쓰기 합산). 인스턴스와 IP는 볼륨 사이클에서 만든다. NFSv4 위임은 끈다(§7.4) | 확정 (2026-11-07, S2: `_workspace/spikes/S2.md`). 위임 끄기는 2026-11-08 (S5) |
 | D-13 | 인증 없음. anf-api는 `Authorization` 헤더를 검사하지 않고, 서비스는 localhost에만 바인딩한다 (§5). 실제 Azure에서는 토큰 검증과 RBAC를 ARM이 맡고 ANF 리소스 공급자는 그 뒤에서 요청을 받는다. 그래서 구독·RBAC 검사를 생략한 것과 같은 선에서 생략한다. 버린 대안: 고정 Bearer 토큰(모든 클라이언트가 헤더를 보내야 하는데 데이터 플레인 설명에 보탬이 없다), Entra ID 모양 JWT(비용이 가장 크다) | 확정 (2026-11-07) |
 | D-14 | Python 프로젝트 설정은 루트 `pyproject.toml` 하나에 둔다(의존성, pytest 설정). 코드는 `backend/` 아래에 둔다. 가상환경은 OS별로 Windows `.venv-win/`(저장소 안), WSL `~/.venvs/anf-clone`(저장소 밖, `ANF_CLONE_VENV`로 바꿀 수 있음) | 확정 (2026-11-07) |

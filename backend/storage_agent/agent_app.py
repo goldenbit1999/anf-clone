@@ -1,4 +1,4 @@
-"""storage agent FastAPI 앱: ONTAP REST API의 부분집합 (ADR D-06, 볼륨 설계 §6, 스냅샷 설계 §6.1).
+"""storage agent FastAPI 앱: ONTAP REST API의 부분집합 (ADR D-06, 볼륨 설계 §6, 스냅샷 설계 §6.1, 복원 설계 §6.1).
 
 실행 (WSL, root):
     sudo ~/.venvs/anf-clone/bin/python -m uvicorn --factory storage_agent.agent_app:create_app \\
@@ -42,10 +42,24 @@ def _check_uuid(value) -> str:
     return value
 
 
-def parse_volume(body) -> tuple[str, str, int, int, str]:
-    """POST 본문 → (uuid, junction path, size, unix_permissions, protocol)."""
-    if not isinstance(body, dict) or set(body) != {"uuid", "name", "size", "nas"}:
-        raise BadRequest("body must have exactly the fields uuid, name, size, nas")
+def _parse_clone(clone) -> tuple[str, str]:
+    """ONTAP FlexClone 필드 → (부모 볼륨 uuid, 부모 스냅샷 uuid) (복원 설계 결정 14). split·이름 필드는 없다."""
+    if not isinstance(clone, dict) or set(clone) != {"is_flexclone", "parent_volume", "parent_snapshot"}:
+        raise BadRequest("clone must have exactly the fields is_flexclone, parent_volume, parent_snapshot")
+    if clone["is_flexclone"] is not True:
+        raise BadRequest("clone.is_flexclone must be true")
+    uuids = []
+    for key in ("parent_volume", "parent_snapshot"):
+        if not isinstance(clone[key], dict) or set(clone[key]) != {"uuid"}:
+            raise BadRequest(f"clone.{key} must have exactly the field uuid")
+        uuids.append(_check_uuid(clone[key]["uuid"]))
+    return uuids[0], uuids[1]
+
+
+def parse_volume(body) -> tuple[str, str, int, int, str, tuple[str, str] | None]:
+    """POST 본문 → (uuid, junction path, size, unix_permissions, protocol, clone). clone은 선택이다."""
+    if not isinstance(body, dict) or set(body) - {"clone"} != {"uuid", "name", "size", "nas"}:
+        raise BadRequest("body must have exactly the fields uuid, name, size, nas and optionally clone")
     nas = body["nas"]
     if not isinstance(nas, dict) or set(nas) != {"path", "unix_permissions", "protocols"}:
         raise BadRequest("nas must have exactly the fields path, unix_permissions, protocols")
@@ -64,7 +78,8 @@ def parse_volume(body) -> tuple[str, str, int, int, str]:
     protocols = nas["protocols"]
     if not isinstance(protocols, list) or len(protocols) != 1 or protocols[0] not in PROTOCOLS:
         raise BadRequest(f"nas.protocols must be one of {[[p] for p in PROTOCOLS]}")
-    return uuid, path, size, perms, protocols[0]
+    clone = _parse_clone(body["clone"]) if "clone" in body else None
+    return uuid, path, size, perms, protocols[0], clone
 
 
 def parse_snapshot(body) -> tuple[str, str]:
@@ -138,9 +153,9 @@ def create_app(manager=None, jobs: JobTable | None = None) -> FastAPI:
 
     @app.post("/api/storage/volumes")
     async def post_volume(request: Request):
-        uuid, path, size, perms, protocol = parse_volume(await _json(request))
+        uuid, path, size, perms, protocol, clone = parse_volume(await _json(request))
         return accepted(f"POST {uuid}", f"POST /api/storage/volumes/{uuid}",
-                        lambda: manager.create(uuid, path, size, perms, protocol), request)
+                        lambda: manager.create(uuid, path, size, perms, protocol, clone=clone), request)
 
     # 볼륨 관리자를 부르는 경로는 def로 둔다: 커널 명령을 기다리는 동안 이벤트 루프를 막지 않게 스레드에서 돈다
     @app.get("/api/storage/volumes")

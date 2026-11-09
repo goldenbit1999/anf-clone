@@ -34,7 +34,7 @@ class FakeStorage:
         self.calls: list[tuple] = []
         self.error: Exception | None = None
 
-    async def ensure_volume(self, *args, correlation_id=None):
+    async def ensure_volume(self, *args, correlation_id=None, clone=None):
         self.calls.append(("ensure_volume", *args))
         return "172.30.0.129"
 

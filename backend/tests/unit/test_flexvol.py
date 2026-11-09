@@ -6,6 +6,7 @@
 WSL Ubuntu 24.04(LVM 2.03.16)에서 확인한 것을 따른다. 실제 동작은 통합 테스트가 확인한다.
 """
 
+import itertools
 import json
 import shutil
 from datetime import datetime, timezone
@@ -136,9 +137,18 @@ class FakeHost:
     def _detach(self, target):
         root = Path(target)
         tree = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_dir())
-        self.lvs[self.mounts.pop(target).removeprefix("/dev/anf/")]["tree"] = tree
+        lv = self.lvs[self.mounts.pop(target).removeprefix("/dev/anf/")]
+        # chattr +i는 inode 속성이라 파일시스템과 함께 간다: 내리면 LV가 기억하고, 스냅샷은 원본에서 물려받는다 (S6 D4)
+        lv["tree"], lv["immutable"] = tree, [rel for rel in tree if str(root / rel) in self.immutable]
+        self.immutable -= {str(root / rel) for rel in lv["immutable"]}
         for child in root.iterdir():
             shutil.rmtree(child)
+
+    def _immutable(self, name):
+        target = next((t for t, d in self.mounts.items() if d == f"/dev/anf/{name}"), None)
+        if target is None:
+            return list(self.lvs[name].get("immutable", []))
+        return [rel for rel in self._tree(name) if str(Path(target) / rel) in self.immutable]
 
     def _exported_snapshot(self, target):
         """target이 돌고 있는 인스턴스의 export 파일에 있는 스냅샷 마운트인가."""
@@ -201,14 +211,15 @@ class FakeHost:
         return self.ok(json.dumps({"report": [{"lv": rows}]}))
 
     def _lvcreate(self, args):
-        if args[0] == "-s":  # thin 스냅샷: 원본의 파일시스템을 갖고, 원본의 태그는 물려받지 않는다 (WSL 확인)
-            # 읽기 전용 스냅샷, 또는 되돌리기의 새 볼륨 LV(스냅샷의 쓰기 가능 스냅샷, S5 L2)
+        if args[0] == "-s":  # thin 스냅샷: 원본의 파일시스템과 크기를 갖고, 원본의 태그는 물려받지 않는다 (WSL 확인)
+            # 읽기 전용 스냅샷, 또는 스냅샷의 쓰기 가능 스냅샷(되돌리기의 새 볼륨 LV, 스냅샷에서 만든 새 볼륨, S5 L2·S6)
             assert args[1:4] in (["-kn", "-p", "r"], ["-kn", "-p", "rw"]) and args[4] == "-n"
             origin_name = args[-1].removeprefix("anf/")
             origin = self.lvs[origin_name]
             tags = [value for flag, value in zip(args[6:-1:2], args[7:-1:2]) if flag == "--addtag"]
             self.lvs[args[5]] = {"size": origin["size"], "tags": tags, "fs": origin["fs"],
-                                 "tree": self._tree(origin_name), "thin_id": self._next_thin_id()}
+                                 "tree": self._tree(origin_name), "immutable": self._immutable(origin_name),
+                                 "thin_id": self._next_thin_id()}
             return self.ok()
         assert args[-1] == "anf"
         pairs = list(zip(args[:-1:2], args[1:-1:2]))
@@ -252,11 +263,23 @@ class FakeHost:
     def _findmnt(self, args):
         return self.ok("".join(f"{target}\n" for target in self.mounts))
 
+    def _lvextend(self, args):
+        assert args[0] == "-L"
+        self.lvs[args[2].removeprefix("anf/")]["size"] = int(args[1].removesuffix("b"))
+        return self.ok()
+
+    def _resize2fs(self, args):
+        # 마운트된 ext4를 LV 크기까지 늘린다. 이미 그 크기면 아무것도 하지 않고 성공한다
+        assert args[0] in self.mounts.values()
+        return self.ok()
+
     def _mount(self, args):
         device, target = args[-2], args[-1]
         assert Path(target).is_dir()
-        for rel in self.lvs[device.removeprefix("/dev/anf/")]["tree"]:
+        lv = self.lvs[device.removeprefix("/dev/anf/")]
+        for rel in lv["tree"]:
             (Path(target) / rel).mkdir()
+        self.immutable |= {str(Path(target) / rel) for rel in lv.get("immutable", [])}
         self.mounts[target] = device
         return self.ok()
 
@@ -302,6 +325,8 @@ def changes(host):
 def make_manager(host, tmp_path):
     m = FlexVolManager(host, root=tmp_path / "root", aggregate_size=1 << 20, sleep=lambda s: None, clock=lambda: NOW)
     m.instances = host  # 컨테이너 대신 가짜 호스트가 볼륨 인스턴스를 흉내 낸다
+    ids = (f"5b000000-0000-4000-8000-{i:012d}" for i in itertools.count(1))
+    m.new_uuid = lambda: next(ids)  # agent가 정하는 uuid (base 스냅샷)
     host.ns = tmp_path / "root" / "ns"
     return m
 
@@ -1105,3 +1130,215 @@ def test_snapshot_records(host, mgr):
     assert mgr.snapshot_records(U3) is None  # 볼륨이 없다
     assert mgr.snapshot_record(U2, S1) is None  # 다른 볼륨의 스냅샷
     assert mgr.snapshot_record(U1, "5a000000-0000-4000-8000-000000000009") is None
+
+
+# --- 스냅샷에서 새 볼륨 (복원 설계 결정 4~11, §6.2) ---
+
+LV2 = "vol_aaaaaaaabbbbccccddddeeeeeeeeeeee"
+BASE = "5b000000-0000-4000-8000-000000000001"  # agent가 정한 base 스냅샷 uuid (make_manager)
+BLV = "snap_5b000000000040008000000000000001"
+S9 = "5a000000-0000-4000-8000-000000000009"
+VOLUME2_TAGS = ["anf_path=vol2", f"anf_uuid={U2}", "anf_ip=172.30.0.130", "anf_proto=nfs4.1"]
+CLONE_TAGS = [f"anf_cl_snap={S2}", "anf_cl_name=s2", f"anf_cl_time={TIME}"]
+
+
+def clone(mgr, size=2 * GIB, source=(U1, S2), path="/vol2"):
+    """vol1의 스냅샷에서 vol2(NFSv4.1, 0755)를 만든다. 기본은 three_snapshots의 s2다."""
+    mgr.create(U2, path, size, 755, "nfs4.1", clone=source)
+
+
+def assert_cloned_from_s2(host, mgr, tmp_path, size=2 * GIB):
+    """vol2가 s2 시점 내용과 base 스냅샷 하나를 갖고, 진행 표시가 없으며, 원본은 그대로다."""
+    assert sorted(p.name for p in Path(mountpoint(tmp_path, "vol2")).iterdir()) == [".snapshot", "keep"]
+    assert sorted(p.name for p in Path(snapdir(tmp_path, "vol2")).iterdir()) == ["s2"]
+    assert snapdir(tmp_path, "vol2") in host.immutable
+    assert lv_tags(host, LV2) == sorted(VOLUME2_TAGS)
+    assert mgr.record(U2) == {
+        "uuid": U2, "name": LV2, "size": size, "nas": {"path": "/vol2", "protocols": ["nfs4.1"]},
+        "state": "online", "data_lif": {"ip": {"address": "172.30.0.130"}},
+    }
+    assert mgr.snapshot_records(U2) == [{"uuid": BASE, "name": "s2", "create_time": TIME, "volume": {"uuid": U2}}]
+    assert host.instances[U2] == ("vol2", "172.30.0.130", "nfs4.1")
+    assert [r["name"] for r in mgr.snapshot_records(U1)] == ["s1", "s2", "s3"]
+    assert sorted(p.name for p in Path(mountpoint(tmp_path, "vol1")).iterdir()) == [
+        ".snapshot", "keep", "late", "latest"]
+
+
+def test_create_from_snapshot(host, mgr, tmp_path):
+    three_snapshots(mgr, tmp_path)
+    host.calls.clear()
+
+    clone(mgr)
+
+    mp2, sd2 = mountpoint(tmp_path, "vol2"), snapdir(tmp_path, "vol2")
+    assert changes(host) == [
+        # 원본 스냅샷의 쓰기 가능 thin 스냅샷. 볼륨 태그와 진행 표시를 처음부터 갖는다 (결정 5·10)
+        ["lvcreate", "-s", "-kn", "-p", "rw", "-n", LV2, *tag_args("--addtag", VOLUME2_TAGS + CLONE_TAGS),
+         f"anf/{SLV2}"],
+        # 스냅샷 크기(원본 볼륨 크기)에서 요청 크기로 늘린다 (결정 4)
+        ["lvextend", "-L", f"{2 * GIB}b", f"anf/{LV2}"],
+        # 파일시스템은 스냅샷의 것이다: mkfs 없이 마운트하고 온라인으로 늘린다 (S6 C4·Z)
+        ["mount", "-t", "ext4", "-o", "nodelalloc", f"/dev/anf/{LV2}", mp2],
+        ["resize2fs", f"/dev/anf/{LV2}"],
+        # .snapshot은 원본에서 immutable로 왔다. s2 시점에 있던 s1의 빈 마운트 지점을 지운다 (결정 8)
+        ["chattr", "-i", sd2], ["chattr", "+i", sd2],
+        # base 스냅샷: 원본 스냅샷의 이름과 시각, agent가 정한 새 uuid (결정 7)
+        ["lvcreate", "-s", "-kn", "-p", "r", "-n", BLV,
+         "--addtag", f"anf_snap_uuid={BASE}", "--addtag", "anf_snap_name=s2",
+         "--addtag", f"anf_snap_vol={U2}", "--addtag", f"anf_snap_time={TIME}", f"anf/{LV2}"],
+        ["chattr", "-i", sd2], ["chattr", "+i", sd2],
+        ["mount", "-t", "ext4", "-o", "ro,noload", f"/dev/anf/{BLV}", snapmount(tmp_path, "s2", "vol2")],
+        # 루트 권한은 base 스냅샷 뒤에 요청 값으로 맞춘다 (결정 11)
+        ["chmod", "0755", mp2],
+        ["exports", U2, "s2"],
+        ["instance-start", U2], ["instance-ready", U2],
+        # 모든 단계를 끝내고 진행 표시를 한 명령으로 지운다 (결정 10)
+        ["lvchange", *tag_args("--deltag", CLONE_TAGS), f"anf/{LV2}"],
+    ]
+    assert_cloned_from_s2(host, mgr, tmp_path)
+
+
+def test_create_from_snapshot_at_its_size_does_not_extend(host, mgr, tmp_path):
+    three_snapshots(mgr, tmp_path)
+    host.calls.clear()
+    clone(mgr, size=GIB)
+    assert "lvextend" not in [c[0] for c in changes(host)]
+    assert_cloned_from_s2(host, mgr, tmp_path, size=GIB)
+
+
+@pytest.mark.parametrize("source, message", [
+    ((S9, S1), f"volume {S9} not found"),
+    ((U1, S9), f"snapshot {S9} not found"),
+    ((U1, S3), f"snapshot {S3} is not a snapshot of volume {U1}"),
+])
+def test_create_from_a_missing_or_foreign_snapshot_fails(host, mgr, source, message):
+    create(mgr)
+    create(mgr, U3, "/vol3")
+    mgr.create_snapshot(U1, S1, "s1")
+    mgr.create_snapshot(U3, S3, "s3")
+    host.calls.clear()
+    with pytest.raises(VolumeError, match=message):
+        clone(mgr, source=source)
+    assert changes(host) == []
+
+
+def test_create_from_snapshot_smaller_than_the_snapshot_fails(host, mgr):
+    # ext4 축소는 오프라인뿐이라 받지 않는다 (결정 4)
+    create(mgr, size=2 * GIB)
+    mgr.create_snapshot(U1, S1, "s1")
+    host.calls.clear()
+    with pytest.raises(VolumeError, match="smaller than snapshot"):
+        clone(mgr, size=GIB, source=(U1, S1))
+    assert changes(host) == []
+
+
+def test_create_from_snapshot_reserves_its_full_size(host, mgr):
+    # 블록을 공유해도 일반 볼륨처럼 크기 전체를 aggregate에서 예약한다
+    create(mgr, size=5 * GIB)
+    mgr.create_snapshot(U1, S1, "s1")
+    host.calls.clear()
+    with pytest.raises(VolumeError, match="aggregate"):
+        clone(mgr, size=6 * GIB, source=(U1, S1))
+    assert changes(host) == []
+    clone(mgr, size=5 * GIB, source=(U1, S1))
+
+
+BASE_SNAPSHOT = ["lvcreate", "chattr", "chattr", "mount"]
+CLONE_FINISH = ["chmod", "exports", "instance-start", "instance-ready", "lvchange"]
+
+
+@pytest.mark.parametrize("fail, rest", [
+    # LV만 만들었다
+    ("lvextend", ["lvextend", "mount", "resize2fs", "chattr", "chattr", *BASE_SNAPSHOT, *CLONE_FINISH]),
+    # 늘린 뒤 마운트 전
+    ("mount", ["mount", "resize2fs", "chattr", "chattr", *BASE_SNAPSHOT, *CLONE_FINISH]),
+    # 마운트 뒤 파일시스템을 늘리기 전
+    ("resize2fs", ["resize2fs", "chattr", "chattr", *BASE_SNAPSHOT, *CLONE_FINISH]),
+    # base 스냅샷 뒤
+    ("chmod", ["resize2fs", *CLONE_FINISH]),
+    # 인스턴스까지 띄우고 진행 표시를 지우기 전
+    ("lvchange", ["resize2fs", "chmod", "exports", "instance-ready", "lvchange"]),
+])
+def test_create_from_snapshot_resumes_after_stopping_midway(host, mgr, tmp_path, fail, rest):
+    # 각 단계는 실제 상태를 먼저 본다. 진행 표시가 남아 있는 동안 같은 POST가 남은 단계를 끝낸다 (결정 10)
+    three_snapshots(mgr, tmp_path)
+    host.fail[fail] = "boom"
+    with pytest.raises(CommandError):
+        clone(mgr)
+    assert sorted(host.lvs[LV2]["tags"]) == sorted(VOLUME2_TAGS + CLONE_TAGS)
+    host.calls.clear()
+
+    clone(mgr)
+
+    assert [c[0] for c in changes(host)] == rest
+    assert_cloned_from_s2(host, mgr, tmp_path)
+
+
+def test_post_without_the_clone_fields_finishes_a_pending_clone(host, mgr, tmp_path):
+    # 진행 표시에 끝내는 데 필요한 것이 다 있다. 원본 스냅샷이 사라져도 끝낼 수 있다
+    three_snapshots(mgr, tmp_path)
+    host.fail["chmod"] = "boom"
+    with pytest.raises(CommandError):
+        clone(mgr)
+    mgr.create(U2, "/vol2", 2 * GIB, 755, "nfs4.1")
+    assert_cloned_from_s2(host, mgr, tmp_path)
+
+
+def test_pending_clone_does_not_shrink(host, mgr, tmp_path):
+    # 진행 표시가 있으면 크기는 "LV 크기 ≤ 요청 크기"로 비교한다. 이미 늘렸으면 작은 요청은 다른 설정이다
+    three_snapshots(mgr, tmp_path)
+    host.fail["mount"] = "boom"
+    with pytest.raises(CommandError):
+        clone(mgr)
+    host.calls.clear()
+    with pytest.raises(VolumeError, match="already exists"):
+        clone(mgr, size=GIB)
+    assert changes(host) == []
+
+
+def test_finished_clone_is_an_ordinary_independent_volume(host, mgr, tmp_path):
+    three_snapshots(mgr, tmp_path)
+    clone(mgr)
+    host.calls.clear()
+    # 진행 표시가 없으면 일반 볼륨 보장이다. 클론 필드는 무시한다 (결정 10)
+    clone(mgr)
+    assert changes(host) == [["exports", U2, "s2"], ["instance-ready", U2]]
+    # 원본 볼륨(과 원본 스냅샷)을 지워도 새 볼륨과 base 스냅샷이 남는다 (S6 I)
+    mgr.delete(U1)
+    clone(mgr)
+    assert mgr.record(U2)["state"] == "online"
+    assert [r["uuid"] for r in mgr.snapshot_records(U2)] == [BASE]
+    # 새 볼륨도 스냅샷을 찍고 base 스냅샷으로 되돌릴 수 있다. 늘린 뒤 찍었으므로 크기가 그대로다 (S6 B2)
+    mgr.create_snapshot(U2, S9, "s9")
+    mgr.restore(U2, BASE, REQ)
+    assert [r["name"] for r in mgr.snapshot_records(U2)] == ["s2"]
+    assert mgr.record(U2)["size"] == 2 * GIB
+
+
+def stop_clone_after_the_base_snapshot(mgr, host, tmp_path):
+    three_snapshots(mgr, tmp_path)
+    host.fail["chmod"] = "boom"
+    with pytest.raises(CommandError):
+        clone(mgr)
+
+
+def test_snapshot_changes_and_restore_wait_for_a_pending_clone(host, mgr, tmp_path):
+    stop_clone_after_the_base_snapshot(mgr, host, tmp_path)
+    host.calls.clear()
+    for call in (lambda: mgr.create_snapshot(U2, S9, "s9"), lambda: mgr.delete_snapshot(U2, BASE),
+                 lambda: mgr.restore(U2, BASE, REQ)):
+        with pytest.raises(VolumeError, match="being created from snapshot"):
+            call()
+    assert changes(host) == []
+
+
+def test_recover_skips_a_pending_clone_and_the_next_post_finishes_it(host, mgr, tmp_path):
+    # 요청 크기와 권한이 태그에 없으므로 시작 복구는 올리지 않는다. anf-api가 같은 POST를 다시 보낸다 (결정 10)
+    stop_clone_after_the_base_snapshot(mgr, host, tmp_path)
+    host.reboot()
+    mgr.recover()
+    assert list(host.instances) == [U1]
+    assert mgr.record(U2)["state"] == "offline"
+    assert not any(t.startswith(mountpoint(tmp_path, "vol2")) for t in host.mounts)
+    clone(mgr)
+    assert_cloned_from_s2(host, mgr, tmp_path)
