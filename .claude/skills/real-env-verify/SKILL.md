@@ -114,8 +114,9 @@ PASS n / FAIL n / UNVERIFIED n
 
 ## 스택별 명령
 
-기술 스택은 정해졌다(ADR D-01~D-04: FastAPI 백엔드, React + TypeScript 대시보드, NFSv3·NFSv4.1, Docker 클라이언트). 테스트는 저장소 루트에서 OS에 맞는 가상환경의 Python으로 `python -m pytest`를 실행한다 (D-14, `CLAUDE.md`의 Commands). 아래 명령은 아직 비어 있다.
-- 서비스 실행, API 호출: 계정 기능을 구현한 직후 채운다.
-- 클라이언트 컨테이너 실행과 마운트: 스토리지 백엔드(D-06)와 Docker 위치(D-10)가 정해진 뒤 볼륨 기능에서 채운다.
+기술 스택은 정해졌다(ADR D-01~D-04: FastAPI 백엔드, React + TypeScript 대시보드, NFSv3·NFSv4.1, Docker 클라이언트). 서비스 실행(anf-api, storage agent), WSL 데이터 플레인 setup, 테스트, lint 명령은 `CLAUDE.md`의 "Commands and architecture" 절을 그대로 쓴다. 여기에 옮겨 적지 않는다. 두 곳에 두면 한쪽이 낡기 때문이다.
 
-채우는 작업은 harness:evolve로 한다.
+e2e 검증 코드는 기존 도우미를 먼저 재사용하고, 새 기능에 필요한 것만 기능별 도우미로 더한다. `snapshot_live.py`와 `revert_live.py`가 그렇게 만들어졌다.
+- `backend/tests/e2e/live_api.py`: anf-api를 실제 uvicorn 프로세스로 띄우고 멈추며 HTTP로 부른다. 결함 주입과 재시작 시험에 쓴다.
+- `backend/tests/e2e/dataplane_live.py`: storage agent(root), 일반 사용자 권한의 anf-api, `anf-vnet`의 클라이언트 컨테이너를 다루는 픽스처(`agent`, `api`, `clients`)와 데이터 플레인 관찰 도구다. 픽스처는 `conftest.py`가 등록한다.
+- `backend/tests/e2e/snapshot_live.py`, `revert_live.py`: 스냅샷·되돌리기 경로와 그 관찰 도구다.
