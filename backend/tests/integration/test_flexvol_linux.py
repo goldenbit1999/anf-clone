@@ -126,7 +126,11 @@ def test_create_mount_delete(mgr, vol, protocol):
     assert wrote.stdout.strip() == "770"
     assert (mp / "f").read_text() == "hello\n"
     for vers in REFUSED[protocol]:
-        assert client(ip, token, vers, "true").returncode != 0, f"vers={vers} mounted a {protocol} volume"
+        r = client(ip, token, vers, "true")
+        # 거절 이유까지 본다: soft·timeo=20 마운트라 서버가 늦어도 실패하기 때문이다
+        assert r.returncode != 0 and ("Protocol not supported" in r.stderr
+                                      or "requested NFS version or transport protocol is not supported" in r.stderr), (
+            f"vers={vers} on a {protocol} volume", r.returncode, r.stderr)
 
     mgr.create(vid, f"/{token}", GIB, 770, protocol)  # 같은 요청은 멱등
     assert len(mgr.records(name=name)) == 1

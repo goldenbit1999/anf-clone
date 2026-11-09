@@ -301,7 +301,9 @@ def test_ac07_path_uniqueness_and_immutable_properties(agent, api, clients):
     note("AC-07 after rejected changes", client=out(df), lv_size=lvs_volumes()[lv_name(fsid)]["size"])
     assert df.returncode == 0 and df.stdout.splitlines()[-1] == "first"
     assert int(df.stdout.split()[1]) <= GIB
-    assert one_shot(ip, tok + "x", "3").returncode != 0  # 바뀌지 않은 경로만 마운트된다
+    wrong = one_shot(ip, tok + "x", "3")  # 바뀌지 않은 경로만 마운트된다
+    note("AC-07 mount of the rejected path", **out(wrong))
+    assert wrong.returncode != 0 and "access denied by server" in wrong.stderr, out(wrong)
 
     same = call("PUT", vol_url(ACCT, POOL, "v07"), vol_body(tok))
     lro_headers = sorted(h for h in same.headers if h in ("azure-asyncoperation", "location"))
