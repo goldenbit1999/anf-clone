@@ -4,6 +4,7 @@
 이 모듈은 컨트롤 플레인 규칙과, agent를 부르는 작업 처리기(`make_handlers`)를 맡는다.
 규칙 위반은 검사와 쓰기를 같은 트랜잭션에서 하고 동기로 거절한다
 (결정 13·14). 검사 순서: 이름 → 본문 형식 → 부모 존재·상태 → 진행 중 작업 → 불변 속성 → 경로 중복 → 용량.
+스냅샷에서 만드는 볼륨(`snapshotId`, FR-07)은 부모 검사 뒤에 원본 스냅샷을 검사한다 (복원 설계 결정 13).
 
 데이터 효과를 아직 만들지 않은 속성은 저장만 하지 않고 거절한다. 클론이 지금 하는 값과 같으면 받는다 (결정 4).
 """
@@ -29,7 +30,7 @@ from anf_api.arm_rules import (
     volume_id,
 )
 from anf_api.capacity_pools import MIBPS_PER_TIB, TIB
-from anf_api.snapshots import snapshot_not_found
+from anf_api.snapshots import ensure_not_cloning, snapshot_not_found
 from anf_api.state_store import Operation, Resource, StateStore, Tx
 
 GIB = 1 << 30
@@ -48,22 +49,27 @@ _PROTOCOLS = ("NFSv3", "NFSv4.1")
 _NETWORK_FEATURES = ("Basic", "Standard")
 
 _READ_ONLY = {"id", "name", "type", "etag", "systemData"}
-_READ_ONLY_PROPERTIES = {"provisioningState", "actualThroughputMibps", "mountTargets"}
-# 클론이 한 가지 값만 지원하고 응답에는 넣지 않는 속성. 그 값이면 받는다
-_FIXED = {"kerberosEnabled": False, "ldapEnabled": False, "isLargeVolume": False, "coolAccess": False}
-# 값이 있으면 미룬 기능이다: Manual QoS 처리량(FR-08), 스냅샷·백업 복원, 데이터 보호(복제)
-_NOT_YET = {"throughputMibps", "snapshotId", "backupId", "dataProtection"}
+_READ_ONLY_PROPERTIES = {"provisioningState", "actualThroughputMibps", "mountTargets", "originatingResourceId"}
+# 클론이 한 가지 값만 지원하고 응답에는 넣지 않는 속성. 그 값이면 받는다.
+# deleteBaseSnapshot: 스펙과 문서가 지우는 대상을 다르게 읽혀 false만 받는다 (복원 설계 결정 7)
+_FIXED = {"kerberosEnabled": False, "ldapEnabled": False, "isLargeVolume": False, "coolAccess": False,
+          "deleteBaseSnapshot": False}
+# 값이 있으면 미룬 기능이다: Manual QoS 처리량(FR-08), 백업 복원, 데이터 보호(복제)
+_NOT_YET = {"throughputMibps", "backupId", "dataProtection"}
 # 생성 때 요청 값을 쓰는 속성
 _SETTABLE = ("creationToken", "usageThreshold", "subnetId", "protocolTypes", "networkFeatures", "unixPermissions")
 # 서비스가 정하는 값. 요청 값이 그와 다르면 미룬 기능이다
 _SERVICE_HELD = ("serviceLevel", "snapshotDirectoryVisible", "securityStyle", "exportPolicy")
-_PROPERTIES = {*_SETTABLE, *_SERVICE_HELD, "fileSystemId", *_FIXED, *_NOT_YET}
-# 생성 뒤 바꿀 수 없는 속성과 ANF 오류 문서의 문구 [볼륨 브리프 문서 7]. subnetId 문구는 같은 모양으로 지었다
+_PROPERTIES = {*_SETTABLE, *_SERVICE_HELD, "fileSystemId", "snapshotId", *_FIXED, *_NOT_YET}
+# 생성 뒤 바꿀 수 없는 속성과 ANF 오류 문서의 문구 [볼륨 브리프 문서 7]. subnetId·snapshotId 문구는 같은 모양으로 지었다.
+# snapshotId는 생성 때만 쓴다 (x-ms-mutability read, create). 원래 없던 볼륨에 넣는 것도 바꾸는 것이다 (복원 결정 12)
 _IMMUTABLE = {
     "creationToken": "CreationToken cannot be changed.",
     "subnetId": "SubnetId cannot be changed.",
     "fileSystemId": "FileSystemId cannot be changed.",
+    "snapshotId": "SnapshotId cannot be changed.",
 }
+_ARM_IDS = ("subnetId", "snapshotId")  # ARM ID는 대소문자를 구분하지 않는다
 # 생성 뒤에도 바꿀 수 있는 속성. Azure 네트워크 개념이라 데이터 효과가 없고 저장만 한다
 _CHANGEABLE = {"networkFeatures"}
 
@@ -145,6 +151,13 @@ def _check_property(key: str, value, min_size: int):
         if not isinstance(value, dict):
             raise invalid_content("The 'properties.exportPolicy' property must be an object.")
         return value
+    if key == "snapshotId":  # 스냅샷의 ARM 리소스 ID (format: arm-id) [복원 브리프 스펙 1·2]
+        if not isinstance(value, str) or not _SNAPSHOT_ID.fullmatch(value):
+            raise invalid_content(
+                "The 'properties.snapshotId' property must be a snapshot resource ID: /subscriptions/{id}"
+                "/resourceGroups/{group}/providers/Microsoft.NetApp/netAppAccounts/{account}/capacityPools/{pool}"
+                "/volumes/{volume}/snapshots/{snapshot}.")
+        return value
     # fileSystemId: 읽기 전용이지만 같은 값을 다시 보내는 것은 허용된다 [볼륨 브리프 문서 7]
     if not isinstance(value, str):
         raise invalid_content("The 'properties.fileSystemId' property must be a string.")
@@ -169,7 +182,7 @@ def _check_properties(props, min_size: int) -> dict:
                 raise invalid_content(f"The 'properties.{key}' property must be true or false.")
             if value != _FIXED[key]:
                 raise unsupported_property(f"properties.{key}")
-        elif not (key == "unixPermissions" and value is None):  # nullable [스펙 2]
+        elif not (key in ("unixPermissions", "snapshotId") and value is None):  # nullable [스펙 2]
             changes[key] = _check_property(key, value, min_size)
     return changes
 
@@ -312,6 +325,11 @@ def _new_volume(tx: Tx, rid: str, parent_id: str, subscription_id: str, resource
         "protocolTypes": ["NFSv3"], "networkFeatures": "Basic", "unixPermissions": "0770",
         "snapshotDirectoryVisible": True, "securityStyle": "unix",
     }
+    if "snapshotId" in changes:
+        snap, origin = _restore_source(tx, rid, changes)
+        # 저장된 스냅샷 ID를 남긴다. 주지 않은 프로토콜과 권한은 원본 볼륨 값이다 (복원 결정 3)
+        props.update(snapshotId=snap.id, protocolTypes=origin.properties["protocolTypes"],
+                     unixPermissions=origin.properties["unixPermissions"])
     props.update({key: changes[key] for key in _SETTABLE if key in changes})
     props["exportPolicy"] = {"rules": [default_export_rule(props["protocolTypes"])]}
     for key in _SERVICE_HELD:
@@ -335,12 +353,44 @@ def _new_volume(tx: Tx, rid: str, parent_id: str, subscription_id: str, resource
     )
 
 
+def _restore_source(tx: Tx, rid: str, changes: dict) -> tuple[Resource, Resource]:
+    """snapshotId의 (스냅샷, 그 볼륨). 검사 순서: 계정 → 스냅샷 존재 → 진행 중 작업 → 스냅샷 상태 → 볼륨 상태 →
+    크기 하한 (복원 설계 결정 2·4·13, §4.2). ANF의 거절 코드는 [미확인]이라 문구는 클론 규칙이다."""
+    snapshot_rid = changes["snapshotId"]
+    account = rid.split("/capacityPools/", 1)[0]
+    if not snapshot_rid.lower().startswith(account.lower() + "/capacitypools/"):
+        raise ArmError(400, "BadRequest", f"The snapshot '{snapshot_rid}' must be in the same NetApp account as the "
+                                          f"new volume '{rid}'.")
+    snap = tx.get_resource(snapshot_rid)
+    if snap is None:
+        parts = snapshot_rid.split("/")  # .../netAppAccounts/{a}/capacityPools/{p}/volumes/{v}/snapshots/{s}
+        raise snapshot_not_found(parts[-1], parts[-7], parts[-5], parts[-3])
+    origin = tx.get_resource(snap.parent_id)
+    for busy in (snap, origin):
+        if tx.active_operation(busy.id) is not None:
+            raise ArmError(409, "Conflict", f"Cannot create volume '{rid}' from snapshot '{snap.id}' because an "
+                                            f"operation is in progress on '{busy.id}'. Wait until it is finished, "
+                                            "and then retry.")
+    if snap.provisioning_state != "Succeeded":
+        raise ArmError(400, "BadRequest", f"Volume cannot be created from snapshot '{snap.id}' because the snapshot "
+                                          "isn't in state succeeded.")
+    if origin.provisioning_state != "Succeeded":
+        raise ArmError(400, "BadRequest", f"Volume cannot be created from snapshot '{snap.id}' because its volume "
+                                          "isn't in state succeeded.")
+    floor = origin.properties["usageThreshold"]
+    if changes["usageThreshold"] < floor:  # ext4 축소는 오프라인뿐이다 (결정 4)
+        raise ArmError(400, "BadRequest", "The 'properties.usageThreshold' of a volume created from a snapshot must "
+                                          f"be at least the source volume's {floor // GIB} GiB.")
+    return snap, origin
+
+
 def _apply_update(props: dict, changes: dict) -> dict:
     """갱신(PUT·PATCH)의 새 properties. 같은 값을 다시 보내는 것은 허용한다 (결정 4)."""
     def same(key):
-        if key == "subnetId":  # ARM ID는 대소문자를 구분하지 않는다
-            return changes[key].lower() == props[key].lower()
-        return changes[key] == props[key]
+        old = props.get(key)  # snapshotId는 스냅샷에서 만든 볼륨에만 있다
+        if key in _ARM_IDS:
+            return old is not None and changes[key].lower() == old.lower()
+        return changes[key] == old
 
     for key in changes:
         if key in _IMMUTABLE and not same(key):
@@ -433,13 +483,14 @@ def delete_volume(store: StateStore, subscription_id: str, resource_group: str, 
                   name: str, correlation_id: str | None) -> Operation | None:
     """있으면 Deleting + DELETE 작업(202), 없으면 None(204). 스냅샷도 함께 지워진다: agent가 스냅샷부터 지우고,
     작업이 끝나면 볼륨 행과 스냅샷 행이 한 트랜잭션에서 지워진다. 그래서 진행 중인 스냅샷 작업이 있으면 409다
-    (스냅샷 설계 결정 2)."""
+    (스냅샷 설계 결정 2). 이 볼륨의 스냅샷에서 새 볼륨을 만드는 중이어도 409다 (복원 설계 결정 9)."""
     rid = _id(subscription_id, resource_group, account, pool, name)
     with store.transaction() as tx:
         res = tx.get_resource(rid)
         if res is None:
             return None
         _ensure_terminal(tx, res)
+        ensure_not_cloning(tx, res.id, "delete")
         for snap in tx.list_children(rid, SNAPSHOT_TYPE):
             if tx.active_operation(snap.id) is not None:
                 raise ArmError(409, "Conflict",
@@ -455,7 +506,8 @@ def revert_volume(store: StateStore, subscription_id: str, resource_group: str, 
                   name: str, body, correlation_id: str | None) -> Operation:
     """볼륨을 스냅샷으로 되돌린다: Reverting + POST 작업(202) [녹화 R3]. 작업 입력에 고른 스냅샷을 남긴다.
     검사 순서: 이름 → 본문 → 볼륨 존재 → 볼륨 진행 중 작업 → 볼륨 상태 → 스냅샷 존재 → 그 볼륨 스냅샷의
-    진행 중 작업 → 스냅샷 상태 (되돌리기 설계 결정 6, §4.2)."""
+    진행 중 작업 → 스냅샷 상태 (되돌리기 설계 결정 6, §4.2). 이 볼륨의 스냅샷에서 새 볼륨을 만드는 중이면 볼륨 진행 중
+    작업처럼 409다: 되돌리기가 더 새 스냅샷을 지운다 (복원 설계 결정 9)."""
     rid = _id(subscription_id, resource_group, account, pool, name)
     snapshot_rid = parse_revert_body(body)
     if not snapshot_rid.lower().startswith(rid.lower() + "/snapshots/"):
@@ -465,6 +517,7 @@ def revert_volume(store: StateStore, subscription_id: str, resource_group: str, 
         if res is None:
             raise not_found(rid)
         _ensure_terminal(tx, res)
+        ensure_not_cloning(tx, res.id, "revert")
         if res.provisioning_state != "Succeeded":
             raise ArmError(400, "BadRequest", "Volume cannot be reverted when it isn't in state succeeded.")
         snap = tx.get_resource(snapshot_rid)
@@ -496,13 +549,23 @@ def make_handlers(store: StateStore, storage) -> dict:
     CREATE·UPDATE·PATCH는 모두 agent에 볼륨을 보장하고 data LIF IP로 mountTargets를 기록한다.
     agent 요청은 멱등이라 재시작 뒤 다시 실행해도 같다. DELETE는 agent 볼륨을 지운다.
     실패하면 예외가 그대로 나가고 공통 워커가 작업을 Failed로 끝낸다.
+    스냅샷에서 만드는 볼륨은 끝날 때까지 agent에 원본(FlexClone 필드)을 넘긴다 (복원 설계 결정 10·14).
     """
+    def clone_source(props: dict) -> tuple[str, str] | None:
+        """(원본 볼륨 uuid, 원본 스냅샷 uuid). 한 번 끝난 볼륨(originatingResourceId)은 일반 볼륨이다.
+        끝나기 전에는 원본 보호(결정 9)가 있어 원본 행이 남아 있다."""
+        if "snapshotId" not in props or "originatingResourceId" in props:
+            return None
+        snap = store.get_resource(props["snapshotId"])
+        return store.get_resource(snap.parent_id).properties["fileSystemId"], snap.properties["snapshotId"]
+
     async def ensure(op: Operation) -> None:
         props = store.get_resource(op.resource_id).properties
         fsid = props["fileSystemId"]
+        clone = clone_source(props)
         ip = await storage.ensure_volume(
             fsid, "/" + props["creationToken"], props["usageThreshold"], int(props["unixPermissions"]),
-            _AGENT_PROTOCOL[props["protocolTypes"][0]], correlation_id=op.correlation_id)
+            _AGENT_PROTOCOL[props["protocolTypes"][0]], correlation_id=op.correlation_id, clone=clone)
         with store.transaction() as tx:
             res = tx.get_resource(op.resource_id)
             # 워커가 끝낼 때 리소스를 다시 읽으므로 여기서 쓴 값이 남는다
@@ -520,6 +583,21 @@ def make_handlers(store: StateStore, storage) -> dict:
                 for snap in settled:
                     if snap.properties["snapshotId"] not in remaining and tx.active_operation(snap.id) is None:
                         tx.delete_resource(snap.id)
+        if clone is not None:
+            # 다 만들었다: agent가 찍은 base 스냅샷을 Creating 없이 Succeeded 행으로 더하고, originatingResourceId로
+            # 원본 보호를 푼다. 한 트랜잭션이라 재시작 뒤 다시 실행해도 행이 겹치지 않는다 (복원 결정 7·9)
+            records = await storage.snapshot_records(fsid, correlation_id=op.correlation_id)
+            with store.transaction() as tx:
+                res = tx.get_resource(op.resource_id)
+                for record in records:
+                    tx.put_resource(Resource(
+                        id=f"{res.id}/snapshots/{record['name']}", type=SNAPSHOT_TYPE,
+                        subscription_id=res.subscription_id, resource_group=res.resource_group,
+                        name=record["name"], location=res.location, tags={},
+                        properties={"snapshotId": record["uuid"], "created": record["create_time"]},
+                        provisioning_state="Succeeded", parent_id=res.id))
+                res.properties = {**res.properties, "originatingResourceId": res.properties["snapshotId"]}
+                tx.put_resource(res)
 
     async def delete(op: Operation) -> None:
         props = store.get_resource(op.resource_id).properties

@@ -36,7 +36,7 @@ class FakeStorage:
         self.keep: set[str] | None = None  # 되돌린 뒤 남길 스냅샷 이름. None이면 모두 남긴다
         self.uuids: dict[str, str] = {}  # 스냅샷 uuid → 이름
 
-    async def ensure_volume(self, *args, correlation_id=None):
+    async def ensure_volume(self, *args, correlation_id=None, clone=None):
         self.calls.append(("ensure_volume", *args))
         return "172.30.0.129"
 

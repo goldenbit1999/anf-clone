@@ -10,6 +10,7 @@ import uuid
 
 from anf_api.arm_rules import (
     SNAPSHOT_TYPE,
+    VOLUME_TYPE,
     ArmError,
     check_account_name,
     check_pool_name,
@@ -99,6 +100,20 @@ def _ensure_volume_not_reverting(vol: Resource, snap: Resource) -> None:
                                         f"'{vol.id}' is being reverted.")
 
 
+def ensure_not_cloning(tx: Tx, rid: str, verb: str) -> None:
+    """rid(스냅샷, 또는 그 스냅샷들의 볼륨)에서 만드는 중인 새 볼륨이 있으면 409다 (복원 설계 결정 9).
+    새 볼륨이 처음 Succeeded가 되면(처리기가 originatingResourceId를 쓰면) 풀린다. 그 전에 원본 스냅샷이 사라지면
+    agent가 생성을 끝낼 수 없고 같은 PUT으로도 회복하지 못한다."""
+    for vol in tx.all_of_type(VOLUME_TYPE):
+        source = vol.properties.get("snapshotId")
+        if source is None or "originatingResourceId" in vol.properties:
+            continue
+        if source.lower() == rid.lower() or source.lower().startswith(rid.lower() + "/snapshots/"):
+            raise ArmError(409, "Conflict", f"Cannot {verb} '{rid}' because volume '{vol.id}' is being created from "
+                                            f"snapshot '{source}'. Wait until it is created, or delete it, and then "
+                                            "retry.")
+
+
 def snapshot_not_found(name: str, account: str, pool: str, volume: str) -> ArmError:
     return ArmError(  # 녹화 R1의 문구
         404, "ResourceNotFound",
@@ -181,6 +196,7 @@ def delete_snapshot(store: StateStore, subscription_id: str, resource_group: str
         vol = tx.get_resource(parent_id)
         _ensure_volume_not_deleting(vol, rid)
         _ensure_volume_not_reverting(vol, res)
+        ensure_not_cloning(tx, res.id, "delete")
         op = tx.create_operation(res, "DELETE", "Deleting", correlation_id=correlation_id)
         res.provisioning_state = "Deleting"
         tx.put_resource(res)

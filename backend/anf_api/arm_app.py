@@ -250,9 +250,13 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         created, res, op = volumes.put_volume(store, subscription_id, resource_group, account_name, pool_name,
                                               volume_name, body, request.state.correlation_id, min_size)
         worker.notify()
-        # 풀과 같다: 생성 201, 갱신 200, 둘 다 Azure-AsyncOperation만 (녹화 V1, V2)
-        return JSONResponse(volumes.volume_body(res), status_code=201 if created else 200,
-                            headers={"Azure-AsyncOperation": _operation_url(request, op)})
+        # 풀과 같다: 생성 201, 갱신 200, 둘 다 Azure-AsyncOperation만 (녹화 V1, V2).
+        # 스냅샷에서 만드는 생성 201은 두 헤더다 (녹화 R4, 복원 설계 §4.1)
+        if created and "snapshotId" in res.properties:
+            headers = _tracking_headers(request, op)
+        else:
+            headers = {"Azure-AsyncOperation": _operation_url(request, op)}
+        return JSONResponse(volumes.volume_body(res), status_code=201 if created else 200, headers=headers)
 
     @app.get(_VOLUME)
     async def get_volume(subscription_id: str, resource_group: str, account_name: str, pool_name: str,
