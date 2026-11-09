@@ -2,11 +2,14 @@
 
 - 상태: in_progress
 - FR: FR-05 (스냅샷: 생성, 조회, 목록, 삭제, NFS 클라이언트의 `.snapshot`)
-- 마지막 완료 단계: 3
-- 재개할 단계: 4 (실환경 검증)
+- 마지막 완료 단계: 4
+- 재개할 단계: 5 (개념 문서)
 - 검증 대상 코드: 제품 코드 내용 해시 `f5607a082c70d4dad6899f7722cfdcc486eb67bd249210c3c3cd5e9ecf2738f1`, 커밋 `27757aa` (브랜치 `feature/snapshot`, 작업 트리와 같은 값)
-- verifier 에이전트 ID:
-- 미해결: 없음
+- verifier 에이전트 ID: a5f7546514170897e (1회차, 2026-11-08)
+- 미해결: 없음 (FR-05를 막지 않는 관찰 두 가지는 아래 "후속 후보")
+- 후속 후보 (4단계 1회차 관찰, 이번 사이클 코드 때문이 아님):
+  - knfsd 첫 시도 추적 실패(재시작)율이 이번 환경에서 약 30%였다(볼륨 2회차 7.8%). main과 현재 진입점의 A/B가 7/20 대 6/20이라 이번 변경과 무관하다. 모두 2회째에 성공했지만, 진입점은 5회 연속 실패하면 exit 1이고 볼륨이 `Failed`가 된다(30%면 약 0.24%). 시도 횟수나 판정 방식을 바꿀지는 별도 작업으로 본다.
+  - 볼륨 e2e AC-09 앞 단계의 soft v3 `dd conv=fsync`가 4회 중 1회 `I/O error`였다. 테스트 클라이언트의 짧은 `timeo` 때문으로 추정한다[추론].
 
 ## 선행 확인 (0단계)
 
@@ -27,6 +30,21 @@
 
 | 기준 ID | 기준 | 최신 결과 | 근거 보고서 | 검증 대상 코드 |
 | --- | --- | --- | --- | --- |
+| AC-01 | 생성 계약·상태 | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-02 | 데이터 NFSv3 (`.snapshot`에서 이전 내용) | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-03 | 데이터 NFSv4.1 | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-04 | 불변 (root 클라이언트 쓰기 거절, `.snapshot` +i) | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-05 | 시점 (쓰는 도중 생성, `e2fsck` 깨끗) | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-06 | DELETE (사용 중인 스냅샷) | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-07 | 거절 | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-08 | 재전송 PUT | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-09 | 진행 중 충돌 | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-10 | 볼륨 연쇄 삭제 | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-11 | 실패와 회복 | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-12 | 재시작 복구 | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-13 | agent API | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-14 | 회귀 (계정·풀·볼륨 e2e, 통합) | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
+| AC-15 | v4.1 인스턴스 재시작 (결정 1) | PASS | `04_verifier_report.md` | `f5607a08…` (`27757aa`) |
 
 ## 이력
 
@@ -40,3 +58,5 @@
 - 2026-11-08 단계 3 시작 — 무효화 규칙대로 `docs/feature-status.md`의 계정·풀·볼륨을 `in_progress`로 되돌렸다(AC-14 회귀 대기).
 - 2026-11-08 단계 3 agent 쪽 커밋 `a2a819e` — 스냅샷 LV·`.snapshot`(+i)·스냅샷별 export 파일, 볼륨 연쇄 삭제, 시작 복구, 진입점의 lease·grace 30/45와 유예 판정(결정 1). 단위 테스트 GREEN, 통합 테스트(WSL root) 10 passed. 설계 §9 1~6.
 - 2026-11-08 단계 3 완료 — anf-api 쪽 커밋 `27757aa`: `snapshots.py`(새), `arm_rules.py`, `state_store.py`(연쇄 삭제), `storage_client.py`, `volumes.py`(스냅샷 작업 중 볼륨 DELETE 409), `arm_app.py`(라우트). 계약 테스트 `tests/contract/test_snapshots_api.py` 26개를 먼저 RED로 확인했다. 전체 662 passed, 94 skipped(실환경·root 테스트), ruff 통과. 설계 §9 7. e2e(실환경) 테스트는 볼륨 사이클처럼 verifier가 `backend/tests/e2e/`에 쓴다.
+- 2026-11-08 단계 4 시작 — real-env-verifier 1회차(ID a5f7546514170897e). AC-01~AC-15, AC-14는 계정·풀·볼륨 e2e 전체와 통합 테스트. 스냅샷 e2e는 verifier가 `backend/tests/e2e/test_snapshot_*_live.py`로 쓴다.
+- 2026-11-08 단계 4 완료 — 1회차 PASS 15 / FAIL 0 / UNVERIFIED 0 (`04_verifier_report.md`). 해시는 시작과 끝이 같다. verifier가 스냅샷 e2e(`snapshot_live.py`, `test_snapshot_{contract,data,recovery}_live.py`)를 썼고, 이번 사이클 변경에 맞게 볼륨 e2e 두 줄을 고쳤다. 리더 판단: agent 로그 문구는 되돌리지 않고 테스트 수정을 받아들임, errno는 관찰값(EROFS/EPERM/EBUSY)으로 바로잡음(설계 §9 8~9). Windows 662 passed, 112 skipped(live·root), ruff 통과를 메인이 다시 확인했다.

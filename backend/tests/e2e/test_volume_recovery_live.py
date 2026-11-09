@@ -135,7 +135,7 @@ def test_ac12b_agent_killed_during_create_job(agent, api, stage):
     r = call("PUT", vol_url(ACCT, POOL, "v12b"), vol_body(tok))
     assert r.status == 201
     fsid = fsid_of(r.json())
-    marker = f"POST volume {fsid}: job"
+    marker = f"POST /api/storage/volumes/{fsid}: job"  # agent 로그 문구 (스냅샷 사이클에서 job 설명과 같아졌다)
     mp = f" {NS / tok} "
     reached = {
         "job-start": lambda: marker in agent.text()[offset:],
