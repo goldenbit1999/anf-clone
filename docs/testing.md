@@ -95,7 +95,25 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 
 ### 소요 시간
 
-(전체 실행의 실측을 여기에 적는다.)
+인자 없는 전체 실행 한 번의 실측이다 (2026-11-10, WSL2 Ubuntu 24.04, 113개 테스트, 13개 파일, 단조 시계로 5,279초 = 약 88분).
+
+| 파일 | 테스트 | 초 |
+| --- | --- | --- |
+| `integration/test_flexvol_linux.py` | 30 | 421 |
+| `e2e/test_restore_new_volume_contract_live.py` | 8 | 376 |
+| `e2e/test_restore_new_volume_data_live.py` | 5 | 238 |
+| `e2e/test_snapshot_contract_live.py` | 5 | 105 |
+| `e2e/test_snapshot_data_live.py` | 8 | 205 |
+| `e2e/test_snapshot_recovery_live.py` | 5 | 254 |
+| `e2e/test_snapshot_revert_contract_live.py` | 11 | 517 |
+| `e2e/test_snapshot_revert_data_live.py` | 5 | 162 |
+| `e2e/test_throughput_limit_contract_live.py` | 8 | 255 |
+| `e2e/test_throughput_limit_data_live.py` | 7 | 2,250 |
+| `e2e/test_volume_contract_live.py` | 7 | 110 |
+| `e2e/test_volume_data_live.py` | 7 | 214 |
+| `e2e/test_volume_recovery_live.py` | 7 | 161 |
+
+처리량 데이터 파일이 전체의 43%다. 한도가 걸린 채로 데이터를 실제로 흘려 재는 시험이라 줄일 수 없다. 이렇게 긴 실행은 도구 호출 하나에 붙여 두지 말고 WSL 안에서 분리해 띄운다(`setsid nohup bash scripts/run-dataplane-tests.sh > <로그> 2>&1 &`). Windows 호스트의 메모리가 부족해지면 붙어 있던 명령이 강제 종료되고, 그때 돌던 테스트의 볼륨과 컨테이너가 남는다.
 
 ## 4. 수락 기준과 테스트
 

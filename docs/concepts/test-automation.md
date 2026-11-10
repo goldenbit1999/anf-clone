@@ -1,10 +1,10 @@
 # 테스트 자동화 (FR-10, 데이터 플레인 실행기와 skip 판정)
 
-> 테스트는 기능마다 이미 있었고 각 사이클의 검증에서 통과했다. FR-10이 더한 것은 "자동화"다. (1) root 명령 하나 `scripts/run-dataplane-tests.sh`가 `dataplane` 마커 테스트 113개(13개 파일)를 파일마다 따로 돌리고, 통과·실패·skip·남은 것을 종료 코드 하나로 알린다. (2) "skip은 PASS가 아니다"라는 판정을 `backend/tests/junit_gate.py` 하나로 모아 CI와 실행기가 같은 코드로 지킨다. (3) `docs/testing.md`가 PRD 수락 기준 문장마다 그것을 확인하는 pytest node ID를 적고, 단위 테스트가 그 node ID가 실제로 수집되는지 지킨다. 검증 1회차는 PASS 6 / FAIL 0 / UNVERIFIED 2(AC-01 명령 하나로 끝까지, AC-07 Actions 실행)였다.
+> 테스트는 기능마다 이미 있었고 각 사이클의 검증에서 통과했다. FR-10이 더한 것은 "자동화"다. (1) root 명령 하나 `scripts/run-dataplane-tests.sh`가 `dataplane` 마커 테스트 113개(13개 파일)를 파일마다 따로 돌리고, 통과·실패·skip·남은 것을 종료 코드 하나로 알린다. (2) "skip은 PASS가 아니다"라는 판정을 `backend/tests/junit_gate.py` 하나로 모아 CI와 실행기가 같은 코드로 지킨다. (3) `docs/testing.md`가 PRD 수락 기준 문장마다 그것을 확인하는 pytest node ID를 적고, 단위 테스트가 그 node ID가 실제로 수집되는지 지킨다. 검증은 2회차에서 PASS 8 / FAIL 0 / UNVERIFIED 0으로 닫혔다. 1회차(PASS 6 / UNVERIFIED 2)에 남은 AC-01은 인자 없는 전체 실행 한 번(13개 파일·113개 통과, skip 0, 5,279 s)으로, AC-07은 PR #19의 Actions run으로 PASS가 됐다.
 
-코드 인용 기준: 커밋 `961e316` (제품 코드 내용 해시 `f99bc5cfbcf1429d3040a72b4c30205fe983c8e806f375b57c30c15c9dc1a6d3`). FR-10은 제품 코드를 바꾸지 않았다. 검증 1회차의 대상 코드는 `6993c17`(HEAD `db3468c`, 같은 경로)이고, 그 뒤 `961e316`은 커밋 메시지대로 검증 1회차 기록과 `docs/testing.md`의 문구 하나만 바꿨다.
+코드 인용 기준: 커밋 `961e316` (제품 코드 내용 해시 `f99bc5cfbcf1429d3040a72b4c30205fe983c8e806f375b57c30c15c9dc1a6d3`). FR-10은 제품 코드를 바꾸지 않았다. 검증 1회차의 대상 코드는 `6993c17`(HEAD `db3468c`, 같은 경로)이고, 그 뒤 `961e316`은 커밋 메시지대로 검증 1회차 기록과 `docs/testing.md`의 문구 하나만 바꿨다. 2회차의 대상 HEAD `ace0d39`도 `scripts`·`backend`·`pyproject.toml`·`.github`가 `6993c17`과 같다(2회차 보고서).
 
-FR-10은 ANF 기능이 아니라 엔지니어링 장치다. PRD §8에서 FR-10은 조사(1단계)를 생략하는 FR이라 조사 브리프가 없고, 아래 1, 2절은 "해당 없음"이다. 사실의 근거는 설계(`_workspace/test-automation/02_main_design.md`, 결정 1~13과 §8 구현 중 변경), 진행 기록(`_workspace/test-automation/00_progress.md`), 검증 보고서(`_workspace/test-automation/04_verifier_report.md`, 1회차), `docs/testing.md`, ADR §9, 그리고 실제 코드다. 같은 종류의 앞 문서는 `docs/concepts/ci.md`다.
+FR-10은 ANF 기능이 아니라 엔지니어링 장치다. PRD §8에서 FR-10은 조사(1단계)를 생략하는 FR이라 조사 브리프가 없고, 아래 1, 2절은 "해당 없음"이다. 사실의 근거는 설계(`_workspace/test-automation/02_main_design.md`, 결정 1~13과 §8 구현 중 변경), 진행 기록(`_workspace/test-automation/00_progress.md`), 검증 보고서(`_workspace/test-automation/04_verifier_report.md` 1회차, `04_verifier_report_r2.md` 2회차), `docs/testing.md`, ADR §9, 그리고 실제 코드다. 같은 종류의 앞 문서는 `docs/concepts/ci.md`다.
 
 ---
 
@@ -119,7 +119,7 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 - **`main` (`:40-71`)**: XML마다 한 행(파일, 수집, 통과, 실패, 오류, skip, 초)을 찍고, 합계 행과 `collected N, skipped M` 줄을 찍는다 (`:47-58`). 통과 수는 `tests - failures - errors - skipped`로 계산한다(`line`, `:35-37`). 그다음 문제를 모은다: 읽을 수 없는 XML(`:61-62`, "pytest did not finish"), 수집 0개(`:63-64`), 실패·오류(`:65-66`), skip(`:67-68`, "Skipped tests are not passes. Run them here or deselect them by marker on purpose."). 하나라도 있으면 1 (`:71`).
 - 초는 XML의 `time`, 즉 pytest가 `perf_counter`로 잰 세션 시간이다(단조 시계, 설계 §8-4).
 - **CI의 옛 인라인 검사와 다른 점.** 옛 검사는 수집 0개와 skip만 봤다(`docs/concepts/ci.md` 3.2). 새 스크립트는 실패·오류와 읽을 수 없는 XML도 본다. CI에서는 Test 단계가 실패하면 다음 단계가 돌지 않으므로 이 추가 검사가 하는 일이 거의 없다. 필요한 곳은 실행기다. 실행기는 실패한 파일 뒤에도 계속 돌고, pytest가 죽은 파일은 XML이 없거나 중간에 끊긴다. 여러 XML을 합치는 것도 실행기 때문이다.
-- 출력이 모두 `print`로 표준 출력 한 곳에 가므로, 줄의 순서가 코드의 순서 그대로다. `ci.md` 5.2에는 옛 검사의 "오류 문구가 `collected …` 줄보다 먼저 찍힘"이 적혀 있다(원인은 표준 출력 버퍼링으로 적었다. 옛 검사는 `collected` 줄을 표준 출력에, 오류 문구를 `sys.exit(메시지)`로 표준 오류에 썼다). 코드로 보면 이 스크립트에서는 그 뒤바뀜이 생기지 않는다. Actions 로그에서는 아직 확인하지 않았다(AC-07).
+- 출력이 모두 `print`로 표준 출력 한 곳에 가므로, 줄의 순서가 코드의 순서 그대로다. `ci.md` 5.2에는 옛 검사의 "오류 문구가 `collected …` 줄보다 먼저 찍힘"이 적혀 있다(원인은 표준 출력 버퍼링으로 적었다. 옛 검사는 `collected` 줄을 표준 출력에, 오류 문구를 `sys.exit(메시지)`로 표준 오류에 썼다). 코드로 보면 이 스크립트에서는 그 뒤바뀜이 생기지 않는다. PR #19의 Actions run 42782709293에서는 이 단계가 표와 `collected 988, skipped 0`을 찍고 통과했다(AC-07). 오류 문구가 나오는 실패 경우는 Actions에서 보지 않았다.
 - **위치.** `backend/tests/` 아래에 두었다 (결정 6). TDD 훅의 면제 위치이고, 제품 코드 내용 해시(`backend/tests/` 제외)를 건드리지 않는다. `scripts/` 아래 `.py`로 두면 훅이 짝 테스트를 요구하는데 `scripts/`는 pytest 경로 밖이다. 이름이 `test_`로 시작하지 않으므로 pytest가 테스트로 모으지도 않는다.
 
 #### CI `.github/workflows/ci.yml`
@@ -204,22 +204,27 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 
 ## 5. 검증
 
-**판정은 real-env-verifier가 WSL 실환경에서 했다.** implementer의 실행은 참고 기록이다. 사용자 결정으로 verifier는 약 90분짜리 전체 묶음을 다시 돌리지 않고, 이미 끝난 실행 A(앞 9개 파일)와 실행 C(남은 4개 파일)의 결과 파일로 AC-01·02·03·05·06을 판정했다. 짧은 항목(AC-04, AC-05의 일부러 남기기, AC-03의 수집, AC-08)은 직접 돌렸다. 실행 A·C가 검증 대상 코드와 같은 코드로 돌았다는 것은 커밋 시각, 파일 수정 시각, `git diff --stat`으로 먼저 확인했다(보고서 "실행 A·C가 검증 대상 코드와 같은지").
+**판정은 real-env-verifier가 WSL 실환경에서 했다.** implementer의 실행은 참고 기록이다. 사용자 결정으로 verifier는 약 90분짜리 전체 묶음을 다시 돌리지 않고, 이미 끝난 실행 A(앞 9개 파일)와 실행 C(남은 4개 파일)의 결과 파일로 AC-01·02·03·05·06을 판정했다. 짧은 항목(AC-04, AC-05의 일부러 남기기, AC-03의 수집, AC-08)은 직접 돌렸다. 실행 A·C가 검증 대상 코드와 같은 코드로 돌았다는 것은 커밋 시각, 파일 수정 시각, `git diff --stat`으로 먼저 확인했다(보고서 "실행 A·C가 검증 대상 코드와 같은지"). 2회차는 1회차에 UNVERIFIED였던 AC-01·AC-07만 다시 판정했다. AC-01은 인자 없는 전체 실행 D의 결과 파일로(다시 돌리지 않음), AC-07은 PR #19의 Actions run으로 봤다. 1회차 뒤 코드가 바뀌지 않아 1회차 PASS는 다시 돌리지 않았다.
 
-**1회차 결과: PASS 6 / FAIL 0 / UNVERIFIED 2** (검증 대상 `6993c17`, HEAD `db3468c`)
+**결과: PASS 8 / FAIL 0 / UNVERIFIED 0** (1회차 PASS 6 / UNVERIFIED 2, 대상 `6993c17`·HEAD `db3468c`. 2회차 대상 HEAD `ace0d39`, 같은 코드)
 
 | 기준 | 결과 | 근거 |
 | --- | --- | --- |
-| AC-01 명령 하나로 전체, 종료 코드 0, skip 0 | UNVERIFIED | 인자 없는 실행 A가 대상을 13개 파일·113개로 잡았다(`pytest --collect-only -m dataplane`과 같은 수). 실행 A의 끝난 9개 파일과 실행 C의 4개 파일의 XML 13개를 게이트로 합치면 `total 113 113 0 0 0`, 게이트 종료 코드 0. testcase 이름 집합도 수집 목록 113개와 정확히 같다. 시간은 2,632 s + 2,767 s = 5,399 s(약 90분, 단조 시계)로 제한 3시간 안. **하지만 한 번의 실행이 13개 파일을 끝까지 돌고 종료 코드 0으로 끝난 적이 없다.** 그래서 한 요약으로 합친 종료 코드, 전체 실행 뒤의 남은 것 검사, 앞 9개 뒤에 4개를 같은 실행에서 이어 도는 경우(파일 사이 간섭, 약 90분 동안의 메모리)는 관찰되지 않았다 |
+| AC-01 명령 하나로 전체, 종료 코드 0, skip 0 | PASS (2회차. 1회차 UNVERIFIED) | 2회차: 인자 없는 실행 D 한 번이 13개 파일·113개를 돌고 `total 113 113 0 0 0`, `collected 113, skipped 0`, `left behind` 없음, `exit 0`, 5,279 s(약 88분, 단조 시계)로 끝났다. 수집 수는 `pytest --collect-only -m dataplane`과 같고, XML 13개의 testcase 이름 집합이 `collect.log`의 113개와 같다. 1회차: 실행 A가 끊겨 실행 A의 9개 파일과 실행 C의 4개 파일을 합친 결과(113개 통과, skip 0, 5,399 s)만 있었고, 한 번의 실행이 끝까지 돌고 0으로 끝난 출력이 없어 PASS로 세지 않았다 |
 | AC-02 실제 효과를 클라이언트에서 관찰하는 테스트가 통과 목록에 있다 | PASS | 항목마다 `.jsonl`에 클라이언트 쪽 근거가 있다. 아래 표 |
 | AC-03 대응표 | PASS | PRD 문장 25개가 대응표 23행에 모두 있다(FR-02·FR-03의 두 문장짜리 기준을 각각 한 행에 둠). node ID 41개 모두 수집(`not collected 0`). 데이터 플레인 node ID 29개가 실행 A·C의 통과 목록에 있고, 나머지 12개는 AC-08 실행에서 통과 |
 | AC-04 skip·실패는 1, 준비가 빠지면 2 | PASS | (a) 일반 사용자: `precheck failed: not root…`, exit 2. 8090을 다른 프로세스가 잡음: 원인과 그 프로세스가 찍히고 exit 2. 두 경우 모두 출력 폴더가 생기지 않았다. (b) `ANF_E2E_API_URL=`(빈 값)으로 계약 파일 하나: 5개 모두 SKIPPED, pytest는 exit 0, 실행기는 `collected 5, skipped 5`와 skip 문구를 찍고 exit 1. (c) 실패하는 임시 파일 + 계약 파일: 첫 파일 pytest exit 1, 이어서 둘째 파일이 실제 agent·anf-api로 `5 passed`, 요약 `total 6 5 1 0 0`, exit 1 |
-| AC-05 남기지 않음 | PASS | 실행 C의 `summary.txt`에 `left behind`가 없고 exit 0. 컨테이너 하나를 일부러 남기는 임시 테스트: `1 passed`인데 `left behind (not removed): container anfe2e-cli-fr10leak`, exit 1, 컨테이너는 그대로 있었다(지우지 않음) |
+| AC-05 남기지 않음 | PASS | 실행 C의 `summary.txt`에 `left behind`가 없고 exit 0. 2회차 보충: 실행 D는 빈 기준선(LV·컨테이너 없음)에서 끝까지 돌았고 `left behind` 줄이 없다. 기준선 예외도 걸리지 않은 경우다. 컨테이너 하나를 일부러 남기는 임시 테스트: `1 passed`인데 `left behind (not removed): container anfe2e-cli-fr10leak`, exit 1, 컨테이너는 그대로 있었다(지우지 않음) |
 | AC-06 재부팅 뒤 첫 실행 | PASS | 실행 C: 부팅 7초 뒤 기준선, 첫 줄 `VG anf: not attached (WSL restarted?); attaching it the way the storage agent does at start`, 4개 파일 28개 통과, exit 0. 구현 때의 시험 `20261110T045258Z`: 부팅 16초 뒤, 통합 30 + e2e 데이터 7 = 37개 통과, exit 0. 검증 중에도 WSL VM이 여러 번 다시 떠서 AC-04 (b)·(c)가 같은 첫 줄로 시작했다 |
-| AC-07 CI가 같은 판정 코드를 쓰고 Actions가 통과 | UNVERIFIED | `ci.yml:43-51`이 `junit_gate.py`를 부르는 것과, `main` 대비 바뀐 것이 그 한 줄뿐인 것은 확인했다. 같은 두 명령을 WSL에서 돌린 결과가 AC-08이다. PR이 없어 Actions 실행은 보지 않았다 |
+| AC-07 CI가 같은 판정 코드를 쓰고 Actions가 통과 | PASS (2회차. 1회차 UNVERIFIED) | PR #19의 run 42782709293: `event: pull_request`, head `ace0d39`, 결론 success. backend 작업(Lint, Test, Fail on skipped tests, Hook tests)과 frontend 작업(Install, Type check, Test, Build) 모두 success. Test 단계 `988 passed, 113 deselected in 143.39s`. Fail on skipped tests 단계가 `python backend/tests/junit_gate.py pytest-results.xml`을 돌려 `total 988 988 0 0 0`, `collected 988, skipped 0`을 찍었다. 1회차 WSL 실행(AC-08)과 같은 스크립트·같은 수. 1회차에는 `ci.yml:43-51`의 호출만 확인했다 |
 | AC-08 제품 코드 불변, 비데이터 플레인 skip 0, ruff | PASS | 해시가 시작·끝 모두 `f99bc5cf…`. WSL `-m "not dataplane"`이 `988 passed, 113 deselected in 190.09s`, 게이트 `collected 988, skipped 0`. ruff `All checks passed!` |
 
-> **2회차 결과 자리 (리더가 채운다).** AC-01: 인자 없는 전체 실행 D(`/var/tmp/anf-clone-tests/20261110T080605Z`, 2026-11-10 시작, 시작 때 데이터 플레인 비어 있음, VG는 실행기가 붙임)의 `summary.txt`로 판정한다. AC-07: PR의 Actions 실행(backend·frontend 통과, "Fail on skipped tests" 단계 로그의 수)으로 판정한다. 결과가 나오면 이 표, `docs/testing.md` §3 "소요 시간", 7절 Q9의 답을 고친다.
+**2회차 (2026-11-10): AC-01과 AC-07을 닫다**
+
+- **실행 D (AC-01).** `/var/tmp/anf-clone-tests/20261110T080605Z`, 콘솔 `console-full2.log`. 인자 없이 WSL 안에서 분리해 띄웠다. 시작 때 기준선은 LV·컨테이너 모두 비어 있었고, 콘솔 첫 줄이 `VG anf: not attached (WSL restarted?); attaching …`이라 VG도 실행기가 스스로 붙였다. 13개 파일의 `pytest exit`가 모두 0(`files.tsv`), `summary.txt`는 `total 113 113 0 0 0`, `collected 113, skipped 0`, `time: 5279 s for 13 files (monotonic clock)`, `left behind` 없음, `exit 0`. 가장 긴 파일은 처리량 데이터 2,251 s. 1회차에서 관찰하지 못한 것(한 요약으로 합친 종료 코드, 전체 실행 뒤의 남은 것 검사, 앞 9개 뒤에 4개를 같은 실행에서 이어 도는 경우)이 이 한 번에 모두 나왔다. 실행 중과 그 뒤의 커밋 `961e316`·`ace0d39`는 문서와 `_workspace/`만 바꿨고, 13개 로그 모두 같은 저장소 루트에서 돌았다(코드 대조, 2회차 보고서).
+- **PR #19 (AC-07).** 위 표의 AC-07 행. CI의 skip 검사와 데이터 플레인 실행기가 같은 `junit_gate.py`로 판정한다는 것을 Actions 로그로 봤다.
+- **문서.** `docs/testing.md` §3 "소요 시간"을 리더가 실행 D의 파일별 실측 표로 채웠다. 표의 파일별 초는 XML `time`(pytest 세션 시간)을 반올림한 값이고, 머리말의 5,279초는 실행기의 단조 시계 값이라 `files.tsv`와 1 s씩 다른 행이 있다(뜻은 같다). `CLAUDE.md` Commands 절에 실행기 줄이 들어갔다(`ace0d39`).
+- **판정 밖 관찰.** 실행 D 도중 저장소 안에 다른 에이전트의 워크트리(`.claude/worktrees/…`, 브랜치 `spike/s3-runner`)가 생겼다. 실행기의 수집 경로 밖이라 대상은 변하지 않았다(수집 113, 이름 집합 같음). 그 에이전트가 WSL 데이터 플레인을 같이 썼는지는 보지 않았지만, 실행 D의 기준선은 비었고 남은 것도 없어 겹친 흔적은 보이지 않는다. `CLAUDE.md`는 워크트리를 형제 폴더에 두라고 한다.
 
 **AC-02: 클라이언트 쪽 근거 (보고서 표의 요약)**
 
@@ -239,22 +244,25 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 - 한도 이하: 첫 회를 버린 5회의 중앙값이 한도의 0.99~0.997이었다. Auto 5 MiB/s(Ultra 40 GiB)에서 쓰기 4.967, 읽기 4.971(NFSv3), Manual 10 MiB/s에서 쓰기 9.95, 읽기 9.942, 읽기+쓰기 합 9.97, Manual 20 MiB/s에서 쓰기 19.867, 읽기 19.801, 합 19.867.
 - 한도 변경(I/O 중, 2 s 창): 쓰기 볼륨 PATCH → 30이 29.814~29.915, → 5가 5.012~5.041, PUT → 10이 9.991~10.036. 읽기 볼륨도 같은 꼴(29.65~29.942, 5.017~5.038, 9.973~10.019).
 - 제한 없는 볼륨 옆: 10 MiB/s 볼륨 A가 혼자 9.955, 함께 읽을 때 중앙값 9.9575, 4,500 MiB/s 볼륨 B의 중앙값 2,033.4. B가 A의 약 204배.
-- 단서: 실행 C는 깨끗한 VG에서 돌지 않았다. 실행 B가 남긴 볼륨 2개와 그 knfsd 인스턴스 2개가 처리량 시험 내내 떠 있었다. 값은 모두 범위 안이라 판정에는 영향이 없었다(보고서 판정 밖 관찰 4).
+- 단서: 실행 C는 깨끗한 VG에서 돌지 않았다. 실행 B가 남긴 볼륨 2개와 그 knfsd 인스턴스 2개가 처리량 시험 내내 떠 있었다. 값은 모두 범위 안이라 판정에는 영향이 없었다(보고서 판정 밖 관찰 4). 2회차의 실행 D는 빈 기준선에서 처리량 데이터 파일까지 통과했지만, 2회차 보고서는 그 측정값을 따로 옮기지 않았다. 위 값은 실행 C의 것이다.
 
-**판정 밖 관찰 (보고서)**
+**판정 밖 관찰 (1회차 보고서)**
 
-1. `docs/testing.md` §3 "소요 시간"이 비어 있다. 한 번에 끝까지 돈 값이 아직 없다(AC-01). 지금의 실측은 두 실행의 합 5,399 s이고, 파일별로는 처리량 데이터 2,256 s(약 38분)가 가장 길다.
+1. `docs/testing.md` §3 "소요 시간"이 비어 있었다. 1회차 때의 실측은 두 실행의 합 5,399 s였고, 파일별로는 처리량 데이터 2,256 s(약 38분)가 가장 길었다. 2회차 뒤 리더가 실행 D(5,279 s)의 파일별 실측 표로 채웠다.
 2. `docs/testing.md` FR-08 첫 행의 "회마다 한도의 90~101%"가 테스트의 단언(첫 회를 버린 5회의 중앙값)과 달랐다. `961e316`에서 문구를 고쳤다. 테스트는 바꾸지 않았다.
 3. 이 기기의 WSL VM은 쉬면 몇십 초 만에 내려간다. 검증 중에도 세 번 다시 떴고, 그때마다 VG가 떨어지고 `/tmp`가 비워졌다. 실행기의 VG 붙이기와 `/var/tmp` 출력이 바로 이 경우를 덮는다. 약 90분짜리 전체 실행은 VM이 그동안 떠 있어야 하고, 실행 C처럼 WSL 안에서 분리해 띄우는 것이 이 기기에서 통한 방법이었다.
 4. 실행 C는 깨끗한 VG에서 돌지 않았다(위 측정값의 단서).
 5. 남은 것 검사의 예외(기준선 볼륨의 인스턴스는 세지 않음)는 AC-05 문구보다 넓다. 복구가 띄운 인스턴스라는 판단은 맞지만, 테스트가 기준선 볼륨의 인스턴스를 멈춘 채 두거나 남긴 경우를 구별하지 못한다(이번에는 해당 없음).
 6. 사전 점검 실패는 출력 폴더를 만들기 전에 끝나므로 `summary.txt`가 남지 않는다. 원인은 표준 오류의 한 줄뿐이라, CI나 다른 호출자는 표준 오류를 따로 받아야 한다.
 
-**증명하지 못한 것 (1회차 기준)**
+**증명하지 못한 것 (2회차 뒤)**
 
-- 명령 하나가 13개 파일을 끝까지 돌고 0으로 끝나는 것(AC-01), 그때의 전체 남은 것 검사, 약 90분 연속 실행의 메모리.
-- Actions에서의 판정(AC-07).
-- 빈 데이터 플레인에서 처리량 데이터 파일을 끝까지 돈 실행. 그런 실행은 실행 B뿐이었고 끊겼다.
+1회차에 남았던 셋(명령 하나로 끝까지 돌고 0으로 끝나기, Actions에서의 판정, 빈 데이터 플레인에서 처리량 데이터 파일을 끝까지 돈 실행)은 실행 D와 PR #19로 닫혔다. 남은 것은 판정 기준 밖의 것이다.
+
+- **반복 안정성.** 한 번에 끝까지 돈 전체 실행은 실행 D 하나다. 여러 번 돌려도 같은 결과인지(flaky 여부)는 재지 않았다.
+- **CI의 데이터 플레인.** Actions가 돌리는 것은 `-m "not dataplane"`의 988개다. 데이터 플레인 113개는 여전히 WSL 실행기 기록이 근거다(FR-11, S3).
+- **남은 것 검사 예외의 구별.** 판정 밖 관찰 5의 경우(테스트가 기준선 볼륨의 인스턴스를 멈춘 채 두거나 남김)는 실행기가 구별하지 못한다. 실행 D는 기준선이 비어 있어 이 예외를 시험하지 않았다.
+- **사전 점검 실패의 기록.** 원인은 표준 오류의 한 줄뿐이다(관찰 6).
 
 ## 6. 개발 과정
 
@@ -269,12 +277,12 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 | A (implementer의 전체 실행) | `20261110T050559Z` | 인자 없음, 13개 파일 113개 | 앞 9개 파일 pytest exit 0(2,632 s). 10번째 처리량 데이터 파일의 3번째 테스트(`test_ac04_limit_changes_during_io`) 도중 implementer 에이전트가 멈추면서 함께 끊겼다. `summary.txt` 없음, implementer의 최종 보고도 없음. 컨테이너 3개와 LV 2개가 남아 메인 세션이 지웠다 |
 | B (남은 4개 파일) | `20261110T061156Z` | 경로 인자 4개 | 처리량 데이터 7번째 테스트 도중 호스트 메모리 부족으로 끊겼다(Claude Code가 백그라운드 명령을 강제 종료). 볼륨 2개(`e2evbf9e-d9`, `-d9s`)를 남김. 근거로 쓰지 않는다 |
 | C (남은 4개 파일, 다시) | `20261110T065647Z` | 경로 인자 4개 | WSL 안에서 분리해 띄움. WSL 재부팅 직후라 VG를 스스로 붙였다. B의 볼륨 2개가 기준선에 잡힌 채 돌았고, 그 인스턴스는 agent 시작 복구가 다시 띄웠다. 28 통과, skip 0, exit 0, 2,767 s(처리량 데이터 2,256 · 볼륨 계약 120 · 데이터 215 · 복구 176). 끝난 뒤 메인 세션이 그 볼륨 2개와 인스턴스를 지웠다 |
-| D (AC-01을 닫는 전체 실행) | `20261110T080605Z` | 인자 없음 | 2026-11-10 시작. 결과는 5절 2회차 자리에 리더가 채운다 |
+| D (AC-01을 닫는 전체 실행) | `20261110T080605Z` | 인자 없음, 13개 파일 113개 | WSL 안에서 분리해 띄움(콘솔 `console-full2.log`). 시작 때 기준선 비어 있음, VG를 스스로 붙임. 113 통과, skip 0, exit 0, 5,279 s(약 88분, 처리량 데이터 2,251 s), 남은 것 없음 |
 
    - **사람이 내린 결정 (사용자).** (1) verifier는 전체 묶음을 다시 돌리지 않는다. 실행 결과 파일로 판정하고 짧은 항목(AC-04·05·06·08)만 직접 돌린다. (2) 끊긴 실행은 남은 4개 파일만 실행기로 돌려 앞 9개의 결과와 합치고, AC-01은 두 번에 나눠 확인한 것으로 기록한다. (3) 실행 B가 끊긴 뒤 다시 진행하라고 지시했다.
    - 이 실행들이 실행기 설계를 실제로 시험했다. 실행 C와 구현 때의 시험은 사람 손 없이 VG를 붙였다(결정 8). 끊긴 실행 B의 잔여물은 다음 실행의 기준선으로 빠져 실패로 세지 않았다(결정 10). 반대로 "깨끗하지 않은 데이터 플레인에서 돈 실행"이라는 단서도 남았다.
-5. **실환경 검증 1회차 (real-env-verifier, 2026-11-09~10).** PASS 6, UNVERIFIED 2(AC-01, AC-07), FAIL 0. 실패를 일부러 만드는 임시 테스트 파일 둘(실패, 컨테이너 남기기)과 임시 조건 둘(빈 `ANF_E2E_API_URL`, 8090 점유)로 실행기의 실패 경로를 확인한 뒤 모두 치웠다. 판정 밖 관찰 중 문서 둘은 메인이 고친다: FR-08 행의 문구(`961e316`에서 고침), §3 소요 시간(전체 실행 실측 뒤 채움).
-6. **남은 일.** 전체 실행 D로 AC-01, PR 뒤 Actions 실행으로 AC-07. 설계 §6은 `CLAUDE.md` Commands 절에 실행기 한 줄을 더하는 일을 마지막 단계에 두었다.
+5. **실환경 검증 1회차 (real-env-verifier, 2026-11-09~10).** PASS 6, UNVERIFIED 2(AC-01, AC-07), FAIL 0. 실패를 일부러 만드는 임시 테스트 파일 둘(실패, 컨테이너 남기기)과 임시 조건 둘(빈 `ANF_E2E_API_URL`, 8090 점유)로 실행기의 실패 경로를 확인한 뒤 모두 치웠다. 판정 밖 관찰 중 문서 둘은 메인이 고친다: FR-08 행의 문구(`961e316`에서 고침), §3 소요 시간(실행 D 뒤 채움).
+6. **실환경 검증 2회차 (real-env-verifier, 2026-11-10).** 남은 둘을 닫아 누적 PASS 8 / FAIL 0 / UNVERIFIED 0. AC-01은 실행 D의 결과 파일로(다시 돌리지 않음), AC-07은 PR #19의 run 42782709293으로 판정했다. 리더가 `docs/testing.md` §3 "소요 시간"을 실행 D의 파일별 실측 표로 채웠고, 설계 §6이 마지막 단계에 둔 `CLAUDE.md` Commands 절의 실행기 줄을 넣었다(`ace0d39`).
 7. **AI를 쓴 방식.** 설계 기록, 구현, 검증, 이 문서를 Claude 에이전트(로드맵 총괄, implementer, verifier, 문서 작성)가 나눠 맡았다. 사람은 긴 실행을 어떻게 나누고 무엇으로 판정할지를 정했다. verifier는 implementer의 실행을 그대로 믿지 않고, 실행 결과가 검증 대상 코드와 같은 코드에서 나왔는지부터 확인했다.
 
 ---
@@ -313,9 +321,9 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 
 **A.** I would plan for a ninety-minute run on a machine that sleeps. During verification, the WSL VM shut down after tens of seconds of idle time, which detached the volume group and emptied `/tmp`. Writing output to `/var/tmp` and re-attaching the group already handle that, but I would launch long runs detached from the start, instead of learning it from two interrupted runs. I would also fix two gaps the verifier noted. A precheck failure leaves only one line on stderr and no summary file, so I would write that reason to a file for CI callers. And the baseline exception for restarted instances cannot tell a recovered instance from one a test stopped and left, so I would check its state too.
 
-### Q9. How do you know the runner itself works, and what is still open?
+### Q9. How do you know the runner itself works?
 
-**A.** I tested its failure paths, not only the green path. Running as a normal user, or with port 8090 taken, gave exit code two, a one-line reason, and no output folder. An empty API URL made five tests skip while pytest exited zero; the runner exited one. A deliberately failing file returned one, and the next file still ran and passed. A test that leaked a container made the runner name it and fail. For the full suite, the first verification round found all 113 tests passing with zero skips, but across two runs, so "one command, exit zero" was marked unverified rather than passed. The CI side, the Actions run, is checked after the pull request.
+**A.** I tested its failure paths, not only the green path. Running as a normal user, or with port 8090 taken, gave exit code two, a one-line reason, and no output folder. An empty API URL made five tests skip while pytest exited zero; the runner exited one. A deliberately failing file returned one, and the next file still ran and passed. A test that leaked a container made the runner name it and fail. For the full suite, the first round found all 113 tests passing, but only across two runs, so "one command, exit zero" was marked unverified, not passed. The second round closed it with one uninterrupted run: 113 passed, zero skips, nothing left behind, about 88 minutes. The pull request's Actions run showed the same gate script printing 988 collected, zero skipped.
 
 ### Q10. How do you keep the acceptance-criteria table from going stale?
 

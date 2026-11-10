@@ -1,12 +1,13 @@
 # test-automation 진행 기록
 
-- 상태: in_progress
+- 상태: done
 - FR: FR-10 (테스트 자동화)
-- 마지막 완료 단계: 3
-- 재개할 단계: 4 (검증 1회차 진행 중. 전체 실행은 다시 돌리지 않고 실행 A·C의 결과 파일로 판정)
-- 검증 대상 코드: 커밋 `6993c17` (`feature/test-automation`), 제품 코드 내용 해시 `f99bc5cfbcf1429d3040a72b4c30205fe983c8e806f375b57c30c15c9dc1a6d3` (그대로)
+- 마지막 완료 단계: 6
+- 재개할 단계: 없음 (출하: PR #19 merge)
+- 검증 대상 코드: `ace0d39` (`feature/test-automation`. scripts·backend·ci.yml은 `6993c17`과 같음), 제품 코드 내용 해시 `f99bc5cfbcf1429d3040a72b4c30205fe983c8e806f375b57c30c15c9dc1a6d3` (그대로)
 - implementer 에이전트 ID: ac5a9f5d4f40d0e32 (구현, 2026-11-09)
-- verifier 에이전트 ID: af5e52bae07225091 (1회차, 2026-11-09)
+- verifier 에이전트 ID: af5e52bae07225091 (1·2회차)
+- concept-explainer 에이전트 ID: a7b4e437741e9bfa9
 - 미해결: 없음
 
 ## 선행 확인 (0단계)
@@ -21,13 +22,13 @@
 
 | 기준 ID | 기준 | 최신 결과 | 근거 보고서 | 검증 대상 코드 |
 | --- | --- | --- | --- | --- |
-| AC-01 | 명령 하나로 전체, 종료 코드 0, skip 0 | UNVERIFIED (명령 하나로 13개 파일을 끝까지 돈 실행이 없다. 실행 A 9개 + 실행 C 4개를 합치면 113개 통과·skip 0. 2회차에서 한 번의 전체 실행으로 닫는다) | `04_verifier_report.md` (1회차) | `6993c17` |
+| AC-01 | 명령 하나로 전체, 종료 코드 0, skip 0 | PASS — 실행 D(`20261110T080605Z`): 인자 없는 한 번의 실행으로 13개 파일·113개 통과, skip 0, exit 0, 5,279 s, 남은 것 없음 | `04_verifier_report_r2.md` (2회차) | `ace0d39` (scripts·backend는 `6993c17`과 같음) |
 | AC-02 | 마운트·스냅샷·처리량의 클라이언트 관찰 테스트 포함 | PASS — 항목마다 클라이언트 쪽 근거가 `.jsonl`에 있음(ENOSPC, `Read-only file system`, 한도 대비 0.99~0.997, 제한 없는 볼륨 약 204배) | `04_verifier_report.md` (1회차) | `6993c17` |
 | AC-03 | 대응표와 node ID | PASS — PRD 문장 25개가 대응표 23행에, node ID 41개 모두 수집, 데이터 플레인 29개 통과 | `04_verifier_report.md` (1회차) | `6993c17` |
 | AC-04 | 사전 점검 2, skip·실패 1 | PASS — (a) 일반 사용자·포트 점유 exit 2, (b) skip 5 → exit 1, (c) 실패 뒤 나머지 끝까지 돌고 exit 1 | `04_verifier_report.md` (1회차) | `6993c17` |
 | AC-05 | 남기지 않음 | PASS — 실행 C 남은 것 없음, 일부러 남긴 컨테이너를 출력하고 exit 1 | `04_verifier_report.md` (1회차) | `6993c17` |
 | AC-06 | 재부팅 뒤 첫 실행 | PASS — 실행 C가 부팅 7초 뒤 VG를 스스로 붙이고 28 통과(기준선에 실행 B의 볼륨 2개), `045258Z`도 같은 방식 37 통과 | `04_verifier_report.md` (1회차) | `6993c17` |
-| AC-07 | CI가 같은 판정 코드 사용, Actions 통과 | UNVERIFIED (`ci.yml`이 `junit_gate.py`를 부르는 것은 확인. Actions 실행은 PR 뒤) | `04_verifier_report.md` (1회차) | `6993c17` |
+| AC-07 | CI가 같은 판정 코드 사용, Actions 통과 | PASS — PR #19 `pull_request` run 42782709293(head `ace0d39`) backend·frontend 통과, "Fail on skipped tests" 단계가 `junit_gate.py`를 불러 `collected 988, skipped 0` 출력. push run 42782700677도 통과 | `04_verifier_report_r2.md` (2회차) | `ace0d39` |
 | AC-08 | 제품 코드 해시 불변, 비데이터 플레인 묶음 skip 0 | PASS — 해시 그대로, WSL `-m "not dataplane"` 988 passed·skip 0, ruff 통과 | `04_verifier_report.md` (1회차) | `6993c17` |
 
 ## 이력
@@ -43,3 +44,8 @@
 - 2026-11-09 단계 4 1회차 시작 — real-env-verifier에 맡김
 - 2026-11-10 단계 4 1회차 완료 — PASS 6, UNVERIFIED 2(AC-01, AC-07), FAIL 0 (`04_verifier_report.md`). 판정 밖 관찰 중 문서 둘을 메인이 고친다: `docs/testing.md` FR-08 행의 "회마다" → 첫 회를 버린 5회의 중앙값, §3 소요 시간(전체 실행 실측 뒤 채움)
 - 2026-11-10 AC-01을 닫는 전체 실행 D 시작 — 인자 없이 WSL 안에서 분리(`/var/tmp/anf-clone-tests/20261110T080605Z`, 콘솔 `console-full2.log`). 시작 때 데이터 플레인 비어 있음, VG는 실행기가 붙임
+- 2026-11-10 단계 5 완료 — 개념 문서 `docs/concepts/test-automation.md`(Q&A 10개, ANF·ONTAP 절 해당 없음). 2회차 결과 자리(AC-01, AC-07)는 메인이 채운다. `CLAUDE.md` Commands에 실행기 줄 추가(`ace0d39`)
+- 2026-11-10 PR #19 열림. Actions 통과(AC-07 PASS). 전체 실행 D는 계속 도는 중(5/13 통과 시점)
+- 2026-11-10 전체 실행 D 완료 — 113 passed, skip 0, exit 0, 5,279 s. `docs/testing.md` §3 소요 시간을 파일별 실측으로 채움
+- 2026-11-10 단계 4 2회차 완료 — AC-01·AC-07 PASS (`04_verifier_report_r2.md`). 누적 8/8 PASS. 관찰: 실행 D 도중 FR-11 스파이크 S3용 worktree(`.claude/worktrees/agent-aee96…`)가 생겼지만 수집 경로 밖이고 WSL 데이터 플레인을 쓰지 않았다(GitHub 러너에서만 실험)
+- 2026-11-10 단계 6 완료 — feature-status `done`. 개념 문서에 2회차 결과 반영을 concept-explainer에 맡김
