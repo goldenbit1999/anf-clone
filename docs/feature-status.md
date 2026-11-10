@@ -13,6 +13,7 @@
 | snapshot-revert | FR-06 | done | 6 | `597e5a0` (`feature/snapshot-revert`, 내용 해시 `8cec38bf…`) | `_workspace/snapshot-revert/04_verifier_report.md` (1회차, 11/11 PASS) | 2026-11-08 | [snapshot-revert.md](concepts/snapshot-revert.md) |
 | restore-new-volume | FR-07 | done | 6 | `a8ddc0a` (`feature/restore-new-volume`, 내용 해시 `1e950522…`) | `_workspace/restore-new-volume/04_verifier_report.md` (1회차, 11/11 PASS) | 2026-11-09 | [restore-new-volume.md](concepts/restore-new-volume.md) |
 | throughput-limit | FR-08 | done | 6 | `0b44a8f` (`feature/throughput-limit`, 내용 해시 `f99bc5cf…`; e2e `3328486`) | `_workspace/throughput-limit/04_verifier_report.md` (1회차, 11 PASS·AC-12 FAIL: e2e 벽시계 표본), `04_verifier_report_r2.md` (2회차, AC-12 PASS), 12/12 PASS | 2026-11-09 | [throughput-limit.md](concepts/throughput-limit.md) |
+| dashboard | FR-09 | in_progress | 0 | — | — | 2026-11-09 | — |
 | ci | FR-11 | partial | 6 | `8a4002d` (#7, 워크플로에 `-m "not dataplane"` 추가) | `_workspace/ci/04_verifier_report.md` (1회차), `04_verifier_report_r2.md` (2회차), 8/8 PASS + PR #7 Actions 실행 PASS(579 passed, 25 deselected, skip 0) | 2026-11-07 | [ci.md](concepts/ci.md) |
 
 ci가 `partial`인 이유: UNVERIFIED 항목은 없다. 이번 범위(backend 작업)는 수락 기준을 모두 통과했지만, FR-11의 frontend 작업(대시보드 FR-09 뒤)과 data-plane 작업(스파이크 S3 뒤)이 남아 있다.

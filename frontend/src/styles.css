@@ -1,0 +1,143 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1c2330;
+  --muted: #5d6778;
+  --line: #dde1e8;
+  --ok: #1a7f4b;
+  --ok-bg: #e2f4ea;
+  --busy: #8a5a00;
+  --busy-bg: #fdf0cf;
+  --failed: #b3261e;
+  --failed-bg: #fbe4e2;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12161d;
+    --surface: #1a202a;
+    --text: #e6e9ef;
+    --muted: #98a2b3;
+    --line: #2c3442;
+    --ok: #6fd39b;
+    --ok-bg: #163524;
+    --busy: #f0c460;
+    --busy-bg: #3b2f10;
+    --failed: #f2958e;
+    --failed-bg: #43201d;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, sans-serif;
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+label {
+  color: var(--muted);
+}
+
+input,
+button {
+  font: inherit;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  max-width: 100%;
+}
+
+button {
+  cursor: pointer;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+th,
+td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+td:first-child {
+  font-family: ui-monospace, Consolas, monospace;
+  white-space: nowrap;
+}
+
+.state {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.state.ok {
+  color: var(--ok);
+  background: var(--ok-bg);
+}
+
+.state.busy {
+  color: var(--busy);
+  background: var(--busy-bg);
+}
+
+.state.failed {
+  color: var(--failed);
+  background: var(--failed-bg);
+}
+
+.banner {
+  padding: 8px 12px;
+  border: 1px solid var(--failed);
+  border-radius: 4px;
+  color: var(--failed);
+  background: var(--failed-bg);
+}
+
+.empty,
+.updated {
+  color: var(--muted);
+}
