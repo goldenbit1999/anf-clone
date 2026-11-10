@@ -42,11 +42,11 @@
 
 ## 2부: data-plane 작업 (2026-11-10~)
 
-- 상태: in_progress
-- 마지막 완료 단계: 3 (구현)
-- 재개할 단계: 4 (검증, `real-env-verifier`. PR의 Actions 실행으로 판정)
+- 상태: partial (사용자 결정 2026-11-10: 재검증을 더 하지 않고 merge, 다음 FR로)
+- 마지막 완료 단계: 6
+- 재개할 단계: 없음. 남은 것: AC-01 재판정(verifier 3회차), 새 해시로 WSL 전체 회귀 1회
 - 브랜치: `feature/ci-dataplane` (`main` `7255e3e`에서)
-- 검증 대상 코드: `5cb8b17` (`feature/ci-dataplane`), 제품 코드 내용 해시 `9a023d13b647ba1f0363bfa75a22c66ea362991e5baca42796bef74e6cab92f1` (이전 `f99bc5cf…`. 메인 계산)
+- 검증 대상 코드: 2회차까지 `89af8b6`(제품 코드 내용 해시 `9a023d13…`). 출하 코드는 `25ee357` + 기록, 해시 `73dee8f9e5bfdbedcb5f4dce55987fa0de92689b60679092a5d020c6e6bdd7c1`(메인 계산. verifier 판정 없음)
 - implementer 에이전트 ID: a187fce0d89195620 (구현, 주 체크아웃). 스파이크 S3는 aee96ed1b59426045(worktree)
 - verifier 에이전트 ID: afd57e3f7005fa470 (1회차)
 - concept-explainer 에이전트 ID: a117973a9a96d5635
@@ -71,3 +71,6 @@
 - 2026-11-10 단계 4 1회차 완료 — PASS 7, FAIL 1(AC-01) (`04_verifier_report_dp.md`). run 42811747210: `rest` success(106), `throughput` failure(7 중 2 실패: `test_ac04_limit_changes_during_io` w41 한도를 올린 직후 첫 1초 창 0.880, `test_ac09_auto_to_manual_keeps_the_limit` 바꾼 뒤 quick 쓰기 0.8675). 한도 초과는 없음, tc 값은 맞음 — 공유 러너에서 한도를 올린 직후의 하한 판정이 흔들린다. AC-03은 draft PR #21(닫음)로 PASS. 자동 채택: 시험의 하한 판정을 고친다(상한은 모든 창 그대로, 하한은 안정된 뒤 창/중앙값). implementer에 수정 맡김
 - 2026-11-10 AC-01 수정 `c66e51a`(시험만): AC-04 하한은 `Succeeded` 뒤 1~5 s 창의 중앙값, AC-09·AC-07(e)의 한 번 쓰기는 `measure`(6회 중앙값), 상한·범위 그대로. 워크플로에 `journalctl -k -b` 추가. WSL 처리량 파일 7/7 통과(`/var/tmp/anf-clone-tests/fr11-tp-floor`, 2,424 s). 제품 해시 `9a023d13…` 그대로(메인 계산). push, 단계 4 2회차 시작
 - 2026-11-10 단계 4 2회차 완료 — PASS 7, FAIL 1(AC-01, 간헐) (`04_verifier_report_dp_r2.md`). PR #20 run 42824999459는 네 작업 모두 success(113 통과, skip 0; throughput 38m42s, rest 36m32s). 1회차의 하한 문제는 러너 10회에서 0건. 그러나 처리량 파일 9회 반복(draft PR #22, 닫음) 중 tp8이 `test_ac07_limit_survives_lifecycle` 단계 (c)(`docker rm -f` 직후 볼륨 재PUT)에서 실패: 작업이 1 s 만에 `InternalServerError`로 Failed, 시험이 상태를 보지 않아 450 s 뒤 timeout. 커널 로그에 rpcbind unregister 지연(약 2분 20초). 원인은 추론(agent·anf-api 로그가 artifact에 없음). implementer에 맡김: 로그 수집 + 시험이 작업 실패를 바로 드러냄 → 러너에서 좁힌 반복으로 원인 확인 → 수정
+- 2026-11-10 implementer가 원인 확정·수정: 죽는 인스턴스에서 `rpcbind`가 마지막으로 끝나면 knfsd 종료가 등록 해제의 답을 기다린다(러너 기준선 run 42837944997: 30조각 중 13조각 재현). `b9e762d`(시험이 작업 실패를 바로 드러냄, e2e 프로세스 로그를 출력 폴더에), `ae8454e`(진입점: `rpcbind`를 자기 마운트 네임스페이스에서), `25ee357`(설계 §6 10~13). 러너 반복 run 42843039794 30/30. draft PR #23 닫음
+- 2026-11-10 사용자 지시 — 재검증을 하지 않고 다음 FR로. AskUserQuestion 답: "merge하고 partial 기록". implementer의 WSL 전체 회귀는 중단(`/var/tmp/anf-clone-tests/fr11-rpcbind-full`: 9개 파일 + 처리량 파일 5개, 91 통과·실패 0; 볼륨 계약·데이터·복구 파일은 돌지 않음)
+- 2026-11-10 단계 6 — feature-status `partial`, 개념 문서 5.3절 검증 결과, `volume.md` 진입점 순서, `CLAUDE.md` 갱신
