@@ -43,8 +43,9 @@ It replays the demo scenario in about a minute and a half: account, capacity poo
 writes from client containers; a snapshot and reading a deleted file from `.snapshot`; revert; restore to a new volume;
 measured write throughput that follows a limit change; and the same load in Prometheus and through the dashboard. Each
 step prints what the client saw. The limit is a ceiling: the throughput step fails if a run goes above 101% of its
-limit or if the measured throughput does not drop with the limit. A run slower than the limit only gets a note, because
-the storage sometimes writes below the limit for a few seconds. It removes what it created when it ends. Exit code 0
+limit plus one 1 MiB I/O in the 6 s window (fio counts finished I/Os, so one completion can land in the next run), or
+if the measured throughput does not drop with the limit. A run slower than the limit only gets a note, because the
+storage sometimes writes below the limit for a few seconds. It removes what it created when it ends. Exit code 0
 means every step passed, 1 means a step failed (the output names it), and 2 means the stack is not running.
 
 To look at the result in the dashboard, keep the resources, open the printed address, and remove them afterwards:

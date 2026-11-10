@@ -56,9 +56,10 @@ def test_follows_limit_needs_the_median_above_the_new_limit_before_and_within_it
 
 
 def test_the_limit_pair_leaves_room_for_the_slowest_write_seen():
-    # 이 환경에서 잰 쓰기 한 회의 가장 낮은 비율은 한도의 38%다(FR-13 구현 중, 10 MiB/s에서 3.76).
-    # 첫 한도에서 그만큼 느려져도 "따라 바뀜"(내리기 전 중앙값 > 새 한도의 101%)이 깨지지 않아야 한다
-    assert 0.38 * demo.LIMIT > demo.NEW_LIMIT * demo.HIGH
+    # 이 환경에서 잰 쓰기 한 회의 가장 낮은 비율은 한도의 36%다(수정 확인 10회차, 20 MiB/s에서 7.22. 그 전에는
+    # 구현 중 10 MiB/s에서 3.76, 38%). 첫 한도에서 그만큼 느려져도 "따라 바뀜"(내리기 전 중앙값 > 새 한도의 101%)이
+    # 깨지지 않아야 한다
+    assert 0.36 * demo.LIMIT > demo.NEW_LIMIT * demo.HIGH
 
 
 def test_prom_value_reads_one_sample_or_none():
