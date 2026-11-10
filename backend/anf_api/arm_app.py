@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -22,6 +23,7 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST
 
 import anf_api.accounts as accounts
 import anf_api.capacity_pools as pools
@@ -37,6 +39,7 @@ from anf_api.arm_rules import (
     check_api_version,
     operation_path,
 )
+from anf_api.api_metrics import ApiMetrics
 from anf_api.lro import LroWorker, operation_status_body, parse_faults
 from anf_api.state_store import Operation, StateStore
 from anf_api.storage_client import StorageClient
@@ -113,7 +116,8 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
     faults = parse_faults(fault_injection, handlers)
     if faults:
         log.warning("Fault injection is enabled (ANF_FAULT_INJECTION): %s", faults)
-    worker = LroWorker(store, handlers, faults)
+    metrics = ApiMetrics()
+    worker = LroWorker(store, handlers, faults, metrics=metrics)
 
     def pool_body(res) -> dict:
         # utilizedThroughputMibps는 풀의 볼륨 행 한도 합이다 (처리량 설계 결정 5)
@@ -142,6 +146,27 @@ def create_app(db_path: str | Path | None = None, fault_injection: str | None = 
         response.headers["x-ms-request-id"] = str(uuid.uuid4())
         response.headers["x-ms-correlation-request-id"] = correlation_id
         return response
+
+    @app.middleware("http")
+    async def count_requests(request: Request, call_next):
+        # 요청 지표 (메트릭 설계 §2.2). route는 라우터가 고른 경로 템플릿이라 구독·이름이 라벨에 들어가지 않는다.
+        # 맞는 경로가 없으면 unmatched 하나로 모은다. /metrics 자신은 세지 않는다
+        if request.url.path == "/metrics":
+            return await call_next(request)
+        start = time.perf_counter()
+        status = 500  # 처리되지 않은 예외는 바깥 미들웨어가 500으로 바꾼다
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            return response
+        finally:
+            route = request.scope.get("route")
+            metrics.observe_request(request.method, route.path if route is not None else "unmatched", status,
+                                    time.perf_counter() - start)
+
+    @app.get("/metrics", include_in_schema=False)
+    async def get_metrics():
+        return Response(metrics.exposition(), media_type=CONTENT_TYPE_LATEST)
 
     @app.exception_handler(ArmError)
     async def arm_error(request: Request, exc: ArmError):
