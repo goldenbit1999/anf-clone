@@ -67,6 +67,7 @@ compose 밖: 볼륨 인스턴스 anf-nfs-<uuid>(agent가 띄운다), 클라이�
 | 11 | Prometheus | compose 서비스가 같은 설정 파일을 쓴다. `scripts/run-prometheus.sh`는 호스트 프로세스 경로(테스트)용으로 남긴다 | 스크립트 삭제(FR-12 e2e가 쓴다) |
 | 12 | 회귀 | PR의 CI `data-plane` 작업. WSL에서는 새 파일과 영향받는 파일만 | WSL 전체 묶음(약 95분) |
 | 13 | `--build`와 다시 실행 (구현 중, 메인이 정함) | 명령에 `--build`를 둔다. 다시 실행하면 BuildKit의 provenance 때문에 이미지 ID가 바뀌어 서비스 넷이 다시 만들어지지만 볼륨·인스턴스·클라이언트 I/O·API 상태는 그대로다. AC-02를 그 뜻으로 고쳤다 | `up -d --wait`(코드를 고친 뒤 옛 이미지로 뜨는 함정), 명령 앞에 `BUILDX_NO_DEFAULT_ATTESTATIONS=1`(명령이 길어지고 설명이 필요) |
+| 14 | 컨테이너 안의 LVM 메타데이터 백업 (`/etc/lvm/archive`·`backup`) | 바인드하지 않는다. 컨테이너와 함께 사라진다. 한계로 문서에 적는다 | 호스트의 `/etc/lvm`을 바인드(호스트 LVM 설정까지 컨테이너에 묶인다. 이 클론은 `vgcfgrestore`로 복구하는 시나리오가 없다) |
 
 ## 5. 수락 기준
 
