@@ -95,11 +95,12 @@ jobs:
       matrix:
         # 처리량 데이터 파일 하나가 전체의 49%라 둘로 나누면 길이가 비슷하다 (결정 3).
         # rest는 파일을 나열하지 않는다: 새 데이터 플레인 테스트 파일이 저절로 들어간다 (결정 4)
+        # [verify, do not merge] FR-11 AC-03: 이 임시 브랜치에서만 대상을 좁힌다
         include:
-          - shard: throughput
-            args: backend/tests/e2e/test_throughput_limit_data_live.py
-          - shard: rest
-            args: --ignore=backend/tests/e2e/test_throughput_limit_data_live.py
+          - shard: fail
+            args: backend/tests/e2e/test_verify_ac03_fail_live.py
+          - shard: pass
+            args: backend/tests/e2e/test_snapshot_contract_live.py backend/tests/e2e/test_verify_fr11_ac05_live.py
     env:
       OUT: /var/tmp/anf-clone-tests/${{ matrix.shard }}
     steps:
