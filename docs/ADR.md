@@ -356,11 +356,11 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | --- | --- | --- | --- |
 | 단위 | 검증, 상태 전이, 대응 로직. 커널 명령은 가짜 실행기로 바꾼다 | Windows(TDD 훅), WSL, CI | 없음 |
 | API 계약 | ARM 경로, 응답 코드, 헤더, LRO 흐름. storage agent는 가짜로 둔다 | Windows, WSL, CI | 없음 |
-| 통합 | storage agent가 실제 커널로 볼륨, 스냅샷, export를 만든다 | WSL. S3를 통과하면 CI에서도 | Linux, root, 커널 모듈 |
-| E2E | 컨테이너가 마운트해 PRD 수락 기준의 데이터 효과를 확인한다 | WSL. S3를 통과하면 CI에서도 | 위 조건과 Docker |
+| 통합 | storage agent가 실제 커널로 볼륨, 스냅샷, export를 만든다 | WSL, CI(`data-plane` 작업) | Linux, root, 커널 모듈 |
+| E2E | 컨테이너가 마운트해 PRD 수락 기준의 데이터 효과를 확인한다 | WSL, CI(`data-plane` 작업) | 위 조건과 Docker |
 | E2E (컨트롤 플레인) | 실제 uvicorn 프로세스에 HTTP로 API 계약, 상태 전이, 재시작 복구를 확인한다 (계정·풀) | WSL, CI | `ANF_E2E_API_URL`. root·Docker 불필요 |
 
-- 층은 pytest 마커 `integration`, `e2e`로 나눈다. 마커는 루트 `pyproject.toml`에 등록돼 있다 (`--strict-markers`). root agent·LVM·knfsd가 필요한 테스트에는 `dataplane` 마커를 더 붙이고, 데이터 플레인 CI 작업(S3 뒤)이 생기기 전까지 CI는 `-m "not dataplane"`으로 뺀다 (볼륨 설계 §6.3). 조건이 없으면 건너뛰되, 건너뛴 테스트를 통과로 보고하지 않는다. PRD §8의 UNVERIFIED 규칙과 같다. TDD 훅도 수집된 테스트가 모두 skip되면 GREEN이 아니라 SKIPPED로 보고한다.
+- 층은 pytest 마커 `integration`, `e2e`로 나눈다. 마커는 루트 `pyproject.toml`에 등록돼 있다 (`--strict-markers`). root agent·LVM·knfsd가 필요한 테스트에는 `dataplane` 마커를 더 붙인다. CI의 backend 작업은 `-m "not dataplane"`으로 빼고(볼륨 설계 §6.3), `data-plane` 작업이 실행기 `scripts/run-dataplane-tests.sh`로 그 테스트만 돌린다 (§9.3). 조건이 없으면 건너뛰되, 건너뛴 테스트를 통과로 보고하지 않는다. PRD §8의 UNVERIFIED 규칙과 같다. TDD 훅도 수집된 테스트가 모두 skip되면 GREEN이 아니라 SKIPPED로 보고한다.
 - real-env-verifier는 E2E 층과 같은 기준으로 검증한다. 검증 스크립트는 `backend/tests/e2e/`에 둔다 (TDD 훅의 면제 대상).
 - **결함 주입 (계정 설계에서 확정).** 실제 일이 없어 밀리초 안에 끝나는 작업에서도 진행 중 상태, 실패, 재시작 복구를 실환경에서 재현할 수 있게 한다. anf-api를 띄울 때 `ANF_FAULT_INJECTION`(JSON)으로 `{리소스 종류}/{create|update|patch|delete}`별 지연(`delaySeconds`)과 강제 실패(`fail`)를 켠다 (`patch`는 풀 설계에서 추가). 기본은 꺼짐이고, 켜면 시작할 때 경고 로그를 남긴다. 세부는 `_workspace/netapp-account/02_main_design.md` §6.3에 있다.
 
@@ -376,7 +376,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | --- | --- | --- |
 | backend | push, PR | 린트(ruff 0.14.0 기본 규칙), 단위·계약 테스트, 컨트롤 플레인 라이브 API e2e(테스트가 uvicorn을 직접 띄움, root 불필요), TDD 훅 테스트(`python -m pytest .claude/hooks/tests`). `dataplane` 마커 테스트는 선택에서 뺀다. skip이 하나라도 있으면 실패한다. `ubuntu-24.04`, Python 3.12. 구현: `.github/workflows/ci.yml`, 설계: `_workspace/ci/02_main_design.md` |
 | frontend | push, PR | `frontend/`에서 `npm ci`, 타입 검사(`tsc --noEmit`), 단위 테스트(Vitest), 빌드. `ubuntu-24.04`, Node 22. 설계: `_workspace/dashboard/02_main_design.md` |
-| data-plane | S3 통과 뒤 추가 | ubuntu 러너에서 모듈을 로드하고 storage agent를 띄운 뒤 통합·E2E 테스트 |
+| data-plane | `main` 대상 PR, `main` push, 수동 실행 | GitHub 호스트 러너(`ubuntu-24.04`)에서 `scripts/setup-wsl-dataplane.sh`로 준비한 뒤 `scripts/run-dataplane-tests.sh`로 `dataplane` 테스트 전부(통합 + 데이터 플레인 e2e, 13개 파일)를 돌린다. matrix 두 조각이 병렬로 돈다: `throughput`(처리량 데이터 파일, 전체 시간의 절반)과 `rest`(나머지 12개 파일). 판정은 실행기의 종료 코드 하나다(실패·오류·skip·남은 것이 있으면 실패). 로그, JUnit XML, dmesg를 실패해도 artifact로 올린다. 조각 제한 75분. 기능 브랜치 push에서는 돌지 않는다(조각마다 약 40분). 설계: `_workspace/ci/02_main_design_dataplane.md` |
 
 ## 10. 위험과 스파이크
 
@@ -389,7 +389,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | S0 | 환경을 확인한다. `nfsd`, `btrfs`, `dm-thin` 모듈이 로드되는가? `nfs-kernel-server`가 뜨는가(systemd)? 컨테이너가 knfsd를 NFSv3와 NFSv4.1로 마운트하는가? 서버가 보는 클라이언트 IP가 컨테이너마다 다른가(export policy의 전제)? Docker Engine과 Docker Desktop 중 어느 쪽이 이 조건을 만족하는가? 스토리지 루트(§5)에서 루프 장치와 파일시스템 생성이 동작하는가? NFS LOCALIO 설정 값은 무엇인가(`CONFIG_NFS_LOCALIO`, R-08)? 지금 커널은 꺼져 있다. 커스텀 커널을 쓰게 되어 켜져 있으면 빌드에서 끄거나 `nfs` 모듈 파라미터 `localio_enabled`를 `N`으로 둔다 | 첫 데이터 플레인 기능(볼륨) 전. 계정과 용량 풀은 S0 없이 진행할 수 있다 | 모듈 문제면 WSL 커스텀 커널을 쓰거나 스토리지 방식을 재검토한다 |
 | S1 | §7.2의 후보 A·B·C를 비교한다 | 볼륨 설계 전 | — |
 | S2 | §7.3의 후보 중 볼륨별 제한이 클라이언트 측정으로 드러나는 것을 찾는다 (`fio`로 측정). 측정 조건(제안): 페이지 캐시 효과를 줄이려고 `fio --direct=1`을 쓰고 측정 전에 캐시를 비운다(클라이언트와 서버가 같은 커널이라 서버 쪽 캐시도 함께 영향을 받는다, R-08). 조건마다 5회 이상 반복하고 각 값과 중앙값을 남긴다. 시계(2026-11-07 관찰): WSL 게스트 단조 시계가 호스트 시계보다 약 10% 느리고, 게스트 벽시계는 약 33초마다 약 3.3초 앞으로 건너뛴다 (`_workspace/capacity-pool/04_verifier_report.md` 추가 관찰 2). 그래서 게스트 안에서 잰 MiB/s와 호스트 실시간 기준 처리량이 다를 수 있다. 어느 시계를 기준으로 잴지 S2에서 정하고, 구간은 벽시계가 아니라 단조 시계로 잰다 | 처리량 설계 전 | — |
-| S3 | GitHub 호스트 러너에서 btrfs·nfsd 모듈을 로드하고 privileged 컨테이너로 마운트할 수 있는가 | CI 기능 전 | 데이터 플레인 테스트는 로컬(또는 self-hosted 러너)에서만 돌리고, 그 사실을 문서에 적는다 |
+| S3 | GitHub 호스트 러너에서 btrfs·nfsd 모듈을 로드하고 privileged 컨테이너로 마운트할 수 있는가. **조건부 통과 (2026-11-10, `_workspace/spikes/S3.md`)**: `ubuntu-24.04` 러너(커널 7.0, 4 vCPU, 16 GB)에 필요한 모듈과 패키지가 모두 있고, 준비 스크립트와 실행기가 고치지 않고 돈다. 데이터 플레인 묶음 113개가 통과했고 처리량은 한도의 99.5~100.2%였다. 조건: 러너의 `/`가 shared 마운트라 agent의 `ns` 자기 바인드가 `/`의 peer group에 들어가 그 아래 마운트가 두 번 보였다(스냅샷 테스트 8개 실패). agent가 바인드를 private으로 만든 뒤 rshared로 바꾸게 고쳤다 | CI 기능 전 | 데이터 플레인 테스트는 로컬(또는 self-hosted 러너)에서만 돌리고, 그 사실을 문서에 적는다 |
 | S4 | 볼륨 인스턴스(D-12) 구조에서 `.snapshot/<이름>`이 v3·v4.1로 읽기 전용으로 보이는가, 클라이언트가 `.snapshot`을 바꿀 수 있는가, 인스턴스 재시작 뒤에도 보이는가. **조건부 통과 (2026-11-08, `_workspace/spikes/S4.md`)**: 스냅샷마다 자기 `fsid` export, `.snapshot`에 `chattr +i`, export 표를 파일로. v4.1 인스턴스 재시작 결함도 찾았다 | 스냅샷 설계 전 | — |
 | S5 | 볼륨 인스턴스 구조에서 스냅샷으로 되돌리기: LVM 절차(merge·교체), 클라이언트가 마운트를 유지한 채 무엇을 보는가(다시 마운트, stale handle, 열린 fd, 창 동안의 오류). **조건부 통과 (2026-11-08, `_workspace/spikes/S5.md`)**: 인스턴스 netns 입력을 잠깐 막고 언마운트 → `lvconvert --merge` → 고른 스냅샷 다시 만들기 → 다시 올리면 v3·v4.1 모두 다시 마운트 없이 오류 0(2~5 s 멈춤). 구현 중 merge가 두 번째 되돌리기를 못 해 LVM 절차는 교체 방식(L2)으로 바꿨다(창 방식은 그대로). 스냅샷 뒤에 만든 파일을 잡은 fd·cwd만 ESTALE. export 제거는 v3에 EACCES, 인스턴스 재시작은 v4.1에 23 s와 틀린 캐시. knfsd 기본 NFSv4 위임에서는 v4.1 열린 fd가 16~32 s 옛 캐시를 읽는다 | 되돌리기 설계 전 | — |
 | S6 | 볼륨 인스턴스 구조에서 스냅샷으로 새 볼륨 만들기 (FR-07): 읽기 전용 스냅샷 LV의 쓰기 가능 스냅샷, ext4 UUID 중복, `.snapshot`에 남은 원본의 마운트 지점, 원본보다 큰 크기, 다른 프로토콜, 원본 스냅샷·볼륨 삭제와 되돌리기 뒤의 독립성, base 스냅샷 | 새 볼륨 복원 설계 전 (`_workspace/spikes/S6.md`) | — |
