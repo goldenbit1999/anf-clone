@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   backend:
+    if: false  # [repro, do not merge]
     runs-on: ubuntu-24.04  # WSL Ubuntu 24.04와 같게 고정 (설계 결정 3)
     timeout-minutes: 15
     steps:
@@ -57,6 +58,7 @@ jobs:
 
   # FR-09 대시보드 (설계 _workspace/dashboard/02_main_design.md §6). Python GREEN은 이 작업을 대신하지 않는다.
   frontend:
+    if: false  # [repro, do not merge]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -89,17 +91,17 @@ jobs:
     # 기능 브랜치는 push와 PR이 겹쳐 같은 작업이 두 번 돈다. main 대상 PR, main push, 손으로 돌릴 때만 (결정 5)
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 75  # 가장 긴 조각이 약 37분. 두 배를 넘기면 멈춘 것으로 본다 (결정 7)
+    timeout-minutes: 40  # 가장 긴 조각이 약 37분. 두 배를 넘기면 멈춘 것으로 본다 (결정 7)
     strategy:
       fail-fast: false  # 한 조각이 실패해도 다른 조각의 결과를 본다 (결정 7)
       matrix:
         # 처리량 데이터 파일 하나가 전체의 49%라 둘로 나누면 길이가 비슷하다 (결정 3).
         # rest는 파일을 나열하지 않는다: 새 데이터 플레인 테스트 파일이 저절로 들어간다 (결정 4)
+        # [repro, do not merge] AC-07 (b) -> (c) loop, 30 shards
+        shard: [r01, r02, r03, r04, r05, r06, r07, r08, r09, r10, r11, r12, r13, r14, r15,
+                r16, r17, r18, r19, r20, r21, r22, r23, r24, r25, r26, r27, r28, r29, r30]
         include:
-          - shard: throughput
-            args: backend/tests/e2e/test_throughput_limit_data_live.py
-          - shard: rest
-            args: --ignore=backend/tests/e2e/test_throughput_limit_data_live.py
+          - args: backend/tests/e2e/test_repro_rm_put_live.py
     env:
       OUT: /var/tmp/anf-clone-tests/${{ matrix.shard }}
     steps:
