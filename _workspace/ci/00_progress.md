@@ -39,3 +39,38 @@
 - 2026-11-07 단계 4 2회차 시작 — 사용자 요청으로 main 대상 PR #6을 열었다(head `3fd6511`). `pull_request` run 42446223916이 success로 끝났다. 같은 verifier(a3e582af3fd57d42c)에 AC-01b만 재판정을 맡겼다.
 - 2026-11-07 단계 4 2회차 완료 — PASS 1 / FAIL 0 / UNVERIFIED 0 (`04_verifier_report_r2.md`). 체크아웃 ref `refs/pull/6/merge`(merge 커밋 `86b20aa`, 트리 `c26d3131…`가 `3fd6511`과 같음), 342 passed / skip 0, 훅 25 passed, `gh pr checks 6`에 push·PR 두 체크가 모두 통과로 표시. 1·2회차 합계 8/8 PASS. 개념 문서의 AC-01b 서술을 갱신했다. 관찰: main이 앞서 나간 뒤 PR이 다시 돌면 새 merge 커밋이 검증 대상이 된다.
 - 2026-11-07 단계 6 완료 — 상태 `partial`(위 상태 줄의 이유). `docs/feature-status.md` 갱신.
+
+## 2부: data-plane 작업 (2026-11-10~)
+
+- 상태: partial (사용자 결정 2026-11-10: 재검증을 더 하지 않고 merge, 다음 FR로)
+- 마지막 완료 단계: 6
+- 재개할 단계: 없음. 남은 것: AC-01 재판정(verifier 3회차), 새 해시로 WSL 전체 회귀 1회
+- 브랜치: `feature/ci-dataplane` (`main` `7255e3e`에서)
+- 검증 대상 코드: 2회차까지 `89af8b6`(제품 코드 내용 해시 `9a023d13…`). 출하 코드는 `25ee357` + 기록, 해시 `73dee8f9e5bfdbedcb5f4dce55987fa0de92689b60679092a5d020c6e6bdd7c1`(메인 계산. verifier 판정 없음)
+- implementer 에이전트 ID: a187fce0d89195620 (구현, 주 체크아웃). 스파이크 S3는 aee96ed1b59426045(worktree)
+- verifier 에이전트 ID: afd57e3f7005fa470 (1회차)
+- concept-explainer 에이전트 ID: a117973a9a96d5635
+- 미해결: 없음
+
+| 기준 ID | 기준 | 최신 결과 | 근거 보고서 | 검증 대상 코드 |
+| --- | --- | --- | --- | --- |
+| AC-01 | PR에서 두 조각 success, 합 113 통과·skip 0 | | | |
+| AC-02 | ns 우회 단계 없이 `/`가 shared인 러너에서 통과 | | | |
+| AC-03 | 실패하면 조각 failure, artifact는 올라옴 | | | |
+| AC-04 | artifact | | | |
+| AC-05 | WSL에서 마운트 한 번, 클라이언트에서 보임 | | | |
+| AC-06 | WSL 전체 회귀 113 통과 | | | |
+| AC-07 | backend·frontend 통과 | | | |
+| AC-08 | 조각마다 50분 안 | | | |
+
+- 2026-11-10 스파이크 S3 조건부 통과 (`_workspace/spikes/S3.md`): Actions run 42783919456(부분 묶음 43 통과·2 실패), 42785777318(전체: private 113/0/0 4,378 s, as-is 105/8/0). 실패 8개는 전부 스냅샷 마운트 중복. 원격 브랜치 `spike/s3-runner`는 남아 있다(출하 때 지운다)
+- 2026-11-10 단계 2 완료 — 묻는 결정 없음, 결정 1~10 자동 채택 (ns 전파는 제품 수정, 회귀는 전체 묶음, 2개 조각 matrix, PR·main push 트리거)
+- 2026-11-10 단계 3 시작 — 새 feature-implementer(주 체크아웃)에 구현을 맡김: ns 전파 수정(TDD), ci.yml data-plane 작업, WSL 전체 회귀 1회(분리 실행)
+- 2026-11-10 단계 3 완료 — 커밋 `691d93f`(`ensure_shared_ns`: 새 바인드에 `--make-private` 뒤 `--make-rshared`, 단위 테스트 2개), `02f6d7f`(ci.yml `data-plane` 작업, 준비 스크립트 주석, `docs/testing.md` CI 절, 설계 §6), `5cb8b17`(testing.md 테스트 수 989). 제품 코드 내용 해시 `9a023d13…`(메인 계산, HEAD `5cb8b17`). WSL 전체 회귀 `/var/tmp/anf-clone-tests/20261110T102847Z`: 113 통과, skip 0, exit 0, 5,198 s, 남은 것 없음(메인이 summary.txt와 콘솔 `rc=0` 확인). AC-05 손 확인 출력 `/var/tmp/anf-clone-tests/fr11-ac05`. implementer가 push하지 않음
+- 2026-11-10 PR #20 열림(pull_request run 42811747210에서 data-plane 두 조각 실행). 단계 4 1회차 시작 — real-env-verifier. 메인이 ADR §9.1·§9.3·§10 S3, CLAUDE.md 갱신(`932cdc8`, 러너 실행을 취소하지 않으려고 push는 판정 뒤). 개념 문서 갱신을 concept-explainer에 맡김
+- 2026-11-10 단계 4 1회차 완료 — PASS 7, FAIL 1(AC-01) (`04_verifier_report_dp.md`). run 42811747210: `rest` success(106), `throughput` failure(7 중 2 실패: `test_ac04_limit_changes_during_io` w41 한도를 올린 직후 첫 1초 창 0.880, `test_ac09_auto_to_manual_keeps_the_limit` 바꾼 뒤 quick 쓰기 0.8675). 한도 초과는 없음, tc 값은 맞음 — 공유 러너에서 한도를 올린 직후의 하한 판정이 흔들린다. AC-03은 draft PR #21(닫음)로 PASS. 자동 채택: 시험의 하한 판정을 고친다(상한은 모든 창 그대로, 하한은 안정된 뒤 창/중앙값). implementer에 수정 맡김
+- 2026-11-10 AC-01 수정 `c66e51a`(시험만): AC-04 하한은 `Succeeded` 뒤 1~5 s 창의 중앙값, AC-09·AC-07(e)의 한 번 쓰기는 `measure`(6회 중앙값), 상한·범위 그대로. 워크플로에 `journalctl -k -b` 추가. WSL 처리량 파일 7/7 통과(`/var/tmp/anf-clone-tests/fr11-tp-floor`, 2,424 s). 제품 해시 `9a023d13…` 그대로(메인 계산). push, 단계 4 2회차 시작
+- 2026-11-10 단계 4 2회차 완료 — PASS 7, FAIL 1(AC-01, 간헐) (`04_verifier_report_dp_r2.md`). PR #20 run 42824999459는 네 작업 모두 success(113 통과, skip 0; throughput 38m42s, rest 36m32s). 1회차의 하한 문제는 러너 10회에서 0건. 그러나 처리량 파일 9회 반복(draft PR #22, 닫음) 중 tp8이 `test_ac07_limit_survives_lifecycle` 단계 (c)(`docker rm -f` 직후 볼륨 재PUT)에서 실패: 작업이 1 s 만에 `InternalServerError`로 Failed, 시험이 상태를 보지 않아 450 s 뒤 timeout. 커널 로그에 rpcbind unregister 지연(약 2분 20초). 원인은 추론(agent·anf-api 로그가 artifact에 없음). implementer에 맡김: 로그 수집 + 시험이 작업 실패를 바로 드러냄 → 러너에서 좁힌 반복으로 원인 확인 → 수정
+- 2026-11-10 implementer가 원인 확정·수정: 죽는 인스턴스에서 `rpcbind`가 마지막으로 끝나면 knfsd 종료가 등록 해제의 답을 기다린다(러너 기준선 run 42837944997: 30조각 중 13조각 재현). `b9e762d`(시험이 작업 실패를 바로 드러냄, e2e 프로세스 로그를 출력 폴더에), `ae8454e`(진입점: `rpcbind`를 자기 마운트 네임스페이스에서), `25ee357`(설계 §6 10~13). 러너 반복 run 42843039794 30/30. draft PR #23 닫음
+- 2026-11-10 사용자 지시 — 재검증을 하지 않고 다음 FR로. AskUserQuestion 답: "merge하고 partial 기록". implementer의 WSL 전체 회귀는 중단(`/var/tmp/anf-clone-tests/fr11-rpcbind-full`: 9개 파일 + 처리량 파일 5개, 91 통과·실패 0; 볼륨 계약·데이터·복구 파일은 돌지 않음)
+- 2026-11-10 단계 6 — feature-status `partial`, 개념 문서 5.3절 검증 결과, `volume.md` 진입점 순서, `CLAUDE.md` 갱신

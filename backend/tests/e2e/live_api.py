@@ -8,6 +8,7 @@ TestClient를 쓰지 않는다. 서버는 별도 프로세스이고, 요청은 �
     ANF_E2E_API_URL   anf-api를 띄울 주소 (예: http://127.0.0.1:8080). 없으면 e2e 테스트는 모두 skip.
     ANF_E2E_PYTHON    uvicorn을 실행할 Python. 기본은 pytest를 돌리는 Python.
     ANF_E2E_LOG       요청·응답·서버 이벤트를 JSON Lines로 남길 파일. 없으면 남기지 않는다.
+                      있으면 anf-api와 storage agent의 출력도 그 옆 `<파일 이름>-logs/`에 쓴다 (log_file).
 """
 
 import http.client
@@ -69,6 +70,17 @@ def log_event(kind: str, **data) -> None:
               "test": os.environ.get("PYTEST_CURRENT_TEST", ""), **data}
     with open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def log_file(name: str) -> Path | None:
+    """프로세스 출력을 쓸 곳: ANF_E2E_LOG 옆 `<그 파일 이름>-logs/name`. 실행기는 ANF_E2E_LOG를 출력 폴더에 두므로
+    agent·anf-api 로그가 .jsonl과 함께 남고 CI artifact에 올라간다 (FR-11 data-plane 검증 2회차). 없으면 None."""
+    if not LOG_PATH:
+        return None
+    path = Path(LOG_PATH)
+    folder = path.with_name(path.stem + "-logs")
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / name
 
 
 @dataclass
@@ -231,7 +243,8 @@ class Server:
         self.db_path = Path(db_path)
         self.fault_injection = raw_faults if raw_faults is not None else (
             json.dumps(faults) if faults else None)
-        self.log_path = self.db_path.parent / f"server-{next(_server_numbers)}.log"
+        n = next(_server_numbers)
+        self.log_path = log_file(f"anf-api-{n}.log") or self.db_path.parent / f"server-{n}.log"
         self.proc: subprocess.Popen | None = None
         self._log = None
 

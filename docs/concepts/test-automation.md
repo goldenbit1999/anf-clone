@@ -184,7 +184,7 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 
 | 안 만든 것 | 이유 |
 | --- | --- |
-| CI의 data-plane 작업과 스파이크 S3 | FR-11이다. 이번 실행기는 그 작업이 부를 명령이 된다 |
+| CI의 data-plane 작업과 스파이크 S3 | FR-11이다. 이번 실행기는 그 작업이 부를 명령이 된다 (그 뒤 FR-11에서 만들었다: [ci.md](ci.md) §3.7) |
 | PRD §5 데모 대본 스크립트 | 전체를 명령 하나로 띄우는 FR-13에서 만든다 |
 | 빠른 부분 묶음(smoke 마커) | 필요한 곳이 아직 없다. FR-11이 러너 시간 때문에 필요하면 그때 정한다 |
 | 병렬 실행(pytest-xdist) | 데이터 플레인은 기기에 하나고(VG, IP 대역, 포트 8080·8090), 처리량 시험은 다른 I/O와 겹치면 판정이 흔들린다 |
@@ -198,7 +198,7 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 | --- | --- | --- | --- |
 | 같은 커널 | 클라이언트 컨테이너와 knfsd가 같은 WSL 커널·메모리를 쓴다 (ADR R-08) | 처리량 측정과 page cache 효과가 실제 ANF(별도 VM, 네트워크)와 다를 수 있다 | NFS LOCALIO는 꺼져 있다(S0). 측정은 `fio --direct=1`, 읽기 전에 캐시를 비운다(`throughput_live.py:236-251`) |
 | 시계 | WSL 벽시계가 건너뛴다 | 벽시계로 재면 처리량과 소요 시간이 틀어진다 | 처리량은 게스트 단조 시계로 판정한다. 실행기 시간도 `/proc/uptime` |
-| CI | 데이터 플레인 묶음은 아직 CI에서 돌지 않는다 | PR마다 데이터 효과를 확인하지는 않는다 | 러너에서 커널 모듈과 privileged 마운트가 되는지는 FR-11의 S3가 정한다. 그때까지 근거는 WSL에서 실행기를 돌린 기록이다 |
+| CI | FR-10 시점에는 데이터 플레인 묶음이 CI에서 돌지 않았다 | 그때의 근거는 WSL에서 실행기를 돌린 기록뿐이었다 | FR-11에서 S3가 통과해 `data-plane` 작업이 `main` 대상 PR마다 이 실행기를 돌린다 ([ci.md](ci.md) §3.7) |
 | 기기에 하나 | VG, IP 대역, 포트 8080·8090을 같이 쓴다 | 병렬로 못 돌린다. 전체가 약 90분(아래 5절) | 파일을 차례로 돌리고, 포트가 차 있으면 시작하지 않는다 |
 | 처리량 판정 방식 | 6회 재고 첫 회를 버린 5회의 중앙값이 한도의 90~101% (`throughput_live.py:240-251` `measure`) | 개별 회가 범위 안이라는 것은 단언하지 않는다. 실행 C에서 `m3` 20 MiB/s 쓰기의 첫 회는 11.659(58%)였고 버려졌다 | `docs/testing.md` FR-08 행의 문구를 이 방식에 맞게 고쳤다(`961e316`) |
 
@@ -260,7 +260,7 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 1회차에 남았던 셋(명령 하나로 끝까지 돌고 0으로 끝나기, Actions에서의 판정, 빈 데이터 플레인에서 처리량 데이터 파일을 끝까지 돈 실행)은 실행 D와 PR #19로 닫혔다. 남은 것은 판정 기준 밖의 것이다.
 
 - **반복 안정성.** 한 번에 끝까지 돈 전체 실행은 실행 D 하나다. 여러 번 돌려도 같은 결과인지(flaky 여부)는 재지 않았다.
-- **CI의 데이터 플레인.** Actions가 돌리는 것은 `-m "not dataplane"`의 988개다. 데이터 플레인 113개는 여전히 WSL 실행기 기록이 근거다(FR-11, S3).
+- **CI의 데이터 플레인.** Actions가 돌리는 것은 `-m "not dataplane"`의 988개다. 데이터 플레인 113개는 이 FR의 검증 시점에는 WSL 실행기 기록이 근거였다. 그 뒤 FR-11이 CI `data-plane` 작업을 더했다([ci.md](ci.md) §3.7).
 - **남은 것 검사 예외의 구별.** 판정 밖 관찰 5의 경우(테스트가 기준선 볼륨의 인스턴스를 멈춘 채 두거나 남김)는 실행기가 구별하지 못한다. 실행 D는 기준선이 비어 있어 이 예외를 시험하지 않았다.
 - **사전 점검 실패의 기록.** 원인은 표준 오류의 한 줄뿐이다(관찰 6).
 
@@ -311,7 +311,7 @@ run-dataplane-tests.sh [경로·pytest 옵션...]
 
 ### Q6. What can this suite not prove?
 
-**A.** Three things. First, clients and NFS servers run on the same WSL kernel and memory, so throughput and page-cache effects can differ from a real service where client and server are separate machines on a network. Second, the data-plane suite does not run in GitHub Actions yet. Whether a hosted runner can load the kernel modules and do privileged mounts is spike S3, part of the CI feature, so for now the evidence is runner output from one machine. Third, the data plane exists once per machine, so files run one at a time, and the full suite takes about ninety minutes, about thirty-eight of them in the throughput file. That is too slow for every commit, so a smaller smoke set may be needed later.
+**A.** Three things. First, clients and NFS servers run on the same WSL kernel and memory, so throughput and page-cache effects can differ from a real service where client and server are separate machines on a network. Second, when this feature was verified the data-plane suite did not run in GitHub Actions, so the evidence was runner output from one machine; the CI feature later added a data-plane job that runs this same runner on a hosted runner for every PR to main. Third, the data plane exists once per machine, so files run one at a time, and the full suite takes about ninety minutes, about thirty-eight of them in the throughput file. That is too slow for every commit, so a smaller smoke set may be needed later.
 
 ### Q7. Tell me about a test run that failed for reasons outside your code.
 

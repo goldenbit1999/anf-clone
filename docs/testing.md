@@ -15,7 +15,7 @@ ANF 클론의 테스트 층, 실행 명령, 그리고 PRD §6.1 수락 기준마
 | 훅 | `.claude/hooks/tests` | 없음 | TDD 훅의 판정 | 없음 (기본 `testpaths` 밖) |
 | 프론트엔드 | `frontend/src/*.test.ts(x)` | — | 대시보드의 읽기, 2초 폴링, 렌더링 (Vitest) | Node 22 (Windows) |
 
-`dataplane` 마커가 붙은 테스트는 113개다(통합 30, 데이터 플레인 e2e 83). 나머지 `python -m pytest`의 대상은 988개다.
+`dataplane` 마커가 붙은 테스트는 113개다(통합 30, 데이터 플레인 e2e 83). 나머지 `python -m pytest`의 대상은 989개다.
 
 ## 2. 어디서 무엇이 도는가
 
@@ -26,12 +26,13 @@ ANF 클론의 테스트 층, 실행 명령, 그리고 PRD §6.1 수락 기준마
 | WSL, root | `scripts/run-dataplane-tests.sh` (§3) | 통합, 데이터 플레인 e2e | 0이어야 한다. 실행기가 실패로 센다 |
 | CI `backend` 작업 | lint, 위 WSL 일반 사용자 명령과 같은 pytest(`--junitxml`), `python backend/tests/junit_gate.py pytest-results.xml`, 훅 테스트 | 단위, 계약, 컨트롤 플레인 e2e, 훅 | `junit_gate.py`가 실패로 센다 |
 | CI `frontend` 작업 | `frontend/`에서 `npm ci`, `npm run typecheck`, `npm test`, `npm run build` | 프론트엔드 | — |
+| CI `data-plane` 작업 | 호스트 러너에서 `sudo bash scripts/setup-wsl-dataplane.sh` 뒤 위 WSL root 명령을 두 조각으로 (§3 "CI에서") | 통합, 데이터 플레인 e2e | 0이어야 한다. 실행기가 실패로 센다 |
 | Windows, 프론트엔드 | `frontend/`에서 `npm test` | 프론트엔드 | — |
 
 **skip은 PASS가 아니다** (PRD §8, ADR §9.1). pytest는 skip만 있어도 0으로 끝나므로, CI와 데이터 플레인 실행기는 같은
 스크립트 `backend/tests/junit_gate.py`로 JUnit XML을 읽어 수집 0개, skip, 실패, 오류, 읽을 수 없는 XML을 실패로 판정한다.
-CI가 데이터 플레인 테스트를 돌리지 않는 것은 skip이 아니라 마커로 선택에서 뺀 것이다(`-m "not dataplane"`).
-CI의 데이터 플레인 작업은 FR-11(스파이크 S3)에서 정한다.
+CI `backend` 작업은 데이터 플레인 테스트를 skip하지 않고 마커로 선택에서 뺀다(`-m "not dataplane"`).
+그 테스트는 `data-plane` 작업이 실행기로 돌린다.
 
 ## 3. 데이터 플레인 실행기
 
@@ -75,13 +76,14 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 ### 출력
 
 출력 폴더는 WSL 디스크에 둔다. `/mnt/c`(9P)에 바로 쓰면 요청이 많은 e2e가 3~4배 느려지고, `/tmp`는 WSL이 꺼지면 사라진다.
-보관이 필요하면 부르는 쪽(verifier, 나중의 CI)이 복사한다.
+보관이 필요하면 부르는 쪽(verifier, CI)이 복사한다.
 
 | 파일 | 내용 |
 | --- | --- |
 | `<테스트 파일>.log` | 그 파일의 pytest 출력(`-v`) |
 | `<테스트 파일>.xml` | JUnit XML |
 | `<테스트 파일>.jsonl` | e2e의 HTTP 요청·응답, 서버 이벤트, 판정 근거(`note`)를 담은 `ANF_E2E_LOG` |
+| `<테스트 파일>-logs/` | e2e가 띄운 storage agent(`agent.log`)와 anf-api(`anf-api-<n>.log`)의 출력. 작업이 일반 `InternalServerError`로 끝났을 때의 원인이 여기에 있다 |
 | `collect.log`, `baseline.txt`, `files.tsv` | 수집 결과, 실행 전 LV·컨테이너, 파일별 pytest 종료 코드와 초 |
 | `summary.txt` | 파일별·합계 표, 시간, 남은 것, 종료 코드 |
 
@@ -115,6 +117,23 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 
 처리량 데이터 파일이 전체의 43%다. 한도가 걸린 채로 데이터를 실제로 흘려 재는 시험이라 줄일 수 없다. 이렇게 긴 실행은 도구 호출 하나에 붙여 두지 말고 WSL 안에서 분리해 띄운다(`setsid nohup bash scripts/run-dataplane-tests.sh > <로그> 2>&1 &`). Windows 호스트의 메모리가 부족해지면 붙어 있던 명령이 강제 종료되고, 그때 돌던 테스트의 볼륨과 컨테이너가 남는다.
 
+### CI에서
+
+`.github/workflows/ci.yml`의 `data-plane` 작업이 GitHub 호스트 러너(`ubuntu-24.04`)에서 같은 준비 스크립트와 실행기를
+sudo로 돌린다 (FR-11, 스파이크 S3, 설계 `_workspace/ci/02_main_design_dataplane.md`).
+
+- **언제**: main 대상 PR, main push, 손으로 돌릴 때(`workflow_dispatch`). 기능 브랜치 push에서는 돌지 않는다(PR과 겹친다).
+- **두 조각(matrix)**: `throughput`은 `backend/tests/e2e/test_throughput_limit_data_live.py` 하나, `rest`는 그 파일을
+  `--ignore=`로 뺀 나머지 전부다. 조각마다 자기 VM에서 준비부터 하고, 한 조각이 실패해도 다른 조각은 끝까지 돈다.
+  `rest`는 파일을 나열하지 않으므로 새 데이터 플레인 테스트 파일이 저절로 들어간다.
+- **판정**: 실행기의 종료 코드 하나다(위 표). 조각마다 75분이 넘으면 멈춘 것으로 본다.
+- **산출물**: 조각마다 실행기 출력 폴더와 커널 로그가 artifact `dataplane-<조각>-<시도 번호>`로 14일 남는다.
+  `dmesg.txt`는 링 버퍼라 긴 조각에서는 앞부분이 빠지고, `kernel-journal.txt`(`journalctl -k -b`)는 부팅부터 남는다.
+- **러너**: 모듈과 패키지가 이미 있어 설치 단계가 없다(S3). 커널은 WSL과 다르다(러너 7.0 azure, WSL 6.18). `/`가
+  systemd 기본값대로 shared라, agent는 ns 바인드를 private로 떼어 낸 뒤 rshared로 만든다. 그러지 않으면 ns 바인드가
+  `/`의 peer group에 들어가 ns 아래 마운트가 호스트 마운트 표에 두 번 나온다(S3 Q7). 작업 로그의 "Runner info"와
+  "Mount propagation of ns" 단계가 이 상태를 남긴다.
+
 ## 4. 수락 기준과 테스트
 
 PRD §6.1 FR-01~FR-08의 수락 기준 문장마다 그것을 확인하는 테스트다. node ID는 저장소 루트 기준이고,
@@ -144,7 +163,7 @@ PRD §6.1 FR-01~FR-08의 수락 기준 문장마다 그것을 확인하는 테�
 | FR-07 | 새 볼륨이 스냅샷 시점의 내용을 갖는다. | `backend/tests/e2e/test_restore_new_volume_data_live.py::test_ac02_ac03_ac04a_content_and_independence[AC-02-NFSv3-3-None]`<br>`backend/tests/e2e/test_restore_new_volume_data_live.py::test_ac02_ac03_ac04a_content_and_independence[AC-04a-NFSv4.1-4.1-0755]`<br>`backend/tests/integration/test_flexvol_linux.py::test_volume_from_snapshot_has_its_content_and_is_independent[nfs3]` | `S2`로 만든 새 볼륨을 마운트한 클라이언트가 보는 트리가 `S2`와 같다(지운 `A`가 있고 덮어쓴 `K`는 `S2` 내용). `S2` 뒤에 만든 파일은 없고, `.snapshot`에는 base 스냅샷 `S2`만 있다 |
 | FR-07 | 새 볼륨에 써도 원본 볼륨과 스냅샷은 바뀌지 않는다. | `backend/tests/e2e/test_restore_new_volume_data_live.py::test_ac02_ac03_ac04a_content_and_independence[AC-02-NFSv3-3-None]`<br>`backend/tests/e2e/test_restore_new_volume_data_live.py::test_ac06_new_volume_survives_source_revert_delete_and_agent_restart` | 새 볼륨에 쓴 뒤 원본의 트리, 원본 클라이언트가 보는 `S2`, 새 볼륨의 base 스냅샷이 그대로다. 반대로 원본에 써도 새 볼륨은 그대로다. 원본을 되돌리고, 원본 스냅샷과 원본을 지우고, agent를 다시 띄워도 새 볼륨의 클라이언트는 읽고 쓴다 |
 | FR-08 | 클라이언트에서 잰 처리량이 제한 이하다(허용 오차는 설계 단계에서 정한다). | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac01b_auto_volume_data`<br>`backend/tests/e2e/test_throughput_limit_data_live.py::test_ac02_ac03_manual_volume_data_and_shared_read_write` | 클라이언트 컨테이너의 `fio --direct=1` 순차 쓰기·읽기를 6회 돌려 첫 회를 버린 5회의 중앙값이 한도의 90~101%다(처리량 설계 결정 15). Auto(Ultra 40 GiB = 5 MiB/s)와 Manual(10·20 MiB/s) 모두, 같은 볼륨의 읽기와 쓰기를 함께 돌리면 그 합이 한도 안이다 |
-| FR-08 | 제한을 바꾸면 잰 값도 바뀐다. | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac04_limit_changes_during_io` | I/O를 멈추지 않고 PATCH로 10 → 30 → 5 MiB/s, 다시 PUT으로 10 MiB/s로 바꾸면 2 s 창마다 잰 값이 새 한도의 90~101%로 따라간다. fio 오류 0, 다시 마운트 없음 |
+| FR-08 | 제한을 바꾸면 잰 값도 바뀐다. | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac04_limit_changes_during_io` | I/O를 멈추지 않고 PATCH로 10 → 30 → 5 MiB/s, 다시 PUT으로 10 MiB/s로 바꾼다. 매번 `Succeeded` 뒤 2 s의 1초 창이 모두 새 한도의 101% 이하이고(올렸을 때는 첫 창이 이미 옛 한도의 101%를 넘는다), 1~5 s 창의 중앙값이 새 한도의 90~101%다. fio 오류 0, 다시 마운트 없음 |
 | FR-08 | 제한이 없는 볼륨과의 차이가 측정으로 드러난다. | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac05_unlimited_volume_next_to_a_limited_one`<br>`backend/tests/integration/test_flexvol_linux.py::test_volume_without_a_limit_has_no_tc` | 같은 클라이언트가 10 MiB/s 볼륨 A와 4,500 MiB/s(Manual 최대) 볼륨 B를 함께 읽으면 B가 A의 10배 이상이고, A는 혼자 읽을 때와 같은 범위다. ARM 볼륨에는 한도가 없는 경우가 없어서(Auto는 할당량으로, Manual은 필수 값으로 정해진다) 4,500 MiB/s를 쓴다. 한도 없이 만든 agent 볼륨에는 tc가 걸리지 않는다(통합) |
 | FR-09 | 생성 중인 리소스가 완료 상태로 바뀌는 과정이 새로 고침 없이 보인다. | 프론트엔드 `frontend/src/useResourceTree.test.tsx`("loads at once, then again every 2 s without a page reload")와 브라우저 검증(`_workspace/dashboard/04_verifier_report.md`) | pytest 대상이 아니다. 대시보드 사이클에서 같은 탭이 새로 고침 없이 `Creating` → `Succeeded`를 보였다 |
 
@@ -153,7 +172,5 @@ PRD §6.1 FR-01~FR-08의 수락 기준 문장마다 그것을 확인하는 테�
 - **클라이언트와 서버가 같은 커널이다** (ADR R-08). 클라이언트 컨테이너와 knfsd가 같은 WSL 커널·메모리를 쓴다. 처리량
   측정과 page cache 효과는 실제 ANF(별도 VM, 네트워크)와 다를 수 있다. NFS LOCALIO는 꺼져 있다(S0).
 - **처리량 판정은 게스트 단조 시계로 한다.** WSL 벽시계는 약 30초마다 뒤로 건너뛴다. 실행기의 시간도 `/proc/uptime`으로 잰다.
-- **데이터 플레인 묶음은 아직 CI에서 돌지 않는다.** GitHub 러너에서 커널 모듈과 privileged 마운트가 되는지는 FR-11의
-  스파이크 S3가 정한다. 그때까지 이 묶음의 통과 근거는 WSL에서 실행기를 돌린 기록이다.
 - **데이터 플레인은 기기에 하나다.** VG, IP 대역, 포트 8080·8090을 같이 쓰므로 실행기는 한 번에 하나만 돌고, 파일은
   차례로 돈다. 처리량 시험은 다른 I/O와 겹치면 판정이 흔들린다.

@@ -100,10 +100,14 @@ class NfsInstances:
 
     def ensure_shared_ns(self) -> None:
         """WSL의 /는 private 마운트라 컨테이너의 rslave 바인드가 거절된다. ns를 자기 자신에 바인드하고
-        공유 마운트로 만든다. 그러면 호스트에서 나중에 ns 아래에 하는 마운트도 인스턴스에 보인다."""
+        공유 마운트로 만든다. 그러면 호스트에서 나중에 ns 아래에 하는 마운트도 인스턴스에 보인다.
+        /가 shared인 호스트(systemd 기본값, GitHub 러너)에서는 새 바인드가 /의 peer group에 들어가, ns 아래 마운트가
+        가려진 원래 디렉터리에도 생겨 호스트 마운트 표에 두 번 나온다. 그래서 새 바인드는 private로 떼어 낸 뒤
+        rshared로 만들어 자기 peer group을 준다 (FR-11 data-plane 결정 1, S3 Q7)."""
         result = self._run(["findmnt", "-no", "PROPAGATION", "--mountpoint", str(self._ns)], check=False)
         if result.returncode != 0:
             self._run(["mount", "--bind", str(self._ns), str(self._ns)])
+            self._run(["mount", "--make-private", str(self._ns)])
         if "shared" not in result.stdout.strip().split(","):
             self._run(["mount", "--make-rshared", str(self._ns)])
 

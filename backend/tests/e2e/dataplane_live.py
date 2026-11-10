@@ -277,7 +277,7 @@ def agent(tmp_path_factory):
     note("baseline", dataplane=dataplane(), thin_data_percent=thin_data_percent())
     watcher = InstanceLogs()
     watcher.start()
-    a = Agent(tmp_path_factory.mktemp("agent") / "agent.log")
+    a = Agent(live_api.log_file("agent.log") or tmp_path_factory.mktemp("agent") / "agent.log")
     a.start()
     note("agent", log=str(a.log_path), pid=a.proc.pid)
     yield a

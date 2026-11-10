@@ -17,6 +17,7 @@
         -p no:cacheprovider backend/tests/e2e/test_throughput_limit_data_live.py -v -s'
 """
 
+import json
 import statistics
 import time
 
@@ -25,7 +26,7 @@ import pytest
 import live_api
 from live_api import TIB, call, create_account, create_pool, poll, pool_url
 from dataplane_live import (
-    ACCT, delete_volume, fsid_of, GIB, instance_name, mount_ip, note, sh, SKIP_UNLESS_ROOT, token, vol_body,
+    ACCT, delete_volume, fsid_of, GIB, instance_name, mount_ip, note, out, sh, SKIP_UNLESS_ROOT, token, vol_body,
     vol_url,
 )
 from restore_live import restore_volume
@@ -33,7 +34,7 @@ from revert_live import fast_poll, instance_pid, post_revert
 from snapshot_live import create_snapshot
 from throughput_live import (
     HIGH, LOW, RUNS, SECONDS, Sampler, drop_caches, fio, htb_sent, ifb_tx_bytes, in_background, limits, make,
-    matches, measure, measure_mixed, patch_volume, pool_props, quick, tc_state, within,
+    matches, measure, measure_mixed, patch_volume, pool_props, tc_state, within,
 )
 
 pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT]
@@ -107,6 +108,11 @@ def test_ac02_ac03_manual_volume_data_and_shared_read_write(agent, api, clients)
 
 CHANGES = [("PATCH", 30), ("PATCH", 5), ("PUT", 10)]
 SETTLE = 12  # 바꾼 뒤 다음 변경까지 (s)
+# 하한을 보는 창: Succeeded 뒤 1~5 s에 시작하는 1초 창들의 중앙값. 한도를 올리면 흐름이 새 한도까지 오르는 데
+# 1 s 안팎 걸리고(러너에서 첫 창이 30의 0.880), 공유 러너에서는 한 창이 떨어지기도 한다(FR-11 검증 1회차 AC-01).
+# 5 s에서 끊는 것은 전의 2 s 창과 같은 이유다: WSL의 30 MiB/s 쓰기는 몇 초 뒤 서버 쪽에서 약 12 MiB/s로 떨어질 때가
+# 있다(+6.5 s부터 본 실행이 있다, 제한기 원인이 아니다). 상한은 전처럼 Succeeded 뒤 2 s의 모든 창에 건다
+SETTLED = (1, 5)
 
 
 def test_ac04_limit_changes_during_io(agent, api, clients):
@@ -146,8 +152,13 @@ def test_ac04_limit_changes_during_io(agent, api, clients):
         io = wait()
         windows = s.stop()
         active = [w for w in windows if t_start + 3 <= w[0] <= t_last - 1]
+        previous = 10  # 만들 때의 한도
         for ch in changes:
+            ch["previous"], previous = previous, ch["mibps"]
             ch["windows_2s"] = [w for w in windows if ch["t_ok"] <= w[0] <= ch["t_ok"] + 2]
+            settled = [d for t, d in windows if ch["t_ok"] + SETTLED[0] <= t <= ch["t_ok"] + SETTLED[1]]
+            ch["settled_median"] = statistics.median(settled) if settled else None
+            ch["settled_ratio"] = None if not settled else round(ch["settled_median"] / ch["mibps"], 4)
         results[name] = {"rw": rw, "vers": vers, "changes": changes, "fio": io, "lowest_active_window": min(
             active, key=lambda w: w[1]), "remounted": mounts(c) != mounts_before, "tc_end": tc_state(fsid),
             "windows": windows}
@@ -161,7 +172,12 @@ def test_ac04_limit_changes_during_io(agent, api, clients):
         for ch in x["changes"]:
             want = (202, "Patching", "PATCH") if ch["how"] == "PATCH" else (200, "Updating", "UPDATE")
             assert (ch["status"], ch["state"], ch["action"]) == want and ch["final"] == "Succeeded", (name, ch)
-            assert ch["windows_2s"] and all(within(w[1] / ch["mibps"]) for w in ch["windows_2s"]), (name, ch)
+            # 상한: Succeeded 뒤 2 s의 창이 모두 새 한도의 101% 이하다. 내린 경우는 이것으로 곧바로 바뀐 것도 보인다
+            assert ch["windows_2s"] and all(w[1] <= ch["mibps"] * HIGH for w in ch["windows_2s"]), (name, ch)
+            # 올린 경우 곧바로 바뀐 것: 첫 창이 이미 옛 한도의 101%를 넘는다
+            assert ch["mibps"] < ch["previous"] or ch["windows_2s"][0][1] > ch["previous"] * HIGH, (name, ch)
+            # 하한: 1~5 s 창의 중앙값이 새 한도의 90~101%다 (SETTLED)
+            assert ch["settled_ratio"] is not None and within(ch["settled_ratio"]), (name, ch)
         assert matches(x["tc_end"], 10), (name, x["tc_end"])
 
 
@@ -287,9 +303,19 @@ def resumed(windows: list, after: float, mibps: float) -> float | None:
     return next((t for t, d in windows if t >= after and d >= 0.5 * mibps), None)
 
 
+def abort_io(c, mp: str = "/m") -> dict:
+    """hard 마운트에 걸린 쓰기를 끝낸다. `umount -f`는 그 마운트의 진행 중인 RPC를 EIO로 끝내므로 fio가 오류로
+    빠져나가고, 클라이언트 컨테이너를 지울 수 있게 된다. 쓰기가 남아 마운트가 바쁘면(EBUSY) 다시 한다.
+    서버가 돌아오지 않은 채 이것 없이 지우면 `docker rm -f`가 실패해 컨테이너가 남았다 (검증 2회차 tp8)."""
+    r = c.run(f"for i in $(seq 30); do umount -f {mp} && exit 0; sleep 1; done; exit 1", timeout=90)
+    return out(r)
+
+
 def through_step(c, fsid: str, mibps: float, step, runtime: int) -> dict:
     """시간 기반 쓰기를 돌리는 중에 step()을 하고, 끝난 뒤 다시 흐르기 시작한 때부터 15 s 동안의 1초 창을 본다.
-    반환: 단계 시각, 다시 흐른 때까지의 지연, 측정 창의 중앙값·비율, 한도를 넘은 창, 표본이 없던 구간, fio 결과."""
+    반환: 단계 시각, 다시 흐른 때까지의 지연, 측정 창의 중앙값·비율, 한도를 넘은 창, 표본이 없던 구간, fio 결과.
+    단계의 작업이 Succeeded가 아니면 쓰기를 기다리지 않고 작업 본문과 함께 바로 실패한다. 쓰기를 기다리다 예외가
+    나도 같다. 두 경우 모두 걸린 쓰기를 끝내 클라이언트 컨테이너를 지울 수 있게 한다 (검증 2회차 tp8)."""
     s = Sampler(fsid)
     s.start()
     wait = in_background(fio, c, "write", "/m/f", round(mibps * SECONDS), runtime=runtime, timeout=runtime + 300)
@@ -297,7 +323,16 @@ def through_step(c, fsid: str, mibps: float, step, runtime: int) -> dict:
     t_step = time.monotonic()  # 창 시각과 같은 시계 (Sampler)
     detail = step()
     t_done = time.monotonic()
-    io = wait()
+    if detail.get("final", "Succeeded") != "Succeeded":
+        s.stop()
+        detail["abort_io"] = abort_io(c)
+        raise AssertionError(f"step operation did not succeed: {json.dumps(detail, default=str)}")
+    try:
+        io = wait()
+    except BaseException:
+        s.stop()
+        abort_io(c)
+        raise
     windows = s.stop()
     t_resume = resumed(windows, t_done, mibps)
     span = [d for t, d in windows if t_resume is not None and t_resume + 1 <= t <= t_resume + 16]
@@ -336,16 +371,21 @@ def test_ac07_limit_survives_lifecycle(agent, api, clients):
         return {"docker_stop_rc": rc, "pid_before": before, "pid_after": instance_pid(fsid)}
 
     def remove_instance_then_put():
-        rc = sh("docker", "rm", "-f", instance_name(fsid)).returncode
+        t0 = time.monotonic()
+        rm = sh("docker", "rm", "-f", instance_name(fsid))
+        rm_s = round(time.monotonic() - t0, 2)
+        left = sh("docker", "ps", "-a", "--filter", f"name=^{instance_name(fsid)}$",
+                  "--format", "{{.ID}} {{.State}} {{.Status}}").stdout.strip()
         r = call("PUT", vol_url(ACCT, "ul", "l1"), vol_body(tok, GIB, throughputMibps=mibps))
         final, seen = poll(r.headers["azure-asyncoperation"], 120)
-        return {"docker_rm_rc": rc, "put": r.status, "seen": seen, "final": final["status"],
-                "pid_after": instance_pid(fsid)}
+        return {"docker_rm_rc": rm.returncode, "docker_rm_s": rm_s, "docker_rm_stderr": rm.stderr.strip(),
+                "container_after_rm": left, "put": r.status, "seen": seen, "final": final["status"],
+                "op": final, "pid_after": instance_pid(fsid)}
 
     def revert_to_s1():
         r = post_revert("l1", snap["id"], pool="ul")
         final, seen = poll(r.headers["azure-asyncoperation"], 120)
-        return {"post": r.status, "seen": seen, "final": final["status"]}
+        return {"post": r.status, "seen": seen, "final": final["status"], "op": final}
 
     # runtime은 단계 + 클라이언트 재연결(TCP 재연결 backoff가 수십 초까지 는다) + 측정 16 s를 덮는다
     for label, step, runtime in (("a agent restart", restart_agent, 50),
@@ -361,7 +401,7 @@ def test_ac07_limit_survives_lifecycle(agent, api, clients):
     c2 = clients()
     c2.mount(mount_ip(r2), t2, "3")
     e_manual = {"values": limits("l2", "ul"), "tc": tc_state(fsid_of(r2)),
-                "write": quick(c2, "/m/f", 20, mibps * SECONDS)}  # 스냅샷에 있는 f (150 MiB)
+                "write": measure(c2, "write", "/m/f", 20)}  # 스냅샷에 있는 f(150 MiB)를 늘리는 첫 회는 버린다
     _, _, seen3, r3 = restore_volume("l3", t3, snap["id"], pool="ula")
     e_auto = {"values": limits("l3", "ula"), "tc": tc_state(fsid_of(r3))}
     note("AC-07", step="e restore", manual=e_manual, auto=e_auto)
@@ -411,7 +451,7 @@ def test_ac09_auto_to_manual_keeps_the_limit(agent, api, clients):
     assert p.status == 202, p.raw
     final_p, seen_p = poll(p.headers["azure-asyncoperation"], 60)
     changed = {"values": limits("x40", "ux"), "tc": tc_state(fsid_of(big)),
-               "write": quick(c, "/m/f", 20, round(5.0 * SECONDS))}  # 앞의 측정이 만든 f (75 MiB)
+               "write": measure(c, "write", "/m/f", 20)}  # 앞의 측정이 만든 f(75 MiB)를 늘리는 첫 회는 버린다
     note("AC-09", before=before, write_before=w_before, pool_patch=r.json()["properties"], seen=seen,
          final=final["status"], after=after, write_after=w_after, volume_patch_seen=seen_p,
          volume_patch_final=final_p["status"], changed=changed)
