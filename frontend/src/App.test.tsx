@@ -1,11 +1,15 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { App } from "./App";
+import type { TreeNode } from "./armClient";
+import { useMetrics } from "./useMetrics";
 import type { ResourceTreeState } from "./useResourceTree";
 import { useResourceTree } from "./useResourceTree";
 
 vi.mock("./useResourceTree");
+vi.mock("./useMetrics");
 const hook = vi.mocked(useResourceTree);
+const metrics = vi.mocked(useMetrics);
 
 const NOTHING: ResourceTreeState = { tree: null, error: null, updatedAt: null };
 const ONE: ResourceTreeState = {
@@ -25,9 +29,36 @@ const ONE: ResourceTreeState = {
   updatedAt: new Date("2026-11-09T09:00:00Z"),
 };
 
+const A1 = ONE.tree![0].resource.id;
+
+/** 계정 a1 > 풀 p1 > 볼륨 v1(creationToken vol-one). */
+function withVolume(state = "Succeeded"): ResourceTreeState {
+  const volume: TreeNode = {
+    resource: {
+      id: `${A1}/capacityPools/p1/volumes/v1`,
+      name: "a1/p1/v1",
+      type: "Microsoft.NetApp/netAppAccounts/capacityPools/volumes",
+      properties: { provisioningState: state, creationToken: "vol-one", usageThreshold: 0, protocolTypes: ["NFSv3"] },
+    },
+    children: [],
+  };
+  const pool: TreeNode = {
+    resource: {
+      id: `${A1}/capacityPools/p1`,
+      name: "a1/p1",
+      type: "Microsoft.NetApp/netAppAccounts/capacityPools",
+      properties: { provisioningState: "Succeeded" },
+    },
+    children: [volume],
+  };
+  return { ...ONE, tree: [{ resource: ONE.tree![0].resource, children: [pool] }] };
+}
+
 beforeEach(() => {
   hook.mockReset();
   hook.mockReturnValue(NOTHING);
+  metrics.mockReset();
+  metrics.mockReturnValue({ data: null, range: null, error: null });
   window.history.replaceState(null, "", "/");
 });
 afterEach(cleanup);
@@ -81,4 +112,37 @@ test("a failed first read shows the banner instead of loading", () => {
 
   expect(screen.getByRole("alert").textContent).toContain("500");
   expect(screen.queryByText(/Loading/)).toBeNull();
+});
+
+test("once the tree is read the page ends with the anf-api metrics panel", () => {
+  window.history.replaceState(null, "", "/?subscription=sub1");
+  hook.mockReturnValue(ONE);
+  render(<App />);
+  expect(screen.getByRole("region", { name: "anf-api" })).toBeTruthy();
+});
+
+test("without a subscription there are no metrics panels", () => {
+  render(<App />);
+  expect(screen.queryByRole("region")).toBeNull();
+  expect(metrics).not.toHaveBeenCalled();
+});
+
+test("choosing a volume opens its metrics panel, which closes when the volume leaves the tree", () => {
+  window.history.replaceState(null, "", "/?subscription=sub1");
+  hook.mockReturnValue(withVolume());
+  const { rerender } = render(<App />);
+  expect(screen.queryByRole("region", { name: "Volume v1" })).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "v1" }));
+  expect(screen.getByRole("region", { name: "Volume v1" })).toBeTruthy();
+  expect(metrics.mock.calls.some(([q]) => q?.read?.includes('creation_token="vol-one"'))).toBe(true);
+
+  // 다음 갱신에서도 그대로다(상태가 바뀌어도 같은 볼륨이면 남는다)
+  hook.mockReturnValue(withVolume("Updating"));
+  rerender(<App />);
+  expect(screen.getByRole("region", { name: "Volume v1" })).toBeTruthy();
+
+  hook.mockReturnValue(ONE); // 볼륨이 지워졌다
+  rerender(<App />);
+  expect(screen.queryByRole("region", { name: "Volume v1" })).toBeNull();
 });
