@@ -31,3 +31,5 @@
 - 2026-11-10 단계 3 완료 — 커밋 `27b8696`(compose 스택), `ab03418`(agent LVM이 호스트 udev를 기다림: `/run/udev:ro` + `ipc: host`, S9 L4), `53f7c8b`·`c99a400`(`scripts/demo.py`), `d2388b1`(compose e2e, 실행기 8081, README), `01ab88e`. 새 e2e 5 passed·252 s(`/var/tmp/anf-clone-tests/fr13-compose-222653`), 데모 85 s, 메모리 최대 used 1,095 MiB, 일반 사용자 첫 빌드 62 s·이후 약 10 s
 - 2026-11-10 자동 채택(결정 13): `--build`를 두고 AC-02를 "리소스·데이터·인스턴스가 바뀌지 않는다"로 고침
 - 2026-11-10 단계 4 1회차(real-env-verifier), 단계 5(concept-explainer) 시작
+- 2026-11-10 단계 5 완료 — 개념 문서 `docs/concepts/containers.md`(Q&A 13개). 결정 14(LVM 백업은 바인드하지 않음) 추가
+- 2026-11-10 단계 4 1회차 완료 — PASS 9, FAIL 1(AC-03, 간헐 3/10), AC-09는 PR 뒤 (`04_verifier_report.md`). AC-01: WSL 재시작 직후 일반 사용자로 README 명령 그대로 3번, 8.8~10.4 s에 healthy. AC-05는 headless Chrome. AC-03: 데모 6단계가 한도 10 MiB/s에서 중앙값 72~82%(스토리지 흔들림, 한도 초과 없음). 판정 밖: `/var/lib/anf-clone`이 없는 새 기기에서는 바인드 원본이 없어 실패(같은 모양으로 재현). 자동 채택: 데모 6단계 판정을 상한 + "한도를 바꾸면 따라 바뀜"으로(90% 하한은 FR-08 시험의 몫), `create_host_path`. implementer에 수정과 10회 반복을 맡김
