@@ -1,9 +1,9 @@
 # dashboard 진행 기록
 
-- 상태: in_progress
+- 상태: done
 - FR: FR-09 (대시보드, 리소스)
-- 마지막 완료 단계: 4
-- 재개할 단계: 5 (개념 문서)
+- 마지막 완료 단계: 6
+- 재개할 단계: 없음 (출하: push, PR #18 CI, merge)
 - 검증 대상 코드: `5cb9d4b` (`feature/dashboard`). frontend 내용 해시 `61c3eb62ea4cf79d27231f7db469bc45feb8308d6c13dfd65aec6a62b90e3e14` (`git ls-files -co --exclude-standard -- frontend`로 같은 방식), 백엔드 제품 코드 내용 해시 `f99bc5cfbcf1429d3040a72b4c30205fe983c8e806f375b57c30c15c9dc1a6d3` (FR-08 검증 값과 같음)
 - verifier 에이전트 ID: a5087c107ac5a921c (1회차, 2026-11-09 18:17 시작)
 - 미해결: 없음
@@ -40,3 +40,5 @@
 - 2026-11-09 18:15 단계 3 완료 — `frontend/` (Vitest 23개 통과, 타입 검사·빌드 통과, 테스트를 먼저 써서 모듈마다 RED 확인), CI frontend 작업, `CLAUDE.md`·ADR·`real-env-verify` 갱신. 커밋 `5cb9d4b`. Windows → WSL `127.0.0.1` 전달과 preview 프록시는 손으로 확인(빈 구독 목록 `200`)
 - 2026-11-09 18:25 단계 4 시작 — verifier 1회차(AC-01~07, 09). push, PR #18. AC-08 PASS (Actions 실행 42741004014)
 - 2026-11-09 18:35 단계 4 완료 — 1회차 8/8 PASS (AC-08은 리더 확인 PASS), FAIL·UNVERIFIED 없음. 23개 변화의 최대 반영 지연 4.2 s(제한 5 s; 4 s를 넘은 둘은 탭이 가려져 Chrome이 타이머를 늦춘 때). 검증 도우미 `backend/tests/e2e/dashboard_watch.py` 추가(해시 범위 밖). 화면 검증 전에 Chrome이 떠 있어야 한다
+- 2026-11-09 19:00 단계 5 완료 — `docs/concepts/dashboard.md`, 면접 Q&A 10개. 쓰지 못한 것: Azure의 푸시 수단 여부, 실제 ARM의 CORS 정책, ANF 포털의 갱신 방식, Chrome 타이머 제한 규칙(모두 조사 생략 FR이라 미확인). 설계 결정 1·2의 이유에서 확인하지 않은 ARM 주장을 뺐다(§8)
+- 2026-11-09 19:00 단계 6 완료 — `docs/feature-status.md` done. 문서만 바뀌어 검증 대상 코드(`5cb9d4b`, frontend 해시 `61c3eb62…`)와 수락 기준은 그대로다
