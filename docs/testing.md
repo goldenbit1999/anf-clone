@@ -7,15 +7,15 @@ ANF 클론의 테스트 층, 실행 명령, 그리고 PRD §6.1 수락 기준마
 
 | 층 | 위치 | 마커 | 확인하는 것 | 필요 조건 |
 | --- | --- | --- | --- | --- |
-| 단위 | `backend/tests/unit` (15개 파일) | 없음 | 본문 규칙, 상태 전이, 용량·처리량 계산, agent의 명령 순서. 커널 명령은 가짜 실행기로 바꾼다 | 없음 |
+| 단위 | `backend/tests/unit` (17개 파일) | 없음 | 본문 규칙, 상태 전이, 용량·처리량 계산, agent의 명령 순서, 메트릭 수집(knfsd 통계 읽기, 볼륨별 실패 격리). 커널 명령은 가짜 실행기로 바꾼다 | 없음 |
 | API 계약 | `backend/tests/contract` (6개) | 없음 | ARM 경로, 응답 코드, 헤더, LRO 흐름. FastAPI TestClient와 가짜 storage agent | 없음 |
 | 컨트롤 플레인 e2e | `backend/tests/e2e/test_netapp_account_*`, `test_capacity_pool_*` (4개) | `e2e` | 실제 uvicorn 프로세스에 HTTP로 계약, 상태 전이, 결함 주입, SIGKILL 재시작 | `ANF_E2E_API_URL` |
 | 통합 | `backend/tests/integration` (1개) | `integration`, `dataplane` | storage agent의 볼륨 관리자가 실제 LVM·ext4·knfsd 인스턴스·tc로 볼륨, 스냅샷, 되돌리기, 새 볼륨, 처리량 한도를 만들고 클라이언트 컨테이너가 마운트한다 | Linux, root, 데이터 플레인 준비 |
-| 데이터 플레인 e2e | `backend/tests/e2e/test_volume_*`, `test_snapshot_*`, `test_restore_*`, `test_throughput_*` (12개) | `e2e`, `dataplane` | anf-api(일반 사용자)와 agent(root)를 띄우고 ARM으로 만든 볼륨을 클라이언트 컨테이너가 마운트해 PRD 수락 기준의 데이터 효과를 본다 | 위 조건과 `ANF_E2E_API_URL` |
+| 데이터 플레인 e2e | `backend/tests/e2e/test_volume_*`, `test_snapshot_*`, `test_restore_*`, `test_throughput_*`, `test_metrics_*` (13개) | `e2e`, `dataplane` | anf-api(일반 사용자)와 agent(root)를 띄우고 ARM으로 만든 볼륨을 클라이언트 컨테이너가 마운트해 PRD 수락 기준의 데이터 효과를 본다. 메트릭 e2e는 Prometheus 컨테이너도 띄워 그 값을 클라이언트가 한 일과 맞춘다 | 위 조건과 `ANF_E2E_API_URL`. 메트릭 e2e는 이미지 `prom/prometheus`(없으면 Docker Hub에서 받는다)와 빈 포트 9090 |
 | 훅 | `.claude/hooks/tests` | 없음 | TDD 훅의 판정 | 없음 (기본 `testpaths` 밖) |
-| 프론트엔드 | `frontend/src/*.test.ts(x)` | — | 대시보드의 읽기, 2초 폴링, 렌더링 (Vitest) | Node 22 (Windows) |
+| 프론트엔드 | `frontend/src/*.test.ts(x)` | — | 대시보드의 읽기, 2초 폴링, 렌더링, 메트릭 차트(Prometheus 범위 쿼리, 5초 폴링, SVG 선) (Vitest) | Node 22 (Windows) |
 
-`dataplane` 마커가 붙은 테스트는 113개다(통합 30, 데이터 플레인 e2e 83). 나머지 `python -m pytest`의 대상은 989개다.
+`dataplane` 마커가 붙은 테스트는 119개다(통합 31, 데이터 플레인 e2e 88). 나머지 `python -m pytest`의 대상은 1,016개다.
 
 ## 2. 어디서 무엇이 도는가
 
@@ -52,7 +52,7 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 ### 순서
 
 1. **사전 점검.** Linux, root, venv와 pytest, Docker Engine, 이미지 `anf-nfs-server`·`anf-nfs-client`, 네트워크
-   `anf-vnet`(172.30.0.0/24, ip-range /25), `nfsd` 모듈, `fs.leases-enable = 0`, 포트 8080·8090이 비어 있음.
+   `anf-vnet`(172.30.0.0/24, ip-range /25), `nfsd` 모듈, `fs.leases-enable = 0`, 포트 8080·8090·9090이 비어 있음.
    하나라도 빠지면 원인 한 줄을 쓰고 테스트를 돌리지 않는다(종료 코드 2). 포트가 차 있으면 다른 세션이 데이터 플레인을
    쓰고 있을 수 있으므로 건드리지 않는다.
 2. **VG `anf` 붙이기.** WSL이 다시 뜨면 loop 장치가 사라져 VG가 보이지 않고, 그대로 두면 모든 e2e가 setup 오류다.
@@ -60,8 +60,9 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 3. **기준선.** 실행 전의 LV와 컨테이너를 `baseline.txt`에 남긴다.
 4. **파일마다 pytest 한 번.** 그 전에 `sync`와 `echo 3 > /proc/sys/vm/drop_caches`로 page cache를 비운다. 한 프로세스로
    이어 돌리면 page cache가 6.8 GB까지 차서 호스트가 실행기를 죽인 적이 있다(FR-08). 실패한 파일이 있어도 끝까지 돈다.
-5. **남은 것 검사.** 기준선에 없던 LV, 컨테이너, 8080·8090 리스너를 출력하고 실패로 센다. 지우지는 않는다(정리 결함의
-   단서다). 실행 전에 있던 볼륨의 인스턴스(`anf-nfs-<uuid>`)는 시작 복구가 다시 띄운 것이라 세지 않는다.
+5. **남은 것 검사.** 기준선에 없던 LV, 컨테이너, 8080·8090·9090 리스너를 출력하고 실패로 센다. 지우지는 않는다(정리 결함의
+   단서다). 실행 전에 있던 볼륨의 인스턴스(`anf-nfs-<uuid>`)는 시작 복구가 다시 띄운 것이라 세지 않는다. 메트릭 e2e가
+   띄운 Prometheus 컨테이너 `anf-prometheus`가 남으면 컨테이너와 9090 리스너로 잡힌다.
 6. **판정.** `junit_gate.py`가 파일별·합계 표(수집, 통과, 실패, 오류, skip, 초)를 출력한다.
 
 ### 환경 변수
@@ -115,6 +116,8 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 | `e2e/test_volume_data_live.py` | 7 | 214 |
 | `e2e/test_volume_recovery_live.py` | 7 | 161 |
 
+그 뒤에 더한 `e2e/test_metrics_data_live.py`(FR-12)는 단독 실행으로 5개 359초다(2026-11-10). 전체 실행은 14개 파일, 약 94분이 된다.
+
 처리량 데이터 파일이 전체의 43%다. 한도가 걸린 채로 데이터를 실제로 흘려 재는 시험이라 줄일 수 없다. 이렇게 긴 실행은 도구 호출 하나에 붙여 두지 말고 WSL 안에서 분리해 띄운다(`setsid nohup bash scripts/run-dataplane-tests.sh > <로그> 2>&1 &`). Windows 호스트의 메모리가 부족해지면 붙어 있던 명령이 강제 종료되고, 그때 돌던 테스트의 볼륨과 컨테이너가 남는다.
 
 ### CI에서
@@ -136,7 +139,7 @@ sudo로 돌린다 (FR-11, 스파이크 S3, 설계 `_workspace/ci/02_main_design_
 
 ## 4. 수락 기준과 테스트
 
-PRD §6.1 FR-01~FR-08의 수락 기준 문장마다 그것을 확인하는 테스트다. node ID는 저장소 루트 기준이고,
+PRD §6.1 FR-01~FR-09와 FR-12의 수락 기준 문장마다 그것을 확인하는 테스트다. node ID는 저장소 루트 기준이고,
 `backend/tests/unit/test_testing_doc.py`가 모두 수집되는지 확인한다. 데이터 플레인 테스트(`dataplane` 마커)는
 §3의 실행기로, 나머지는 §2의 WSL 일반 사용자 명령으로 돈다. 판정 근거는 각 테스트의 단언과 `.jsonl`의 `evidence` 기록이다.
 
@@ -166,11 +169,14 @@ PRD §6.1 FR-01~FR-08의 수락 기준 문장마다 그것을 확인하는 테�
 | FR-08 | 제한을 바꾸면 잰 값도 바뀐다. | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac04_limit_changes_during_io` | I/O를 멈추지 않고 PATCH로 10 → 30 → 5 MiB/s, 다시 PUT으로 10 MiB/s로 바꾼다. 매번 `Succeeded` 뒤 2 s의 1초 창이 모두 새 한도의 101% 이하이고(올렸을 때는 첫 창이 이미 옛 한도의 101%를 넘는다), 1~5 s 창의 중앙값이 새 한도의 90~101%다. fio 오류 0, 다시 마운트 없음 |
 | FR-08 | 제한이 없는 볼륨과의 차이가 측정으로 드러난다. | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac05_unlimited_volume_next_to_a_limited_one`<br>`backend/tests/integration/test_flexvol_linux.py::test_volume_without_a_limit_has_no_tc` | 같은 클라이언트가 10 MiB/s 볼륨 A와 4,500 MiB/s(Manual 최대) 볼륨 B를 함께 읽으면 B가 A의 10배 이상이고, A는 혼자 읽을 때와 같은 범위다. ARM 볼륨에는 한도가 없는 경우가 없어서(Auto는 할당량으로, Manual은 필수 값으로 정해진다) 4,500 MiB/s를 쓴다. 한도 없이 만든 agent 볼륨에는 tc가 걸리지 않는다(통합) |
 | FR-09 | 생성 중인 리소스가 완료 상태로 바뀌는 과정이 새로 고침 없이 보인다. | 프론트엔드 `frontend/src/useResourceTree.test.tsx`("loads at once, then again every 2 s without a page reload")와 브라우저 검증(`_workspace/dashboard/04_verifier_report.md`) | pytest 대상이 아니다. 대시보드 사이클에서 같은 탭이 새로 고침 없이 `Creating` → `Succeeded`를 보였다 |
+| FR-12 | Prometheus에서 조회할 수 있다. | `backend/tests/e2e/test_metrics_data_live.py::test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac03_ac04_ac05_usage_throughput_and_iops_per_volume`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac09_series_across_instance_restart_and_volume_delete`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac10_snapshot_overwrite_grows_the_aggregate_not_the_volume`<br>`backend/tests/contract/test_arm_app.py::test_ac01_requests_are_counted_by_route_template`<br>`backend/tests/contract/test_arm_app.py::test_ac02_operation_is_counted_when_it_finishes` | `scripts/run-prometheus.sh` 뒤 두 대상(anf-api, storage-agent)이 `up == 1`이고, 범위 쿼리가 볼륨의 계열 하나를 돌려준다. 값은 클라이언트가 한 일과 맞는다: 256 MiB를 쓰면 used가 그만큼 늘고 `df`와 1% 안이며, 바이트 카운터가 fio 바이트와 1% 안(다른 볼륨은 0), v4.1 READ 연산 수가 fio 연산 수와 2% 안이다. 인스턴스를 다시 띄워도 계열이 이어지고(`rate` ≥ 0) 볼륨을 지우면 사라지며, 스냅샷 뒤 덮어쓰면 aggregate만 는다. anf-api는 요청을 경로 템플릿별로, 비동기 작업을 끝날 때 한 번 센다(계약) |
+| FR-12 | 대시보드가 차트로 보여 준다. | 프론트엔드 `frontend/src/MetricsPanels.test.tsx`, `LineChart.test.tsx`, `App.test.tsx`("choosing a volume opens its metrics panel, which closes when the volume leaves the tree")와 브라우저 검증(메트릭 검증 보고서 AC-08) | pytest 대상이 아니다. 성공한 볼륨의 이름을 누르면 처리량(MiB/s, 한도는 점선), IOPS(요청 수, v4.1이면 읽기·쓰기 연산 수), 사용량(GiB) 차트가 열리고, 아래에 anf-api의 상태 코드별 요청률과 진행 중 작업 수 차트가 있다. Prometheus를 읽지 못하면 차트 자리에 오류를 보이고 트리는 계속 갱신된다 |
+| FR-12 | 클라이언트에서 부하를 걸면 그래프에 나타난다. | `backend/tests/e2e/test_metrics_data_live.py::test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit`와 브라우저 검증(메트릭 검증 보고서 AC-08) | 10 MiB/s 볼륨에 쓰기를 걸면 부하 전 0이던 `rate(...[20s])`가 15 s 안에 0보다 커지고, 안정 구간 중앙값이 한도 gauge의 90~101%다. 부하 중 PATCH로 20 MiB/s로 올리면 gauge와 rate가 따라간다. 대시보드의 처리량 차트가 같은 쿼리를 그린다 |
 
 ## 5. 알려진 한계
 
 - **클라이언트와 서버가 같은 커널이다** (ADR R-08). 클라이언트 컨테이너와 knfsd가 같은 WSL 커널·메모리를 쓴다. 처리량
   측정과 page cache 효과는 실제 ANF(별도 VM, 네트워크)와 다를 수 있다. NFS LOCALIO는 꺼져 있다(S0).
 - **처리량 판정은 게스트 단조 시계로 한다.** WSL 벽시계는 약 30초마다 뒤로 건너뛴다. 실행기의 시간도 `/proc/uptime`으로 잰다.
-- **데이터 플레인은 기기에 하나다.** VG, IP 대역, 포트 8080·8090을 같이 쓰므로 실행기는 한 번에 하나만 돌고, 파일은
+- **데이터 플레인은 기기에 하나다.** VG, IP 대역, 포트 8080·8090·9090을 같이 쓰므로 실행기는 한 번에 하나만 돌고, 파일은
   차례로 돈다. 처리량 시험은 다른 I/O와 겹치면 판정이 흔들린다.

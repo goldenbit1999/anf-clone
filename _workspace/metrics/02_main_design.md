@@ -123,4 +123,29 @@ storage agent ───────┘  statvfs(ns/<token>), LVM 태그, dmsetup
 
 ## 7. 구현 중 변경
 
-(구현 중 채움)
+설계가 정하지 않은 세부를 구현하며 정한 것과, 설계 문장에서 달라진 것이다. §4의 결정은 바꾸지 않았다.
+
+### storage agent
+- **볼륨 목록과 풀 사용량은 `FlexVolManager`에 둔다** (`inventory()`, `aggregate_usage()`). LVM 태그와 마운트 표를 읽는 코드(`_report`, `_mounted`)가 이미 거기 있다. 수집기(`volume_metrics.VolumeCollector`)는 그 결과, knfsd 파일, `statvfs`만 읽는다. 마운트되지 않은 볼륨은 태그에서 나오는 계열(한도, 스냅샷 수)만 내고, 인스턴스가 내려가 있으면 knfsd 계열을 내지 않는다.
+- **Docker API 소켓은 스크레이프마다 새로 연결한다.** 연결을 들고 있지 않으므로 Docker가 다시 떠도 수집기 상태가 없다(호출당 약 1.7 ms, S8). `404`나 `Pid 0`은 "인스턴스 없음", 그 밖의 오류는 그 볼륨만 실패로 센다(`anf_agent_scrape_errors_total`, 로그 한 줄).
+- **dm-thin 메타데이터 블록은 4,096바이트로 고정한다.** `dmsetup status`의 메타데이터 칸은 블록 수이고 블록 크기는 커널 상수다. 데이터 블록 크기는 테이블 크기 ÷ 데이터 블록 총수로 얻는다. `anf-aggr0-tpool`은 thin LV가 하나도 없어도 있다.
+- 실제 `/proc/net/rpc/nfsd`에는 `ra` 줄이 있고 `proc4ops`의 첫 값이 개수(76)다. 파서와 단위 테스트 입력을 이 모양에 맞췄다.
+
+### anf-api
+- **작업 소요 시간은 작업 행의 시작 시각(벽시계)부터 재고, 음수면 0으로 자른다.** 재시작 뒤 다시 돈 작업도 행이 만들어진 때부터 재야 하므로 단조 시계를 쓸 수 없고, WSL 벽시계는 뒤로 건너뛴다.
+- **진행 중 gauge는 LRO 처리기 키마다 0으로 미리 선언한다.** 작업이 한 번도 없었던 종류도 계열이 있어 대시보드의 `sum(...)`이 처음부터 0이다. 작업 수와 소요 시간은 `_finish`의 트랜잭션이 끝난 뒤에 센다.
+- 요청 미들웨어는 처리되지 않은 예외를 `500`으로 센다(바깥 미들웨어가 그렇게 응답한다).
+
+### Prometheus와 e2e
+- **이미지는 Docker Hub의 `prom/prometheus:v3.15.1`이다.** CI 러너에서 익명 pull 한도에 걸리면 `rest` 조각이 실패할 수 있다. 지금은 그대로 두었다. 걸리면 같은 이미지의 quay.io 사본(`quay.io/prometheus/prometheus`)으로 바꿀 수 있다.
+- **e2e는 Prometheus를 모듈 fixture로 한 번 띄운다**(AC-06/07, AC-09가 쓴다). 끝나면 `scripts/run-prometheus.sh stop`으로 지운다. 실행기는 9090을 8080·8090과 같이 사전 점검하고, 남은 `anf-prometheus` 컨테이너와 9090 리스너를 실패로 센다.
+- **AC-05의 NFSv3 부하는 iodepth 1로 건다.** S8 Q3에서 `rpc` 줄은 4 KiB 고부하에서 다른 카운터보다 1~13(0.01~0.02%) 적었다. 이 줄의 필드는 원자적이지 않아 동시 증가를 잃는다. iodepth 8이면 "요청 수 ≥ fio 연산 수"가 이 오차로 깨질 수 있다. v4.1은 `proc4ops` READ(per-cpu, 정확)로 판정한다. 이번 실행의 v4.1 `requests`도 fio 연산 수보다 15 적었다(48,468 대 48,483).
+- **AC-09의 인스턴스 재시작은 `docker rm -f` 뒤 같은 볼륨 PUT(`200` `Updating`)으로 한다.** agent에는 인스턴스만 다시 띄우는 API가 없고, 볼륨 ensure가 없어진 인스턴스를 다시 만든다. 쓰기 카운터가 64 MiB → 0 → 32 MiB로 다시 시작했다.
+
+### 대시보드
+- **쿼리를 `sum(...)`으로 감싼다**(ops는 `sum by (op)`). 볼륨을 지우고 같은 경로로 다시 만들면 `volume_uuid`가 다른 두 계열이 5분 창 안에 겹치는데, 합으로 묶으면 선 하나다. 볼륨당 계열이 하나인 평소에는 값이 같다.
+- **IOPS의 읽기·쓰기 연산 선은 응답에 계열이 있을 때만 그린다.** 프로토콜을 보고 고르지 않는다. NFSv3 볼륨은 agent가 그 계열을 내지 않으므로 요청 수 선만 남는다.
+- 사용량 차트는 used와 size를 그리고 size를 점선으로 그린다(한도 선과 같은 표시).
+- **볼륨은 `Succeeded`이고 `creationToken`이 있을 때만 고를 수 있다.** 고른 뒤에는 그 볼륨이 트리에 남아 있는 동안(상태가 `Updating` 등으로 바뀌어도) 패널이 열려 있다. 지워지거나 구독이 바뀌면 닫힌다.
+- **API 패널은 트리를 한 번 읽은 뒤에 보인다**(설계에 따로 없던 조건). anf-api를 아직 못 읽었을 때 "Loading…" 두 개가 겹치지 않게 했다. 트리 읽기가 나중에 실패해도 마지막 트리를 두므로 패널은 남는다.
+- Prometheus 프록시는 `/prometheus` 접두사를 떼고 넘긴다(`/prometheus/api/v1/...` → `/api/v1/...`). Windows의 Vite dev에서 WSL Prometheus까지 `query`와 `query_range`가 `200`인 것을 확인했다.
