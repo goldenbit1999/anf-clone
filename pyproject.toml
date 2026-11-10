@@ -5,7 +5,7 @@
 name = "anf-clone"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["fastapi>=0.115", "uvicorn>=0.32"]
+dependencies = ["fastapi>=0.115", "uvicorn>=0.32", "prometheus-client>=0.21"]
 
 [project.optional-dependencies]
 # httpx2: FastAPI(Starlette) TestClient가 쓴다. Starlette 1.10부터 httpx 대신 권장한다

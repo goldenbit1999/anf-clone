@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from storage_agent.flexvol import UMOUNT_ATTEMPTS, FlexVolManager, VolumeError
+from storage_agent.flexvol import UMOUNT_ATTEMPTS, AggregateUsage, FlexVolManager, VolumeError, VolumeInfo
 from storage_agent.nfs_instance import VOLUME_IPS
 from storage_agent.runner import CommandError, Result
 
@@ -28,7 +28,7 @@ S2 = "5a000000-0000-4000-8000-000000000002"
 SLV1 = "snap_5a000000000040008000000000000001"
 SLV2 = "snap_5a000000000040008000000000000002"
 NOW = datetime(2026, 11, 8, 23, 7, 12, 345678, tzinfo=timezone.utc)
-QUERIES = {"lvs", "vgs", "blkid", "findmnt", "lsattr"}
+QUERIES = {"lvs", "vgs", "blkid", "findmnt", "lsattr", "dmsetup"}
 
 
 class FakeHost:
@@ -55,6 +55,7 @@ class FakeHost:
         self.busy = 0  # 인스턴스가 없어도 umount가 busy인 남은 횟수
         self.blocked: set[str] = set()  # 입력을 막고 export 캐시를 비운 인스턴스 (되돌리기 창)
         self.limits: dict[str, float] = {}  # 인스턴스 netns에 건 처리량 한도 (MiB/s). netns와 함께 사라진다
+        self.pool_status = ""  # `dmsetup status anf-aggr0-tpool`의 출력
 
     # --- 실행기 ---
 
@@ -271,6 +272,10 @@ class FakeHost:
         lv = self.lvs[args[-1].removeprefix("/dev/anf/")]
         lv["fs"], lv["tree"] = "ext4", ["lost+found"]
         return self.ok()
+
+    def _dmsetup(self, args):
+        assert args == ["status", "anf-aggr0-tpool"]
+        return self.ok(self.pool_status)
 
     def _findmnt(self, args):
         return self.ok("".join(f"{target}\n" for target in self.mounts))
@@ -1128,6 +1133,34 @@ def test_unmounted_volume_is_offline(host, mgr):
     with pytest.raises(CommandError):
         create(mgr)
     assert mgr.record(U1)["state"] == "offline"
+
+
+def test_inventory_lists_volumes_for_the_metrics_collector(host, mgr, tmp_path):
+    # 메트릭 설계 §2.1: 라벨(uuid, token, protocol), 한도, 마운트 지점(마운트됐을 때만), 스냅샷 수. 읽기만 한다
+    create(mgr)
+    mgr.create(U2, "/vol2", GIB, 770, "nfs4.1", qos=12.5)
+    mgr.create_snapshot(U1, S1, "s1")
+    mgr.create_snapshot(U1, S2, "s2")
+    mgr.create_snapshot(U2, S3, "s1")
+    host.fail["mkfs.ext4"] = "boom"  # 파일시스템 전에 멈춘 볼륨: 마운트되지 않았다
+    with pytest.raises(CommandError):
+        create(mgr, U3, "/vol3")
+    host.calls.clear()
+
+    assert mgr.inventory() == [
+        VolumeInfo(U1, "vol1", "nfs3", None, Path(mountpoint(tmp_path, "vol1")), 2),
+        VolumeInfo(U2, "vol2", "nfs4.1", 12.5, Path(mountpoint(tmp_path, "vol2")), 1),
+        VolumeInfo(U3, "vol3", "nfs3", None, None, 0),
+    ]
+    assert changes(host) == []
+
+
+def test_aggregate_usage_reads_the_thin_pool_status(host, mgr):
+    # WSL에서 본 풀 줄: 데이터 블록은 length ÷ 전체 블록 = 1024 섹터(512 KiB), 메타데이터 블록은 4 KiB
+    host.pool_status = "0 2146951168 thin-pool 7974 3415/32768 1863/2096632 - rw discard_passdown queue_if_no_space - 1024 \n"
+    assert mgr.aggregate_usage() == AggregateUsage(
+        data_used=1863 * 524288, data_size=2146951168 * 512, metadata_used=3415 * 4096, metadata_size=32768 * 4096)
+    assert host.calls == [["dmsetup", "status", "anf-aggr0-tpool"]]
 
 
 def test_snapshot_records(host, mgr):
