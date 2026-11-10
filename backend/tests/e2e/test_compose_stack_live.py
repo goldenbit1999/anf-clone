@@ -224,7 +224,9 @@ def test_demo_replays_steps_1_to_7_cleans_up_and_fits_in_memory():
     assert secs < 180
     # 근거: 클라이언트가 읽은 내용, 잰 MiB/s, Prometheus 값
     assert "/.snapshot/snap1/hello.txt still reads" in r.stdout
-    assert re.search(r"fio write on vol-v41 with the limit 5 MiB/s: [\d., ]+ MiB/s \(median ", r.stdout)
+    for limit in (demo.LIMIT, demo.NEW_LIMIT):
+        assert re.search(rf"fio write on vol-v41 with the limit {limit:g} MiB/s: [\d., ]+ MiB/s \(median ", r.stdout)
+    assert "the measured write throughput followed the limit: median " in r.stdout
     assert "write rate peaked at" in r.stdout
     # 스스로 치웠다
     accounts = call("GET", f"/subscriptions/{demo.SUB}/providers/Microsoft.NetApp/netAppAccounts?{demo.V}")
