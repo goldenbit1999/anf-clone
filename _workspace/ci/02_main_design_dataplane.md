@@ -101,3 +101,33 @@ PR #20 run `42811747210`의 `throughput` 조각에서 처리량 데이터 시험
    - 같은 러너 VM의 20 MiB/s 쓰기 `measure` 중앙값은 0.9869였다(AC-02).
    - AC-06의 큰 쓰기는 한 번 측정이지만 상한만 보므로 그대로 둔다.
 9. **"Collect logs"는 `journalctl -k -b`도 `kernel-journal.txt`로 담는다.** 커널 링 버퍼가 약 38분짜리 `rest` 조각에서 넘쳐 `dmesg.txt`의 앞 9분이 빠졌다(검증 1회차 관찰 6). `dmesg.txt`도 그대로 둔다. journal이 없어도 단계가 실패하지 않게 `|| true`를 붙였다.
+
+### 검증 2회차 AC-01 FAIL 뒤 (2026-11-10, feature-implementer)
+
+PR #22 run `42825248067`의 tp8에서 AC-07 단계 (c) "docker rm + re-PUT"의 작업이 일반 `InternalServerError`로 끝났다. 시험은 작업 상태를 보지 않고 쓰기를 450 s 기다렸고, agent·anf-api 로그가 artifact에 없어 원인을 확정하지 못했다(`04_verifier_report_dp_r2.md` AC-01).
+
+10. **관측을 먼저 고쳤다** (커밋 `b9e762d`, 시험·실행기 쪽만).
+    - `through_step`은 단계의 작업이 `Succeeded`가 아니면 쓰기를 기다리지 않고 작업 본문과 함께 바로 실패한다.
+    - 그 경로와 쓰기 대기가 예외로 끝나는 경로에서 클라이언트 마운트를 `umount -f`로 푼다(진행 중인 RPC가 EIO로 끝난다). hard 마운트에 걸린 libaio 쓰기는 끝날 때까지 프로세스가 나가지 못해, 이것 없이는 `docker rm -f`가 실패하고 클라이언트 컨테이너가 남았다.
+    - 단계 (c)는 `docker rm`의 시간·rc·stderr와 그 뒤에도 남은 컨테이너를 기록한다. (c)·(d)는 작업 본문(`op`)도 남긴다.
+    - `ANF_E2E_LOG`가 있으면 e2e가 띄운 agent와 anf-api의 출력을 그 옆 `<파일>-logs/`(`agent.log`, `anf-api-<n>.log`)에 쓴다(`live_api.log_file`). 실행기는 `ANF_E2E_LOG`를 출력 폴더에 두므로 WSL과 CI artifact가 같은 근거를 갖는다. 4번의 "agent 로그는 올리지 않는다"를 뒤집는다. 워크플로는 바꾸지 않았다(artifact 경로가 이미 출력 폴더다).
+11. **원인 (러너 재현)**: 임시 브랜치 `tmp/repro-ac07-rm-put`, PR #23 run `42837944997`. 임시 시험이 쓰는 중에 (b) `docker stop` + agent 재시작 → (c) `docker rm -f` + 재PUT을 8회 되풀이했다(30조각, 실패하면 그 조각은 멈춤).
+    - 194번의 `docker rm -f` 중 13번(30조각 중 13조각)이 12.0 s 만에 rc 1로 끝났다: `could not kill: tried to kill container, but did not receive an exit event`. 나머지 181번은 0.13~0.64 s였다. 13번 모두 아래와 같았다.
+    - 컨테이너는 `running`으로 남았다. 그때 D 상태인 프로세스는 그 컨테이너의 `rpcbind` 하나였고, 커널 스택은 `do_exit → task_work_run → cleanup_mnt → nfsd_umount → nfsd_shutdown_threads → nfsd_destroy_serv → svc_xprt_destroy_all → svc_delete_xprt → svc_register → rpcb_v4_register → rpc_call_sync`였다.
+    - 재PUT의 agent job은 `flexvol.create → _write_exports → docker exec … exportfs -ra exited 127`로 실패했다. Docker는 컨테이너를 running으로 보지만 그 안에 들어갈 수 없었다. anf-api는 이것을 일반 `InternalServerError`로 냈다.
+    - 컨테이너는 약 2분 20초 뒤 `Exited (137)`이 됐다(r05: 재PUT 14:52:17, `FinishedAt` 14:54:28). tp8의 커널 저널(10 s 간격 `rpcbind: server localhost not responding, timed out` 14줄, 그 뒤 veth 제거)과 같다.
+    - 해석: SIGKILL 뒤 컨테이너의 마운트 네임스페이스를 마지막으로 놓는 프로세스의 exit가 nfsd 파일시스템을 내리고(`nfsd_umount`), knfsd 종료가 rpcbind에 등록 해제를 보낸다. 그 프로세스가 rpcbind 자신이면 rpcbind의 소켓이 아직 닫히지 않아 호출이 답 없이 10 s씩 시간 초과(errno 5)된다. 다른 프로세스가 마지막이면 소켓이 이미 닫혀 바로 ENOTCONN(errno 107)으로 끝난다. WSL의 `dmesg`에는 `docker rm -f`마다 같은 등록 해제 줄이 errno 107로만 찍혔다. [추론] 어느 프로세스가 마지막인지는 종료 순서에 달려 간헐적이다. exit 중에 소켓이 열려 있는 것은 task_work가 나중에 넣은 `cleanup_mnt`를 소켓의 `fput`보다 먼저 돌리기 때문으로 보인다.
+    - 러너 호스트에는 rpcbind가 없다(`/run/rpcbind.sock` 없음, `nfs-kernel-server`·`nfs-common` 미설치). WSL 호스트의 rpcbind를 멈춰도 WSL에서는 느려지지 않았으므로 호스트 rpcbind와는 관계없다.
+12. **수정 (제품, 커밋 `ae8454e`)**: 인스턴스 진입점이 rpcbind를 nfsd 파일시스템을 마운트하기 전에 `unshare -m --propagation private`로 자기 마운트 네임스페이스에서 띄우고, 그 안에서 `/export`를 떼어 낸다(`umount -l`).
+    - rpcbind의 exit는 nfsd 파일시스템을 내리지 않는다. knfsd 종료는 다른 프로세스의 exit에서 일어나고, 그때 rpcbind 소켓은 닫혔거나 곧 닫힌다.
+    - netns는 그대로라 포트 매퍼(NFSv3 마운트)와 커널의 AF_LOCAL 등록(`/var/run/rpcbind.sock`, 같은 rootfs)은 바뀌지 않는다.
+    - `/export`를 떼어 내는 이유: private 복사본에 볼륨·스냅샷 마운트가 남으면 rpcbind가 볼륨 LV를 잡아 삭제·되돌리기의 `lvremove`가 실패한다.
+    - 통합 테스트 `test_rpcbind_cannot_hold_up_a_killed_instance`: rpcbind의 mnt ns가 인스턴스 init와 다르고 net ns는 같으며, rpcbind 쪽에 nfsd 마운트와 `/export` 마운트가 없고, NFSv3 클라이언트가 쓴다. 수정 전 WSL에서 RED(두 mnt ns가 `mnt:[4026532270]`로 같음), 수정 뒤 GREEN. 같은 파일 31개가 모두 통과했다(되돌리기·삭제의 `lvremove` 포함, `/var/tmp/anf-clone-tests/it-rpcbind`).
+    - agent와 anf-api 코드는 바꾸지 않았다.
+    - 러너 확인: 같은 임시 시험을 수정 위에서 다시 돌렸다(PR #23 run `42843039794`, 30조각). 30조각 모두 통과했고 `docker rm -f` 240번이 0.11~3.88 s(중앙값 0.14 s), rc 1 없음, 작업 실패 없음이었다. 커널 저널에는 `not responding, timed out`이 없고 등록 해제 실패 줄 1,920개가 모두 errno 107이다. 수정 전 run에서는 errno 5 줄 104개가 실패한 13조각에만 있었다. 임시 브랜치와 PR은 닫고 지웠다.
+    - WSL 전체 회귀(`/var/tmp/anf-clone-tests/fr11-rpcbind-full`)는 리더 지시로 중간에 멈췄다. 13개 파일 중 앞 9개 파일 86개가 모두 통과했고, 처리량 데이터 파일은 AC-07 실행 중에 멈춰 앞 5개만 통과로 남았다(91개 통과, 실패·skip 0). 볼륨 contract·data·recovery 파일은 돌지 않았다. 멈춘 뒤 teardown이 볼륨을 지웠고 남은 LV·컨테이너·리스너·ns 마운트는 없다.
+13. **채택하지 않은 것**
+    - agent가 끝나는 중인 컨테이너를 기다렸다 다시 띄우기(`_state`에 "exiting", `start`에서 제한 시간 대기): 재PUT은 성공하지만 클라이언트가 2~3분 멈추고 `docker rm -f`는 여전히 실패한다. agent는 job을 하나씩 돌리므로 그동안 다른 볼륨 작업도 밀린다. AC-07 (c)의 폴링 120 s와 쓰기 150 s도 늘려야 한다. 12번이 그 창을 없애므로 넣지 않았다. 다른 이유로 끝나는 중인 컨테이너에 재PUT이 오면 지금처럼 job이 실패한다(다시 보내면 된다).
+    - rpcbind를 컨테이너의 PID 1로: [추론] PID 1은 다른 프로세스를 죽이기 전에 자기 파일을 닫으므로 효과는 같겠지만, 진입점의 TERM 처리와 준비 표시 구조를 바꿔야 한다.
+    - `/export`를 떼지 않고 `--propagation unchanged`(slave 복사본): 호스트 umount가 전파되긴 하지만 볼륨·스냅샷 마운트가 rpcbind 쪽에 한 벌 더 생기고, 바쁜 복사본이 있으면 umount 전파가 실패할 수 있다.
+    - anf-api가 agent 오류 문구를 작업 오류에 싣기: 이번 원인은 artifact의 agent 로그로 확인됐다. ARM 작업 오류의 일반 문구(계약)는 그대로 둔다.
