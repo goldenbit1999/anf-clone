@@ -15,7 +15,7 @@ ANF 클론의 테스트 층, 실행 명령, 그리고 PRD §6.1 수락 기준마
 | 훅 | `.claude/hooks/tests` | 없음 | TDD 훅의 판정 | 없음 (기본 `testpaths` 밖) |
 | 프론트엔드 | `frontend/src/*.test.ts(x)` | — | 대시보드의 읽기, 2초 폴링, 렌더링 (Vitest) | Node 22 (Windows) |
 
-`dataplane` 마커가 붙은 테스트는 113개다(통합 30, 데이터 플레인 e2e 83). 나머지 `python -m pytest`의 대상은 988개다.
+`dataplane` 마커가 붙은 테스트는 113개다(통합 30, 데이터 플레인 e2e 83). 나머지 `python -m pytest`의 대상은 989개다.
 
 ## 2. 어디서 무엇이 도는가
 
