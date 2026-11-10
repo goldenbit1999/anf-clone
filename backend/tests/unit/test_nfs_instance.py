@@ -397,10 +397,22 @@ def test_ensure_applies_the_limit_after_start_and_before_ready(runner, instances
 
 
 def test_shared_ns_from_plain_directory(runner, instances):
-    # WSL의 /는 private라 rslave 바인드가 거절된다. ns를 자기 자신에 바인드하고 공유로 만든다
+    # WSL의 /는 private라 rslave 바인드가 거절된다. ns를 자기 자신에 바인드하고 공유로 만든다.
+    # 바인드는 private로 한 번 떼어 낸 뒤 rshared로 만든다: 자기 peer group을 받는다 (FR-11 data-plane 결정 1)
     runner.respond("findmnt", 1)
     instances.ensure_shared_ns()
-    assert runner.calls[1:] == [["mount", "--bind", str(NS), str(NS)], ["mount", "--make-rshared", str(NS)]]
+    assert runner.calls[1:] == [["mount", "--bind", str(NS), str(NS)], ["mount", "--make-private", str(NS)],
+                                ["mount", "--make-rshared", str(NS)]]
+
+
+def test_shared_ns_new_bind_leaves_the_peer_group_of_a_shared_root(runner, instances):
+    # systemd 호스트(GitHub 러너 포함)는 /가 shared라 새 바인드가 /의 peer group을 물려받아 이미 shared로 보인다.
+    # 그대로 두면 ns 아래 마운트가 가려진 원래 디렉터리에도 복제돼 호스트 마운트 표에 두 번 나온다 (S3 Q7)
+    runner.sequence("findmnt", (1, ""), (0, "shared\n"))
+    instances.ensure_shared_ns()
+    mounts = [c for c in runner.calls if c[0] == "mount"]
+    assert mounts == [["mount", "--bind", str(NS), str(NS)], ["mount", "--make-private", str(NS)],
+                      ["mount", "--make-rshared", str(NS)]]
 
 
 def test_shared_ns_private_mount_is_made_shared(runner, instances):
