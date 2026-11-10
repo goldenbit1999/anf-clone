@@ -17,6 +17,7 @@
         -p no:cacheprovider backend/tests/e2e/test_throughput_limit_data_live.py -v -s'
 """
 
+import json
 import statistics
 import time
 
@@ -25,7 +26,7 @@ import pytest
 import live_api
 from live_api import TIB, call, create_account, create_pool, poll, pool_url
 from dataplane_live import (
-    ACCT, delete_volume, fsid_of, GIB, instance_name, mount_ip, note, sh, SKIP_UNLESS_ROOT, token, vol_body,
+    ACCT, delete_volume, fsid_of, GIB, instance_name, mount_ip, note, out, sh, SKIP_UNLESS_ROOT, token, vol_body,
     vol_url,
 )
 from restore_live import restore_volume
@@ -302,9 +303,19 @@ def resumed(windows: list, after: float, mibps: float) -> float | None:
     return next((t for t, d in windows if t >= after and d >= 0.5 * mibps), None)
 
 
+def abort_io(c, mp: str = "/m") -> dict:
+    """hard 마운트에 걸린 쓰기를 끝낸다. `umount -f`는 그 마운트의 진행 중인 RPC를 EIO로 끝내므로 fio가 오류로
+    빠져나가고, 클라이언트 컨테이너를 지울 수 있게 된다. 쓰기가 남아 마운트가 바쁘면(EBUSY) 다시 한다.
+    서버가 돌아오지 않은 채 이것 없이 지우면 `docker rm -f`가 실패해 컨테이너가 남았다 (검증 2회차 tp8)."""
+    r = c.run(f"for i in $(seq 30); do umount -f {mp} && exit 0; sleep 1; done; exit 1", timeout=90)
+    return out(r)
+
+
 def through_step(c, fsid: str, mibps: float, step, runtime: int) -> dict:
     """시간 기반 쓰기를 돌리는 중에 step()을 하고, 끝난 뒤 다시 흐르기 시작한 때부터 15 s 동안의 1초 창을 본다.
-    반환: 단계 시각, 다시 흐른 때까지의 지연, 측정 창의 중앙값·비율, 한도를 넘은 창, 표본이 없던 구간, fio 결과."""
+    반환: 단계 시각, 다시 흐른 때까지의 지연, 측정 창의 중앙값·비율, 한도를 넘은 창, 표본이 없던 구간, fio 결과.
+    단계의 작업이 Succeeded가 아니면 쓰기를 기다리지 않고 작업 본문과 함께 바로 실패한다. 쓰기를 기다리다 예외가
+    나도 같다. 두 경우 모두 걸린 쓰기를 끝내 클라이언트 컨테이너를 지울 수 있게 한다 (검증 2회차 tp8)."""
     s = Sampler(fsid)
     s.start()
     wait = in_background(fio, c, "write", "/m/f", round(mibps * SECONDS), runtime=runtime, timeout=runtime + 300)
@@ -312,7 +323,16 @@ def through_step(c, fsid: str, mibps: float, step, runtime: int) -> dict:
     t_step = time.monotonic()  # 창 시각과 같은 시계 (Sampler)
     detail = step()
     t_done = time.monotonic()
-    io = wait()
+    if detail.get("final", "Succeeded") != "Succeeded":
+        s.stop()
+        detail["abort_io"] = abort_io(c)
+        raise AssertionError(f"step operation did not succeed: {json.dumps(detail, default=str)}")
+    try:
+        io = wait()
+    except BaseException:
+        s.stop()
+        abort_io(c)
+        raise
     windows = s.stop()
     t_resume = resumed(windows, t_done, mibps)
     span = [d for t, d in windows if t_resume is not None and t_resume + 1 <= t <= t_resume + 16]
@@ -351,16 +371,21 @@ def test_ac07_limit_survives_lifecycle(agent, api, clients):
         return {"docker_stop_rc": rc, "pid_before": before, "pid_after": instance_pid(fsid)}
 
     def remove_instance_then_put():
-        rc = sh("docker", "rm", "-f", instance_name(fsid)).returncode
+        t0 = time.monotonic()
+        rm = sh("docker", "rm", "-f", instance_name(fsid))
+        rm_s = round(time.monotonic() - t0, 2)
+        left = sh("docker", "ps", "-a", "--filter", f"name=^{instance_name(fsid)}$",
+                  "--format", "{{.ID}} {{.State}} {{.Status}}").stdout.strip()
         r = call("PUT", vol_url(ACCT, "ul", "l1"), vol_body(tok, GIB, throughputMibps=mibps))
         final, seen = poll(r.headers["azure-asyncoperation"], 120)
-        return {"docker_rm_rc": rc, "put": r.status, "seen": seen, "final": final["status"],
-                "pid_after": instance_pid(fsid)}
+        return {"docker_rm_rc": rm.returncode, "docker_rm_s": rm_s, "docker_rm_stderr": rm.stderr.strip(),
+                "container_after_rm": left, "put": r.status, "seen": seen, "final": final["status"],
+                "op": final, "pid_after": instance_pid(fsid)}
 
     def revert_to_s1():
         r = post_revert("l1", snap["id"], pool="ul")
         final, seen = poll(r.headers["azure-asyncoperation"], 120)
-        return {"post": r.status, "seen": seen, "final": final["status"]}
+        return {"post": r.status, "seen": seen, "final": final["status"], "op": final}
 
     # runtime은 단계 + 클라이언트 재연결(TCP 재연결 backoff가 수십 초까지 는다) + 측정 16 s를 덮는다
     for label, step, runtime in (("a agent restart", restart_agent, 50),

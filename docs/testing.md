@@ -83,6 +83,7 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 | `<테스트 파일>.log` | 그 파일의 pytest 출력(`-v`) |
 | `<테스트 파일>.xml` | JUnit XML |
 | `<테스트 파일>.jsonl` | e2e의 HTTP 요청·응답, 서버 이벤트, 판정 근거(`note`)를 담은 `ANF_E2E_LOG` |
+| `<테스트 파일>-logs/` | e2e가 띄운 storage agent(`agent.log`)와 anf-api(`anf-api-<n>.log`)의 출력. 작업이 일반 `InternalServerError`로 끝났을 때의 원인이 여기에 있다 |
 | `collect.log`, `baseline.txt`, `files.tsv` | 수집 결과, 실행 전 LV·컨테이너, 파일별 pytest 종료 코드와 초 |
 | `summary.txt` | 파일별·합계 표, 시간, 남은 것, 종료 코드 |
 

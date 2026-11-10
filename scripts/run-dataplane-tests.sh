@@ -7,6 +7,7 @@
 # 파일마다 pytest를 따로 띄우고, 그 전에 page cache를 비운다. 한 프로세스로 이어 돌리면 page cache가 차서
 # 호스트가 실행기를 죽인 적이 있다 (FR-08, 결정 3). 실패해도 끝까지 돈다 (결정 4).
 # 출력(파일별 .log, .xml, .jsonl, summary.txt)은 WSL 디스크 ANF_TEST_OUT에 쓴다. 기본 /var/tmp/anf-clone-tests/<UTC 시각>.
+# e2e는 .jsonl 옆 <파일>-logs/에 storage agent(agent.log)와 anf-api(anf-api-<n>.log)의 출력을 쓴다 (live_api.log_file).
 # /mnt/c(9P)는 e2e를 3~4배 느리게 하고 /tmp는 WSL이 꺼지면 사라진다 (결정 9).
 #
 # 종료 코드 (§5.3): 0 수집 1개 이상·전부 통과·skip 0·남은 것 없음
