@@ -2,13 +2,14 @@
 
 - 상태: in_progress
 - FR: FR-12 (메트릭)
-- 마지막 완료 단계: 2 (설계 `02_main_design.md`)
-- 재개할 단계: 3 (구현, `feature-implementer`)
+- 마지막 완료 단계: 3 (구현)
+- 재개할 단계: 4 (검증 1회차 진행 중) → 5·6 → PR
 - 브랜치: `feature/metrics` (`main` `a21541f`에서)
-- 검증 대상 코드: (구현 뒤 기록. 시작 시 제품 코드 내용 해시 `73dee8f9e5bfdbedcb5f4dce55987fa0de92689b60679092a5d020c6e6bdd7c1`)
+- 검증 대상 코드: `e80c8e7` (`feature/metrics`), 제품 코드 내용 해시 `7c38d8c7fdf750e4a4c32b06802475b0a5e3e2632ea1f60da9e7ac89ac2df4ed` (메인 계산. 시작 시 `73dee8f9…`)
 - researcher 에이전트 ID: abb206742a6b464de
 - implementer 에이전트 ID: a7d790b1fb5b7e3f8 (스파이크 S8부터)
-- verifier 에이전트 ID:
+- verifier 에이전트 ID: a2a21e0e8411ece06 (1회차)
+- concept-explainer 에이전트 ID: adc11daeedd5414b3
 - 미해결: 없음
 
 ## 선행 확인 (0단계)
@@ -29,3 +30,6 @@
 - 2026-11-10 스파이크 S8 조건부 통과(`aa0a313`): `io`·`rpc`·`proc4ops`는 netns별, `proc3`는 전역. `io`는 fio 바이트와 같음. HTB `overlimits`는 신호로 못 씀. Prometheus v3.15.1 컨테이너(host 네트워크) 동작
 - 2026-11-10 단계 2 완료 — 묻는 결정 없음, 결정 1~14 자동 채택. 수락 기준 AC-01~13
 - 2026-11-10 단계 3 시작 — 같은 implementer에 구현을 맡김
+- 2026-11-10 단계 3 완료 — 커밋 `e2581cd`(agent `/metrics`), `37a341c`(anf-api `/metrics`), `3c403b1`(Prometheus 컨테이너·데이터 e2e·실행기 9090), `290f726`(대시보드 차트), `e80c8e7`(testing.md, 설계 §7). 새 e2e 5 passed·skip 0·359 s(`/var/tmp/anf-clone-tests/fr12-e2e-1`), WSL not-dataplane 1016 passed·skip 0, 프런트엔드 48 tests·build 통과. 기존 데이터 플레인 파일은 다시 돌리지 않음(결정 14: PR CI가 회귀)
+- 2026-11-10 implementer가 올린 두 질문을 메인이 자동 채택으로 정함: (15) 요청 수 출처는 `rpc` 줄 그대로(고부하에서 0.01~0.02% 덜 셈을 문서에 적는다. `rc` 합은 v3·v4.1에서 뜻이 달라 설명이 어렵다), (16) CI의 Prometheus 이미지는 Docker Hub 그대로(pull 한도에 걸리면 그때 quay.io로)
+- 2026-11-10 단계 4 1회차 시작(real-env-verifier), 단계 5 개념 문서(concept-explainer) 병행. 메인이 `CLAUDE.md`·ADR §8·§9.3·§10 S8 갱신
