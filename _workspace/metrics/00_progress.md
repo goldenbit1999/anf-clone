@@ -1,11 +1,11 @@
 # metrics 진행 기록
 
-- 상태: in_progress
+- 상태: done (PR의 CI 통과 뒤 merge)
 - FR: FR-12 (메트릭)
-- 마지막 완료 단계: 3 (구현)
-- 재개할 단계: 4 (검증 1회차 진행 중) → 5·6 → PR
+- 마지막 완료 단계: 6
+- 재개할 단계: 없음 (출하: PR → CI → merge)
 - 브랜치: `feature/metrics` (`main` `a21541f`에서)
-- 검증 대상 코드: `e80c8e7` (`feature/metrics`), 제품 코드 내용 해시 `7c38d8c7fdf750e4a4c32b06802475b0a5e3e2632ea1f60da9e7ac89ac2df4ed` (메인 계산. 시작 시 `73dee8f9…`)
+- 검증 대상 코드: `7eac56c`(2회차. 1회차는 `e80c8e7`) (`feature/metrics`), 제품 코드 내용 해시 `7c38d8c7fdf750e4a4c32b06802475b0a5e3e2632ea1f60da9e7ac89ac2df4ed` (메인 계산. 시작 시 `73dee8f9…`)
 - researcher 에이전트 ID: abb206742a6b464de
 - implementer 에이전트 ID: a7d790b1fb5b7e3f8 (스파이크 S8부터)
 - verifier 에이전트 ID: a2a21e0e8411ece06 (1회차)
@@ -20,7 +20,7 @@
 
 ## 수락 기준별 최신 결과
 
-(설계 뒤 채움)
+13/13 PASS. 기준별 표는 `docs/concepts/metrics.md` 5절과 `04_verifier_report.md`, `04_verifier_report_r2.md`. AC-06만 1회차 FAIL → 2회차 PASS. AC-12의 CI 부분은 PR 실행(메인이 확인).
 
 ## 이력
 
@@ -35,3 +35,6 @@
 - 2026-11-10 단계 4 1회차 시작(real-env-verifier), 단계 5 개념 문서(concept-explainer) 병행. 메인이 `CLAUDE.md`·ADR §8·§9.3·§10 S8 갱신
 - 2026-11-10 단계 5 완료 — 개념 문서 `docs/concepts/metrics.md`(Q&A 13개). 검증 결과 자리는 메인이 채움
 - 2026-11-10 단계 4 1회차 완료 — PASS 11, FAIL 1(AC-06, 간헐), AC-12의 CI 부분은 PR 뒤 (`04_verifier_report.md`). AC-06: PATCH 뒤 20 MiB/s 구간에서 Prometheus 값이 한도의 76.7%(3번 중 1번). fio가 실제로 덜 썼다(WSL 스토리지 흔들림) — 메트릭 결함이 아님. AC-08은 headless Chrome으로 PASS(확장 프로그램은 연결돼 있지 않았다). 자동 채택: AC-06 시험을 "Prometheus 대 fio ±5%" + "한도의 101% 이하, PATCH 뒤 중앙값 > PATCH 전 최댓값"으로 나눔. implementer에 수정과 9회 반복(약 23분), `run-prometheus.sh`의 `-v`를 맡김
+- 2026-11-10 AC-06 수정 `7eac56c`(시험만): 메트릭 정확성(Prometheus 카운터 증가 ÷ fio 바이트 ±5%, 단조 시계)과 한도(gauge 값, 20 s 처리량 ≤ 101%, PATCH 뒤 중앙값 > PATCH 전 최댓값)를 나눔. `run-prometheus.sh`에 `-v`. 9회 반복 9/9(`/var/tmp/anf-clone-tests/fr12-ac06-repeat`). 제품 해시 그대로
+- 2026-11-10 단계 4 2회차 완료 — AC-06 PASS(결과 파일로 판정, `04_verifier_report_r2.md`). 누적 12 PASS + AC-12(CI 부분은 PR)
+- 2026-11-10 단계 6 완료 — feature-status `done`, 개념 문서 검증 결과. push·PR

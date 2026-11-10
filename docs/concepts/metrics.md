@@ -599,7 +599,25 @@ anf-api 지표(AC-01, AC-02)는 계약 테스트(`test_arm_app.py:371-417`)와 �
 
 ### 실환경 검증 (real-env-verifier)
 
-<!-- 검증 결과: 메인이 채움 -->
+검증 대상 코드는 `7eac56c`(제품 코드 내용 해시 `7c38d8c7…`)다. 보고서: `_workspace/metrics/04_verifier_report.md`(1회차), `04_verifier_report_r2.md`(2회차).
+
+| 기준 | 결과 | 근거 |
+| --- | --- | --- |
+| AC-01 요청 지표 | PASS | 실제 uvicorn: 요청 수와 히스토그램 `_count`가 보낸 만큼 늘고, `route`는 경로 템플릿 또는 `unmatched`. 출력 어디에도 구독 ID·리소스 이름이 없다 |
+| AC-02 작업 지표 | PASS | 결함 주입: 지연된 생성 동안 gauge 1 → 0, 강제 실패는 `Failed`. 작업 도중 재시작(SIGTERM, SIGKILL)해도 새 프로세스에서 한 번만 세고 gauge가 0으로 돌아옴 |
+| AC-03 사용량 | PASS | 256 MiB 쓰기에 used +268,439,552, 클라이언트 `df`와 0.006% 차이 |
+| AC-04 처리량 분리 | PASS | 쓰기 카운터가 fio와 바이트 단위로 같고(268,435,456), 다른 볼륨 0, 읽기 때 쓰기 카운터 0 (v3, v4.1) |
+| AC-05 IOPS | PASS | v4.1 READ 연산 수 = fio 연산 수. v3는 요청 수만 있고 연산 계열 없음 |
+| AC-06 Prometheus와 한도 | 1회차 FAIL → 2회차 PASS | 1회차: 한도를 20 MiB/s로 올린 구간에서 Prometheus 값이 한도의 76.7%(3번 중 1번). fio가 실제로 덜 썼다(WSL 스토리지 흔들림). 시험이 메트릭 정확성과 한도 도달(FR-08의 몫)을 함께 보고 있어 나눴다. 2회차(9회 반복 결과 파일로 판정): Prometheus 카운터 증가 ÷ fio 바이트 0.9966~1.0013, 20 s 처리량 최대가 한도의 95.8~99.5%, 9회 모두 통과. 스토리지가 느려진 회(11.6~15.2 MiB/s)가 3번 있었지만 fio와 같은 값을 보였다 |
+| AC-07 Prometheus | PASS | 두 대상 `up`. Windows에서 `:9090`과 Vite 프록시 양쪽으로 볼륨 계열 조회. 부하 뒤 3.2~4.8 s에 rate > 0 |
+| AC-08 대시보드 | PASS (headless Chrome) | 실제 스택 + Windows `npm run dev`를 Chrome 157 headless로 열어 볼륨 행을 눌렀다. 쓰기 처리량 0 → 9.9(한도 10) → 19.7(한도 20). Prometheus를 멈추면 두 패널에 오류, 트리는 계속 갱신. Chrome 확장 프로그램은 연결돼 있지 않았다 |
+| AC-09 수명 주기 | PASS | 인스턴스가 내려가 있어도 `/metrics` 200. 다시 뜨면 카운터가 0부터, 계열은 하나, rate 음수 없음. 삭제 뒤 계열 사라짐 |
+| AC-10 aggregate | PASS | 스냅샷 뒤 덮어쓰기: aggregate +1.2%(쓴 바이트 대비), 볼륨 used 그대로 |
+| AC-11 간섭 없음 | PASS | 1 s 스크레이프 98번 모두 200, 한도 측정 99.4%, 스크레이프 최대 0.153 s |
+| AC-12 회귀 | PASS | WSL `-m "not dataplane"` 1016 passed·skip 0, ruff 통과. 기존 데이터 플레인 묶음의 회귀는 PR의 CI `data-plane` 작업이 맡는다(통과가 merge 조건. WSL 전체 묶음은 돌리지 않았다) |
+| AC-13 프런트엔드 | PASS | typecheck, Vitest 48개, build |
+
+관찰: `anf_volume_nfs_requests_total`은 v4.1 고부하에서 fio 연산 수보다 0.06% 적었다(`rpc` 줄의 특성). 쉬는 마운트도 초당 약 0.067 요청을 낸다. "진행 중 작업" 차트는 5 s 수집 간격보다 짧은 작업을 놓친다.
 
 ---
 
