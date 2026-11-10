@@ -1,0 +1,13 @@
+# Prometheus 설정 (FR-12, 메트릭 설계 §3·결정 11). scripts/run-prometheus.sh가 컨테이너에 읽기 전용으로 붙인다.
+# 컨테이너는 host 네트워크라 127.0.0.1의 두 프로세스를 긁는다.
+# 5초마다 긁는다: 대시보드의 rate(...[20s])가 창마다 표본 4개를 갖는다 (결정 12·13).
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: anf-api
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+  - job_name: storage-agent
+    static_configs:
+      - targets: ["127.0.0.1:8090"]
