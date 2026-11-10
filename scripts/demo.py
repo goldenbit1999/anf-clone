@@ -38,7 +38,7 @@ V3 = ("vol-v3", "demo-v3", "NFSv3")
 V41 = ("vol-v41", "demo-v41", "NFSv4.1")
 RESTORED = ("vol-restored", "demo-restored", "NFSv3")  # 프로토콜은 원본(vol-v3)을 따른다
 SNAP = "snap1"
-# MiB/s. 6단계는 한도가 천장인지(어느 회도 101% 이하)와 한도를 내리면 잰 값이 따라 내려가는지만 판정한다. 스토리지가
+# MiB/s. 6단계는 한도가 천장인지(어느 회도 ceiling 이하)와 한도를 내리면 잰 값이 따라 내려가는지만 판정한다. 스토리지가
 # 가끔 몇 초씩 한도보다 느리게 써서(S7 Q2, 제한기 원인 아님) 한도 아래쪽은 흔들린다. 그 정확도(90~101%)는 FR-08의
 # 데이터 시험이 본다. 이 환경에서 잰 쓰기 한 회의 가장 낮은 비율은 38%였고, 20의 38%도 5의 101%보다 크다
 LIMIT, NEW_LIMIT = 20.0, 5.0
@@ -49,8 +49,11 @@ CLIENT_IMAGE, NETWORK = "anf-nfs-client", "anf-vnet"
 TEXT = "hello from the ANF clone demo"
 # 한도마다 6 s 쓰기를 3회 재고, 따라 바뀌었는지는 중앙값으로 본다. 한 회가 몇 초 멈춰 낮게 나와도 흔들리지 않는다
 FIO_RUNS = 3
-FIO = ("fio --direct=1 --ioengine=libaio --clocksource=clock_gettime --output-format=json --bs=1M --iodepth=16"
-       " --time_based --ramp_time=1 --runtime=6 --name=write --rw=write --size=256M --filename=")
+FIO_BS_MIB, FIO_RUNTIME_S = 1, 6  # I/O 크기(MiB)와 측정 창(s). ceiling()도 이 값을 쓴다
+FIO = ("fio --direct=1 --ioengine=libaio --clocksource=clock_gettime --output-format=json"
+       f" --bs={FIO_BS_MIB}M --iodepth=16 --time_based --ramp_time=1 --runtime={FIO_RUNTIME_S}"
+       " --name=write --rw=write --size=256M --filename=")
+CEILING_RULE = f"{HIGH:.0%} of the limit plus one {FIO_BS_MIB} MiB I/O in the {FIO_RUNTIME_S} s window"
 
 
 class StepFailed(Exception):
@@ -99,9 +102,15 @@ def fio_mibps(stdout: str) -> tuple[int, float]:
     return job["error"], round(w["io_bytes"] / MIB / (w["runtime"] / 1000), 2)
 
 
+def ceiling(limit: float) -> float:
+    """한 회가 넘으면 안 되는 MiB/s: 한도의 101%에 I/O 하나(bs ÷ 측정 창)를 더한다. fio는 창 안에서 끝난 I/O만 세므로
+    앞 회에서 밀린 완료 하나가 다음 창에 들어오면 그만큼 높게 센다(5 MiB/s·6 s에서 I/O 하나는 3.3%)."""
+    return limit * HIGH + FIO_BS_MIB / FIO_RUNTIME_S
+
+
 def under_ceiling(runs: list[float], limit: float) -> bool:
-    """한도는 천장이라 어느 회도 한도의 101%를 넘지 않는다."""
-    return round(max(runs) / limit, 4) <= HIGH
+    """한도는 천장이라 어느 회도 ceiling(limit)을 넘지 않는다."""
+    return max(runs) <= ceiling(limit)
 
 
 def follows_limit(before: list[float], after: list[float], new_limit: float) -> bool:
@@ -231,7 +240,7 @@ class Demo:
             time.sleep(1)
 
     def fio_write(self, client: str, name: str, path: str, limit: float) -> list[float]:
-        """FIO_RUNS회 재서 회마다 값과 중앙값의 비율을 보이고, 한도를 넘은 회가 있으면 실패한다. 반환: 회마다 MiB/s."""
+        """FIO_RUNS회 재서 회마다 값과 중앙값의 비율을 보이고, ceiling을 넘은 회가 있으면 실패한다. 반환: 회마다 MiB/s."""
         runs = []
         for _ in range(FIO_RUNS):
             error, mibps = fio_mibps(self.sh(client, FIO + path, timeout=180))
@@ -242,7 +251,7 @@ class Demo:
         text = (f"fio write on {name} with the limit {limit:g} MiB/s: {', '.join(f'{r:g}' for r in runs)} MiB/s "
                 f"(median {median:g} = {median / limit:.0%})")
         if not under_ceiling(runs, limit):
-            raise StepFailed(f"{text}; a run went above {HIGH:.0%} of the limit")
+            raise StepFailed(f"{text}; a run went above the ceiling of {ceiling(limit):.2f} MiB/s ({CEILING_RULE})")
         self.say(text)
         if median / limit < SLOW:
             self.say(f"  the storage wrote slower than the limit this time (median below {SLOW:.0%}). Not a failure: "
@@ -331,7 +340,7 @@ class Demo:
             raise StepFailed(f"the measured write throughput did not follow the limit change: {medians}; expected "
                              f"the median above {HIGH:.0%} of {NEW_LIMIT:g} MiB/s before and at most that after")
         self.say(f"the measured write throughput followed the limit: {medians}; "
-                 f"no run went above {HIGH:.0%} of its limit")
+                 f"no run went above its ceiling ({CEILING_RULE})")
 
     def prom(self, query: str) -> float | None:
         r = self.http("GET", f"{DASHBOARD}/prometheus/api/v1/query?" + urllib.parse.urlencode({"query": query}))

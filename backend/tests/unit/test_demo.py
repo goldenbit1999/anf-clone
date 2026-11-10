@@ -25,14 +25,24 @@ def test_fio_mibps_reads_errors_and_write_rate_after_leading_noise():
     assert demo.fio_mibps(stdout) == (0, 32.0)
 
 
-@pytest.mark.parametrize("runs, ok", [
-    ([19.7, 19.8, 19.8], True),
-    ([14.3, 12.48, 19.9], True),    # 스토리지가 한도보다 느린 회(검증 1회차의 72%)는 실패가 아니다
-    ([19.7, 20.2, 19.8], True),     # 101%까지는 측정 여유
-    ([19.7, 20.21, 19.8], False),   # 한도는 천장이다: 어느 회도 101%를 넘으면 안 된다
+@pytest.mark.parametrize("runs, limit, ok", [
+    ([19.7, 19.8, 19.8], 20.0, True),
+    ([14.3, 12.48, 19.9], 20.0, True),   # 스토리지가 한도보다 느린 회(검증 1회차의 72%)는 실패가 아니다
+    ([19.7, 20.36, 19.8], 20.0, True),   # 천장 = 101%(20.2) + 6 s 창의 1 MiB I/O 하나(0.167) = 20.367
+    ([19.7, 20.37, 19.8], 20.0, False),
+    ([4.96, 4.76, 5.12], 5.0, True),     # 수정 확인 07회: 앞 회로 밀린 I/O 하나만큼 높게 셌다
+    ([4.96, 5.21, 4.96], 5.0, True),     # 천장 = 5.05 + 0.167 = 5.217
+    ([4.96, 5.22, 4.96], 5.0, False),
+    ([4.96, 5.3, 4.96], 5.0, False),     # I/O 하나로 설명되지 않는 진짜 초과
 ])
-def test_under_ceiling_allows_every_run_up_to_101_percent_of_the_limit(runs, ok):
-    assert demo.under_ceiling(runs, 20.0) is ok
+def test_under_ceiling_allows_101_percent_plus_one_io_per_run(runs, limit, ok):
+    assert demo.under_ceiling(runs, limit) is ok
+
+
+def test_the_ceiling_uses_the_io_size_and_window_of_the_fio_command():
+    # fio는 끝난 I/O만 세므로, 회마다 창 경계에서 I/O 하나(bs ÷ 측정 시간)만큼 많거나 적게 셀 수 있다
+    assert f" --bs={demo.FIO_BS_MIB}M " in demo.FIO and f" --runtime={demo.FIO_RUNTIME_S} " in demo.FIO
+    assert demo.ceiling(5.0) == pytest.approx(5.0 * 1.01 + demo.FIO_BS_MIB / demo.FIO_RUNTIME_S)
 
 
 @pytest.mark.parametrize("before, after, ok", [
@@ -163,12 +173,13 @@ def test_step6_shows_slow_storage_as_a_note_not_a_failure(capsys):
     assert f"[6] fio write on vol-v41 with the limit {demo.NEW_LIMIT:g} MiB/s: 4.97, 4.96, 4.97 MiB/s" in out
     assert out.count("slower than the limit") == 1  # 99%인 두 번째 측정에는 붙지 않는다
     assert f"followed the limit: median {slow[0]:g} MiB/s under {demo.LIMIT:g} MiB/s -> 4.97 MiB/s under " in out
+    assert "no run went above its ceiling (101% of the limit plus one 1 MiB I/O in the 6 s window)" in out
 
 
 def test_step6_fails_when_a_run_goes_above_the_limit():
     api = FakeApi()
     over = [demo.LIMIT * 0.99, demo.LIMIT * 1.02, demo.LIMIT * 0.99]
-    with pytest.raises(demo.StepFailed, match="above 101% of the limit"):
+    with pytest.raises(demo.StepFailed, match=r"above the ceiling of 20\.37 MiB/s"):
         demo.Demo(api, FakeFio(*over)).step6()
     assert "PATCH" not in [m for m, _ in api.calls]  # 한도를 넘은 채로 다음으로 가지 않는다
 
