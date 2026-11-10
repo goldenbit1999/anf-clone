@@ -104,6 +104,55 @@ def fio_job(c, args: str, timeout: int = 600) -> dict:
             **{d: {"bytes": job[d]["io_bytes"], "ios": job[d]["total_ios"]} for d in ("read", "write")}}
 
 
+# fio가 I/O마다 완료 시각과 크기를 남기게 한다(clat 기록). 시각은 게스트 단조 시계(CLOCK_MONOTONIC, ms)라
+# 테스트 프로세스의 time.monotonic()과 같은 시계다. 컨테이너는 커널 시계를 같이 쓴다
+def fio_completion_log(path: str) -> str:
+    return (f"--write_lat_log={path} --per_job_logs=0 "
+            "--log_alternate_epoch=1 --log_alternate_epoch_clock_id=1")
+
+
+def fio_completions(c, path: str) -> list[tuple[float, int]]:
+    """fio_completion_log로 남긴 기록 → [(완료 시각(단조 초), 바이트)]."""
+    r = c.run(f"cat {path}_clat.log")
+    assert r.returncode == 0, out(r)
+    rows = [line.split(",") for line in r.stdout.splitlines() if line.strip()]
+    return [(int(row[0]) / 1000, int(row[3])) for row in rows]
+
+
+class Clocks(threading.Thread):
+    """게스트 단조 시계와 벽시계를 interval초마다 함께 읽는다.
+
+    Prometheus 표본의 시각은 벽시계이고 WSL 벽시계는 약 32 s마다 약 0.85 s 뒤로 건너뛴다(ADR §7.3).
+    표본 시각을 fio 기록과 같은 단조 시계로 옮길 때 쓴다.
+    """
+
+    def __init__(self, interval: float = 0.1):
+        super().__init__(daemon=True)
+        self.interval = interval
+        self.pairs: list[tuple[float, float]] = []  # (단조, 벽)
+        self._done = threading.Event()
+
+    def run(self) -> None:
+        while not self._done.is_set():
+            self.pairs.append((time.monotonic(), time.time()))
+            self._done.wait(self.interval)
+
+    def stop(self) -> None:
+        self._done.set()
+        self.join(10)
+
+    def steps(self) -> list[tuple[float, float]]:
+        """벽시계가 단조 시계와 다르게 움직인 곳: (단조 시각, 차이 초)."""
+        return [(m1, round((w1 - w0) - (m1 - m0), 3))
+                for (m0, w0), (m1, w1) in zip(self.pairs, self.pairs[1:]) if abs((w1 - w0) - (m1 - m0)) > 0.01]
+
+    def to_mono(self, wall: float) -> float | None:
+        """벽시계 시각 → 단조 시각. 건너뛴 직후처럼 같은 벽시계 시각이 두 번 있었으면 None."""
+        hits = [m0 + (wall - w0) for (m0, w0), (m1, w1) in zip(self.pairs, self.pairs[1:])
+                if abs((w1 - w0) - (m1 - m0)) <= 0.01 and w0 <= wall <= w1]
+        return hits[0] if hits and max(hits) - min(hits) <= 0.05 else None
+
+
 def client_df(c, path: str) -> dict:
     """클라이언트가 NFS로 보는 크기·사용량(바이트)과 inode."""
     r = c.run(f"df -B1 --output=size,used,itotal,iused {path} | tail -1")
@@ -136,6 +185,13 @@ def scalar(query: str) -> float | None:
     result = instant(query)
     assert len(result) <= 1, result
     return float(result[0]["value"][1]) if result else None
+
+
+def raw_samples(selector: str, seconds: int) -> list[tuple[float, float]]:
+    """Prometheus가 저장한 표본 그대로: 최근 seconds초의 (벽시계 시각, 값). 계열은 하나여야 한다."""
+    result = instant(f"{selector}[{seconds}s]")
+    assert len(result) == 1, result
+    return [(float(t), float(v)) for t, v in result[0]["values"]]
 
 
 def query_range(query: str, start: float, end: float, step: float = 5) -> list[dict]:

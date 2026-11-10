@@ -1,7 +1,8 @@
 """메트릭 e2e: storage agent `/metrics`와 Prometheus가 클라이언트 I/O를 보인다 (메트릭 설계 §5, FR-12).
 
 - AC-03 사용량, AC-04 처리량(볼륨·방향 분리), AC-05 IOPS: 볼륨 둘(v3, v4.1)에 쓰고 읽을 때 agent 값과 fio·df
-- AC-06 Manual 한도 볼륨의 포화 쓰기를 Prometheus `rate()`로 보면 한도 gauge의 90~101%이고 PATCH를 따라간다.
+- AC-06 Manual 한도 볼륨에 쓰는 동안 Prometheus 표본 사이 바이트가 같은 시각 사이 fio가 끝낸 바이트와 맞고(메트릭),
+  표본 사이 처리량이 한도 gauge의 101% 이하이며 PATCH를 따라간다(한도).
   AC-07 Prometheus 컨테이너(scripts/run-prometheus.sh)가 두 대상을 긁고, 부하를 건 뒤 15 s 안에 rate가 0보다 커진다
 - AC-09 인스턴스가 내려간 동안·다시 뜬 뒤(카운터 리셋)·볼륨을 지운 뒤의 계열
 - AC-10 스냅샷 뒤 덮어쓰기: aggregate 사용량만 늘고 볼륨 사용량은 그대로
@@ -9,7 +10,7 @@
 
 AC-01·AC-02(anf-api 요청·작업 지표)는 계약 테스트(test_arm_app.py)가 본다. 여기서는 Prometheus가 실제 anf-api에서
 작업 지표를 긁는 것만 본다(AC-07). AC-08(브라우저)은 verifier가, AC-12·13은 CI와 프런트엔드 명령이 본다.
-이 파일은 약 10분 걸린다(CI rest 조각에 들어간다).
+이 파일은 약 6분 걸린다(CI rest 조각에 들어간다).
 
 실행 (WSL, root, 저장소 루트):
     wsl -d Ubuntu -u root -e bash -c 'cd /mnt/c/<repo> && PYTHONDONTWRITEBYTECODE=1 \
@@ -29,8 +30,8 @@ from dataplane_live import (
     out, setup_pool, sh, token, vol_body, vol_url,
 )
 from metrics_live import (
-    MIB, AgentScraper, agent_samples, client_df, delta, fio_job, instant, names_of, parse, query_range,
-    run_prometheus, scalar, scrape_agent, targets_up, value, wait_until,
+    MIB, AgentScraper, Clocks, agent_samples, client_df, delta, fio_completion_log, fio_completions, fio_job, instant,
+    names_of, parse, query_range, raw_samples, run_prometheus, scalar, scrape_agent, targets_up, value, wait_until,
 )
 from revert_live import fast_poll
 from snapshot_live import create_snapshot, delete_snapshot
@@ -144,7 +145,34 @@ def test_ac03_ac04_ac05_usage_throughput_and_iops_per_volume(agent, api, clients
 
 PATCH_AT = 45  # 부하 시작 뒤 PATCH까지 (s)
 RUNTIME = 100  # 부하 길이 (s)
-STEADY = 25  # 한도가 정해진 뒤 20 s 창이 모두 그 한도 안에 들도록 기다리는 시간 (s)
+SETTLE = 10  # 한도가 정해진 뒤 구간을 시작하기까지 (s)
+FIDELITY = 0.05  # 구간의 Prometheus 카운터 증가 대 같은 시각 사이 fio가 끝낸 바이트
+LIMIT_MAX = 1.01  # 20 s 처리량 / 한도 gauge 상한 (FR-08과 같은 101%)
+RATE_SAMPLES = 4  # 표본 간격 5 s × 4 = 대시보드의 rate(...[20s])와 같은 길이
+FIO_LOG = "/tmp/ac06"
+
+
+def phase(samples: list, completions: list, start: float, end: float) -> dict:
+    """AC-06 구간 하나. samples는 Prometheus 표본 (단조 시각, read+write 바이트)이다.
+
+    - fidelity: 구간 끝 표본 둘 사이의 카운터 증가 ÷ 같은 단조 시각 사이에 fio가 끝낸 바이트.
+      경계에서 1 MiB I/O 하나가 어느 쪽에 들어가는지만 다르다.
+    - rate_mibps: 표본 4칸(20 s)마다의 처리량. 대시보드의 rate(...[20s])를 단조 시계로 잰 것이다.
+      5 s 한 칸은 1 MiB I/O 하나가 10 MiB/s의 2%라 한도 판정에 쓰지 않고 기록만 한다.
+    """
+    pts = [(m, v) for m, v in samples if start <= m <= end]
+    assert len(pts) > RATE_SAMPLES, (start, end, samples)
+
+    def fio_bytes(m0: float, m1: float) -> int:
+        return sum(b for t, b in completions if m0 < t <= m1)
+
+    (m_first, v_first), (m_last, v_last) = pts[0], pts[-1]
+    return {"window_s": round(m_last - m_first, 1), "samples": len(pts),
+            "prom_5s_mibps": [round((v1 - v0) / (m1 - m0) / MIB, 3) for (m0, v0), (m1, v1) in zip(pts, pts[1:])],
+            "fio_5s_mibps": [round(fio_bytes(m0, m1) / (m1 - m0) / MIB, 3) for (m0, _), (m1, _) in zip(pts, pts[1:])],
+            "rate_mibps": [round((v1 - v0) / (m1 - m0) / MIB, 3)
+                           for (m0, v0), (m1, v1) in zip(pts, pts[RATE_SAMPLES:])],
+            "fidelity": round((v_last - v_first) / fio_bytes(m_first, m_last), 4)}
 
 
 def test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit(agent, api, clients, prometheus):
@@ -160,35 +188,55 @@ def test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit(agent, api, c
     # rate()는 창 안에 표본이 둘 있어야 값이 나온다. 부하 전의 값(0)을 먼저 본다
     wait_until(lambda: scalar(rate_w) is not None, 60, what="write rate series in Prometheus")
     idle = scalar(rate_w)
-    t_load = time.time()
+    clocks = Clocks()
+    clocks.start()
+    # 판정 구간은 단조 시계로, Prometheus 쿼리 범위는 벽시계로 잡는다 (Prometheus 시각이 벽시계다)
+    m_load, t_load = time.monotonic(), time.time()
     wait_io = in_background(fio_job, c, f"--rw=write --bs=1M --size=64M --iodepth=16 --time_based "
-                                        f"--runtime={RUNTIME} --filename=/c/f", timeout=RUNTIME + 120)
+                                        f"--runtime={RUNTIME} --filename=/c/f {fio_completion_log(FIO_LOG)}",
+                            timeout=RUNTIME + 120)
     first_rate, to_positive = wait_until(lambda: scalar(rate_w), 60, interval=0.25, what="write rate > 0")
-    time.sleep(max(0.0, t_load + PATCH_AT - time.time()))
-    t_patch = time.time()
+    time.sleep(max(0.0, m_load + PATCH_AT - time.monotonic()))
+    m_patch, t_patch = time.monotonic(), time.time()
     r = patch_volume("mc", POOL, {"throughputMibps": 20})
     assert r.status == 202, r.raw
     _, final, seen = fast_poll(r.headers["azure-asyncoperation"])
-    t_patched = time.time()
+    m_patched, t_patched = time.monotonic(), time.time()
     gauge_after_patch = value(agent_samples(), LIMIT, tok)
     io = wait_io()
-    t_end = time.time()
+    m_end, t_end = time.monotonic(), time.time()
     time.sleep(6)  # 마지막 표본까지 긁히게
+    clocks.stop()
+    completions = fio_completions(c, FIO_LOG)
 
-    rate_sum = f"rate({R}{sel}[20s]) + rate({W}{sel}[20s])"
+    # Prometheus가 저장한 표본(read + write)을 단조 시각으로 옮긴다. 같은 스크레이프의 두 계열은 시각이 같다
+    span = int(time.monotonic() - m_load) + 60
+    reads = dict(raw_samples(f"{R}{sel}", span))
+    samples = [(clocks.to_mono(t), reads[t] + w) for t, w in raw_samples(f"{W}{sel}", span)]
+    unmapped = sum(m is None for m, _ in samples)
+    samples = [(m, x) for m, x in samples if m is not None]
     phases = []
-    for mibps, start, end in ((10, t_load + STEADY, t_patch), (20, t_patched + STEADY, t_end - 1)):
-        rates = [float(x[1]) for x in query_range(rate_sum, start, end)[0]["values"]]
-        gauges = sorted({float(x[1]) for x in query_range(f"{LIMIT}{sel}", start, end)[0]["values"]})
-        phases.append({"mibps": mibps, "window": [round(start - t_load, 1), round(end - t_load, 1)],
-                       "rates_mibps": [round(x / MIB, 3) for x in rates], "gauges": gauges,
-                       "ratio": round(statistics.median(rates) / gauges[-1], 4)})
+    for mibps, (m0, m1), (t0, t1) in ((10, (m_load + SETTLE, m_patch), (t_load + SETTLE, t_patch)),
+                                      (20, (m_patched + SETTLE, m_end - 1), (t_patched + SETTLE, t_end - 1))):
+        p = phase(samples, completions, m0, m1)
+        gauges = sorted({float(x[1]) for x in query_range(f"{LIMIT}{sel}", t0, t1)[0]["values"]})
+        rates = query_range(f"rate({R}{sel}[20s]) + rate({W}{sel}[20s])", t0, t1)[0]["values"]
+        phases.append({"mibps": mibps, "window": [round(m0 - m_load, 1), round(m1 - m_load, 1)], **p,
+                       "gauges": gauges, "max_ratio": round(max(p["rate_mibps"]) * MIB / gauges[-1], 4),
+                       # Prometheus rate()가 낸 값(벽시계). 대시보드가 그리는 값이라 기록만 한다
+                       "prometheus_rate_mibps": [round(float(x[1]) / MIB, 3) for x in rates]})
     series = query_range(f"{W}{sel}", t_load - 30, t_end)
     api_ops = scalar('sum(anf_api_operations_total{resource_type="volumes",result="Succeeded"})')
     api_routes = sorted({x["metric"]["route"] for x in instant("anf_api_http_requests_total")})
     evidence = {"up": up, "up_after_s": round(up_after, 1), "idle_rate": idle, "first_rate": first_rate,
                 "rate_positive_after_s": round(to_positive, 2), "patch": {"seen": seen, "final": final["status"]},
-                "gauge_after_patch": gauge_after_patch, "fio": io, "phases": phases, "series": len(series),
+                "gauge_after_patch": gauge_after_patch, "fio": io, "completions": len(completions),
+                "completion_bytes": sum(b for _, b in completions),
+                # 같은 시계인지의 확인: 첫 완료는 부하 시작 직후, 마지막 완료는 fio가 돌아오기 전이다
+                "completion_span_s": [round(completions[0][0] - m_load, 3), round(completions[-1][0] - m_load, 3),
+                                      round(m_end - m_load, 3)],
+                "wall_steps": clocks.steps(),
+                "unmapped_samples": unmapped, "phases": phases, "series": len(series),
                 "api_volume_ops": api_ops, "api_routes": api_routes}
     note("AC-06/07", **evidence)
     c.remove()
@@ -200,12 +248,18 @@ def test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit(agent, api, c
     assert len(series) == 1, evidence
     assert api_ops is not None and api_ops >= 2, evidence  # 볼륨 create와 patch
     assert any("/volumes/{volume_name}" in route for route in api_routes), evidence
-    # AC-06: 한도 gauge = X × 1,048,576, 안정 구간 rate(read+write)의 중앙값이 그 90~101%. PATCH를 따라 바뀐다
+    # AC-06은 메트릭이 맞는가와 한도를 따르는가를 나눠 본다. 저장 장치가 잠깐 한도만큼 못 쓰는 것은 FR-08의 일이다
     assert io["error"] == 0 and final["status"] == "Succeeded", evidence
+    assert evidence["completion_bytes"] == io["write"]["bytes"], evidence  # fio 기록이 빠짐없다
     assert gauge_after_patch == 20 * MIB, evidence
     for p in phases:
+        # 메트릭: 구간의 Prometheus 카운터 증가가 같은 시각 사이 fio가 끝낸 바이트의 ±5%
+        assert abs(p["fidelity"] - 1) <= FIDELITY, evidence
+        # 한도: gauge = X × 1,048,576이고, 20 s 처리량이 모두 그 101% 이하
         assert p["gauges"] == [p["mibps"] * MIB], evidence
-        assert within(p["ratio"]), evidence
+        assert p["max_ratio"] <= LIMIT_MAX, evidence
+    # PATCH를 따라 바뀐다: PATCH 뒤 20 s 처리량의 중앙값이 PATCH 전 최댓값보다 크다
+    assert statistics.median(phases[1]["rate_mibps"]) > max(phases[0]["rate_mibps"]), evidence
 
 
 # --- AC-09 ---

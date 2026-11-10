@@ -116,7 +116,7 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 | `e2e/test_volume_data_live.py` | 7 | 214 |
 | `e2e/test_volume_recovery_live.py` | 7 | 161 |
 
-그 뒤에 더한 `e2e/test_metrics_data_live.py`(FR-12)는 단독 실행으로 5개 359초다(2026-11-10). 전체 실행은 14개 파일, 약 94분이 된다.
+그 뒤에 더한 `e2e/test_metrics_data_live.py`(FR-12)는 단독 실행으로 5개 343초다(2026-11-10). 전체 실행은 14개 파일, 약 94분이 된다.
 
 처리량 데이터 파일이 전체의 43%다. 한도가 걸린 채로 데이터를 실제로 흘려 재는 시험이라 줄일 수 없다. 이렇게 긴 실행은 도구 호출 하나에 붙여 두지 말고 WSL 안에서 분리해 띄운다(`setsid nohup bash scripts/run-dataplane-tests.sh > <로그> 2>&1 &`). Windows 호스트의 메모리가 부족해지면 붙어 있던 명령이 강제 종료되고, 그때 돌던 테스트의 볼륨과 컨테이너가 남는다.
 
@@ -171,7 +171,7 @@ PRD §6.1 FR-01~FR-09와 FR-12의 수락 기준 문장마다 그것을 확인하
 | FR-09 | 생성 중인 리소스가 완료 상태로 바뀌는 과정이 새로 고침 없이 보인다. | 프론트엔드 `frontend/src/useResourceTree.test.tsx`("loads at once, then again every 2 s without a page reload")와 브라우저 검증(`_workspace/dashboard/04_verifier_report.md`) | pytest 대상이 아니다. 대시보드 사이클에서 같은 탭이 새로 고침 없이 `Creating` → `Succeeded`를 보였다 |
 | FR-12 | Prometheus에서 조회할 수 있다. | `backend/tests/e2e/test_metrics_data_live.py::test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac03_ac04_ac05_usage_throughput_and_iops_per_volume`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac09_series_across_instance_restart_and_volume_delete`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac10_snapshot_overwrite_grows_the_aggregate_not_the_volume`<br>`backend/tests/contract/test_arm_app.py::test_ac01_requests_are_counted_by_route_template`<br>`backend/tests/contract/test_arm_app.py::test_ac02_operation_is_counted_when_it_finishes` | `scripts/run-prometheus.sh` 뒤 두 대상(anf-api, storage-agent)이 `up == 1`이고, 범위 쿼리가 볼륨의 계열 하나를 돌려준다. 값은 클라이언트가 한 일과 맞는다: 256 MiB를 쓰면 used가 그만큼 늘고 `df`와 1% 안이며, 바이트 카운터가 fio 바이트와 1% 안(다른 볼륨은 0), v4.1 READ 연산 수가 fio 연산 수와 2% 안이다. 인스턴스를 다시 띄워도 계열이 이어지고(`rate` ≥ 0) 볼륨을 지우면 사라지며, 스냅샷 뒤 덮어쓰면 aggregate만 는다. anf-api는 요청을 경로 템플릿별로, 비동기 작업을 끝날 때 한 번 센다(계약) |
 | FR-12 | 대시보드가 차트로 보여 준다. | 프론트엔드 `frontend/src/MetricsPanels.test.tsx`, `LineChart.test.tsx`, `App.test.tsx`("choosing a volume opens its metrics panel, which closes when the volume leaves the tree")와 브라우저 검증(메트릭 검증 보고서 AC-08) | pytest 대상이 아니다. 성공한 볼륨의 이름을 누르면 처리량(MiB/s, 한도는 점선), IOPS(요청 수, v4.1이면 읽기·쓰기 연산 수), 사용량(GiB) 차트가 열리고, 아래에 anf-api의 상태 코드별 요청률과 진행 중 작업 수 차트가 있다. Prometheus를 읽지 못하면 차트 자리에 오류를 보이고 트리는 계속 갱신된다 |
-| FR-12 | 클라이언트에서 부하를 걸면 그래프에 나타난다. | `backend/tests/e2e/test_metrics_data_live.py::test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit`와 브라우저 검증(메트릭 검증 보고서 AC-08) | 10 MiB/s 볼륨에 쓰기를 걸면 부하 전 0이던 `rate(...[20s])`가 15 s 안에 0보다 커지고, 안정 구간 중앙값이 한도 gauge의 90~101%다. 부하 중 PATCH로 20 MiB/s로 올리면 gauge와 rate가 따라간다. 대시보드의 처리량 차트가 같은 쿼리를 그린다 |
+| FR-12 | 클라이언트에서 부하를 걸면 그래프에 나타난다. | `backend/tests/e2e/test_metrics_data_live.py::test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit`와 브라우저 검증(메트릭 검증 보고서 AC-08) | 10 MiB/s 볼륨에 쓰기를 걸면 부하 전 0이던 `rate(...[20s])`가 15 s 안에 0보다 커진다. Prometheus가 저장한 카운터 표본을 게스트 단조 시계로 옮겨 보면, 한도가 정해지고 10 s 뒤부터의 구간에서 카운터 증가가 같은 시각 사이 fio가 끝낸 바이트(I/O별 완료 기록)의 ±5%이고, 20 s 처리량이 모두 한도 gauge(X × 1,048,576)의 101% 이하다. 부하 중 PATCH로 20 MiB/s로 올리면 gauge가 바뀌고 20 s 처리량 중앙값이 PATCH 전 최댓값보다 커진다. 저장 장치가 한도만큼 쓰는지는 FR-08 행이 본다. 대시보드의 처리량 차트가 같은 계열을 그린다 |
 
 ## 5. 알려진 한계
 

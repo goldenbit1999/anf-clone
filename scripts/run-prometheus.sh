@@ -12,7 +12,8 @@ NAME=anf-prometheus
 IMAGE=prom/prometheus:v3.15.1
 CONFIG="$(cd "$(dirname "$0")/.." && pwd)/deploy/prometheus/prometheus.yml"
 
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+# -v: 이미지가 /prometheus를 VOLUME으로 선언해 컨테이너마다 익명 볼륨이 생긴다. 컨테이너와 함께 지운다(데이터는 버린다)
+docker rm -fv "$NAME" >/dev/null 2>&1 || true
 if [ "${1:-}" = stop ]; then
   exit 0
 fi

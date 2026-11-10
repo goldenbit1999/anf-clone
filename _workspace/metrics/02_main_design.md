@@ -104,7 +104,7 @@ storage agent ───────┘  statvfs(ns/<token>), LVM 태그, dmsetup
 | AC-03 | 데이터 (사용량) | 클라이언트에서 256 MiB를 쓰면 그 볼륨의 `anf_volume_used_bytes`가 268,435,456 ± 1% 늘고 클라이언트 `df` used와 1% 안에서 맞는다. `anf_volume_size_bytes`, inode, `anf_volume_snapshots`(스냅샷 생성·삭제에 따라)가 맞다. |
 | AC-04 | 데이터 (처리량, 볼륨·방향 분리) | 볼륨 A에만 쓰면 A의 `anf_volume_write_bytes_total` 증가가 fio 바이트 ± 1%이고, 같은 구간 볼륨 B의 증가는 0이다. 읽기만 하면 읽기 카운터가 그만큼 늘고 쓰기 카운터는 늘지 않는다(v3, v4.1). |
 | AC-05 | 데이터 (IOPS) | v4.1 볼륨에 4 KiB 임의 읽기를 걸면 `anf_volume_nfs_operations_total{op="read"}` 증가가 fio 연산 수 ± 2%다. v3 볼륨은 `anf_volume_nfs_requests_total`이 fio 연산 수 이상으로 늘고 `…operations_total` 계열이 없다. |
-| AC-06 | 데이터 (한도와 함께, PRD "부하를 걸면") | Manual 한도 X MiB/s 볼륨에 포화 쓰기를 걸고 Prometheus에서 `rate(read+write)`를 조회하면 안정 구간 값이 `anf_volume_throughput_limit_bytes_per_second`(= X × 1,048,576)의 90~101%다. 한도를 PATCH하면 한도 gauge와 처리량이 따라 바뀐다. |
+| AC-06 | 데이터 (한도와 함께, PRD "부하를 걸면") | Manual 한도 X MiB/s 볼륨에 쓰기를 걸고, Prometheus가 저장한 read+write 카운터 표본을 게스트 단조 시계로 맞춰 본다. **메트릭**: 한도가 정해지고 10 s 뒤부터의 구간에서 카운터 증가가 같은 시각 사이 fio가 끝낸 바이트(fio의 I/O별 완료 기록)의 ±5%다. **한도**: `anf_volume_throughput_limit_bytes_per_second`가 X × 1,048,576이고, 표본 4칸(20 s)마다의 처리량이 모두 그 101% 이하다. 한도를 PATCH하면 gauge가 바뀌고, PATCH 뒤 20 s 처리량의 중앙값이 PATCH 전 최댓값보다 크다. 저장 장치가 그 순간 한도만큼 쓰는지(하한 90%)는 FR-08이 본다(검증 1회차 뒤 변경, §7). |
 | AC-07 | Prometheus | `scripts/run-prometheus.sh` 뒤 두 대상이 `up == 1`이다. Windows에서 `http://127.0.0.1:9090/api/v1/query_range`가 볼륨 계열을 돌려준다. 부하를 시작한 뒤 15 s 안에 `rate(...[20s])`가 0보다 커진다. |
 | AC-08 | 대시보드 (PRD) | 실제 브라우저(또는 그에 준하는 방법)로 대시보드를 열어 볼륨을 고르면 처리량·IOPS·사용량 차트가 보이고, 클라이언트 부하를 건 뒤 처리량 차트의 마지막 값이 오른다. Prometheus를 멈추면 차트 자리에 오류 표시가 나오고 리소스 트리는 계속 갱신된다. |
 | AC-09 | 수명 주기 | 인스턴스를 재시작하면 카운터가 0부터 다시 시작해도 같은 라벨의 계열이 이어지고 `rate()`가 음수가 되지 않는다. 볼륨을 지우면 다음 스크레이프부터 그 볼륨의 계열이 없다. 인스턴스가 내려가 있는 볼륨이 있어도 `/metrics`는 `200`이고 다른 볼륨의 값이 나온다. |
@@ -139,7 +139,7 @@ storage agent ───────┘  statvfs(ns/<token>), LVM 태그, dmsetup
 
 ### Prometheus와 e2e
 - **이미지는 Docker Hub의 `prom/prometheus:v3.15.1`이다.** CI 러너에서 익명 pull 한도에 걸리면 `rest` 조각이 실패할 수 있다. 지금은 그대로 두었다. 걸리면 같은 이미지의 quay.io 사본(`quay.io/prometheus/prometheus`)으로 바꿀 수 있다.
-- **e2e는 Prometheus를 모듈 fixture로 한 번 띄운다**(AC-06/07, AC-09가 쓴다). 끝나면 `scripts/run-prometheus.sh stop`으로 지운다. 실행기는 9090을 8080·8090과 같이 사전 점검하고, 남은 `anf-prometheus` 컨테이너와 9090 리스너를 실패로 센다.
+- **e2e는 Prometheus를 모듈 fixture로 한 번 띄운다**(AC-06/07, AC-09가 쓴다). 끝나면 `scripts/run-prometheus.sh stop`으로 컨테이너와 그 익명 볼륨을 지운다(아래 "검증 1회차 뒤"). 실행기는 9090을 8080·8090과 같이 사전 점검하고, 남은 `anf-prometheus` 컨테이너와 9090 리스너를 실패로 센다.
 - **AC-05의 NFSv3 부하는 iodepth 1로 건다.** S8 Q3에서 `rpc` 줄은 4 KiB 고부하에서 다른 카운터보다 1~13(0.01~0.02%) 적었다. 이 줄의 필드는 원자적이지 않아 동시 증가를 잃는다. iodepth 8이면 "요청 수 ≥ fio 연산 수"가 이 오차로 깨질 수 있다. v4.1은 `proc4ops` READ(per-cpu, 정확)로 판정한다. 이번 실행의 v4.1 `requests`도 fio 연산 수보다 15 적었다(48,468 대 48,483).
 - **AC-09의 인스턴스 재시작은 `docker rm -f` 뒤 같은 볼륨 PUT(`200` `Updating`)으로 한다.** agent에는 인스턴스만 다시 띄우는 API가 없고, 볼륨 ensure가 없어진 인스턴스를 다시 만든다. 쓰기 카운터가 64 MiB → 0 → 32 MiB로 다시 시작했다.
 
@@ -150,3 +150,24 @@ storage agent ───────┘  statvfs(ns/<token>), LVM 태그, dmsetup
 - **볼륨은 `Succeeded`이고 `creationToken`이 있을 때만 고를 수 있다.** 고른 뒤에는 그 볼륨이 트리에 남아 있는 동안(상태가 `Updating` 등으로 바뀌어도) 패널이 열려 있다. 지워지거나 구독이 바뀌면 닫힌다.
 - **API 패널은 트리를 한 번 읽은 뒤에 보인다**(설계에 따로 없던 조건). anf-api를 아직 못 읽었을 때 "Loading…" 두 개가 겹치지 않게 했다. 트리 읽기가 나중에 실패해도 마지막 트리를 두므로 패널은 남는다.
 - Prometheus 프록시는 `/prometheus` 접두사를 떼고 넘긴다(`/prometheus/api/v1/...` → `/api/v1/...`). Windows의 Vite dev에서 WSL Prometheus까지 `query`와 `query_range`가 `200`인 것을 확인했다.
+
+### 검증 1회차 뒤 (AC-06 불안정, `04_verifier_report.md`)
+- **AC-06 판정을 "메트릭이 맞는가"와 "한도를 따르는가"로 나눴다** (리더 자동 채택).
+  - 전: 안정 구간(한도가 정해지고 25 s 뒤부터) Prometheus `rate(read+write)[20s]` 중앙값이 한도 gauge의 90~101%.
+  - 후
+    - 메트릭: 한도가 정해지고 10 s 뒤부터의 구간에서 Prometheus 카운터 증가가 같은 시각 사이 fio가 끝낸 바이트의 ±5%.
+    - 한도: gauge가 X × 1,048,576이고, 20 s 처리량이 모두 gauge의 101% 이하.
+    - PATCH 반영: PATCH 뒤 20 s 처리량 중앙값이 PATCH 전 최댓값보다 크다.
+  - 이유: 실패한 회(20 MiB/s 구간 12.3~18.4 MiB/s)에는 fio도 그만큼 덜 썼다(117~143 MB). 같은 볼륨을 100 MiB/s로 열어 둬도 15 s 쓰기가 74.55, 46.36, 93.6 MiB/s로 흔들렸다. 메트릭은 맞았고, 저장 장치가 그 30초 동안 한도만큼 쓰지 못한 것이다. 한도까지 쓰는지(하한 90%)는 FR-08이 본다.
+- **비교는 `rate()` 값이 아니라 Prometheus가 저장한 표본으로, 게스트 단조 시계에서 한다.** "같은 구간의 rate 대 fio ±5%"를 그대로 하면 창 정렬 오차가 5%에 가깝다.
+  - Prometheus 표본 시각은 벽시계이고 WSL 벽시계는 뒤로 건너뛴다(약 32 s마다 약 0.85 s, ADR §7.3). 건너뜀이 든 20 s 창의 `rate()`는 약 6% 크게 나온다. fio와 tc는 단조 시계로 돈다. 그래서 테스트가 0.1 s마다 (단조, 벽) 쌍을 기록해 표본 시각을 단조 시각으로 옮긴다. 건너뛴 직후처럼 같은 벽시계 시각이 두 번 있었던 표본은 버린다. 이번 부팅에서는 75 s 동안 건너뜀이 없었다(벽/단조 비 1.0000000).
+  - `rate()`는 창 가장자리까지 외삽한다. 처리량이 흔들리면 가장자리 몫이 fio 평균과 달라진다.
+  - fio는 I/O마다 완료 시각을 남긴다(`--write_lat_log`의 clat 기록). `--log_alternate_epoch=1 --log_alternate_epoch_clock_id=1`이면 시각이 CLOCK_MONOTONIC ms다. 클라이언트 이미지의 fio는 3.36이다. 컨테이너는 커널 시계를 같이 쓰므로 테스트의 `time.monotonic()`과 같은 시계다. 기록의 바이트 합이 fio 결과와 같은지도 본다.
+  - 판정 길이: 5 s 한 칸에서는 1 MiB I/O 하나가 10 MiB/s의 2%다. 탐색 실행에서도 칸마다 9.8 대 10.0으로 I/O 하나씩 엇갈렸다. 그래서 메트릭은 구간 전체(30~40 s, 경계 오차 I/O 하나 = 0.3% 안)로, 한도는 4칸(20 s, 대시보드의 `rate[20s]`와 같은 길이, I/O 하나 = 0.5%)으로 본다. 5 s 값과 Prometheus `rate()` 값은 근거로만 남긴다.
+  - 탐색 실행(`/var/tmp/anf-clone-tests/fr12-ac06-try`): 두 구간 모두 fidelity 1.0000. 5 s 값은 10 MiB/s에서 9.8~10.0, 20 MiB/s에서 19.6~20.0이었다.
+- **구간 시작을 25 s에서 10 s로 당겼다.** 25 s는 Prometheus `rate[20s]` 창 전체가 새 한도 뒤에 들도록 둔 것이다. 이제 창을 구간 안의 표본으로만 만들므로 10 s면 된다. 표본이 늘어난다(구간마다 7~9개).
+- **`scripts/run-prometheus.sh`는 `docker rm -fv`로 지운다.** 이미지가 `/prometheus`를 VOLUME으로 선언해, `-v` 없이 지우면 컨테이너마다 익명 볼륨이 남았다. 그때까지 남은 8개(내용 `chunks_head lock queries.active wal`, 익명 표시)를 지웠다. 설계 §3 "데이터는 컨테이너와 함께 버린다"와 맞춘 것이다.
+- 확인 (`/var/tmp/anf-clone-tests/fr12-ac06-repeat/`)
+  - 1~8회는 AC-06 하나, 9회는 파일 전체로 돌렸다. 9회 모두 통과했다.
+  - fidelity는 0.9966~1.0013, 20 s 처리량의 최대 비율은 0.9575~0.995였다. 벽시계 건너뜀은 없었다.
+  - 3·5·7회에는 20 MiB/s 구간에서 저장 장치가 느려졌다. 5 s 값이 각각 14.8, 14.0, 11.6 MiB/s까지 떨어졌지만 fio도 같은 값을 기록했다(15.2, 14.0, 11.6). fidelity는 0.9987, 1.0, 1.0이었다.
