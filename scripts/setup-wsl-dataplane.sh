@@ -1,6 +1,7 @@
 #!/bin/bash
 # WSL Ubuntu 데이터 플레인 일회성 준비 (볼륨 설계 §6.1). root로 실행하고, 다시 실행해도 된다:
 #   MSYS_NO_PATHCONV=1 wsl -d Ubuntu -u root -e bash /mnt/c/<repo>/scripts/setup-wsl-dataplane.sh
+# 이름은 WSL이지만 Ubuntu 24.04 호스트(GitHub 호스트 러너 포함)에서도 그대로 쓴다: CI data-plane 작업이 sudo로 부른다 (S3).
 # storage agent는 시작할 때 이 준비가 됐는지 확인하고, 아니면 뜨지 않는다 (nfs_instance.check_host).
 set -euo pipefail
 

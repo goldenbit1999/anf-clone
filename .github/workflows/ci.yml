@@ -1,11 +1,13 @@
 # FR-11 CI: backend 작업 (설계 _workspace/ci/02_main_design.md).
-# frontend 작업은 대시보드(FR-09)에서 더했다. data-plane 작업은 스파이크 S3 뒤에 더한다 (ADR §9.3).
+# frontend 작업은 대시보드(FR-09)에서, data-plane 작업은 스파이크 S3 뒤에 더했다
+# (_workspace/ci/02_main_design_dataplane.md, ADR §9.3).
 name: ci
 
 on:
   push:
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -39,7 +41,7 @@ jobs:
           ruff check backend .claude/hooks
 
       # 단위·계약 테스트와 라이브 API e2e. e2e는 테스트가 uvicorn을 직접 띄운다 (설계 결정 1)
-      # 데이터 플레인 테스트(root, LVM, knfsd)는 skip이 아니라 선택에서 뺀다. data-plane 작업은 S3 뒤 (볼륨 설계 §6.3)
+      # 데이터 플레인 테스트(root, LVM, knfsd)는 skip이 아니라 선택에서 뺀다. 그 테스트는 data-plane 작업이 돌린다 (볼륨 설계 §6.3)
       - name: Test
         env:
           ANF_E2E_API_URL: http://127.0.0.1:8080
@@ -80,3 +82,74 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # FR-11 데이터 플레인 묶음(dataplane 마커)을 호스트 러너에서 root로 돌린다 (설계 _workspace/ci/02_main_design_dataplane.md,
+  # 스파이크 S3). 러너에는 모듈·패키지가 이미 있다. ns 전파를 손대는 단계는 두지 않는다: agent가 고친다 (결정 1·6)
+  data-plane:
+    # 기능 브랜치는 push와 PR이 겹쳐 같은 작업이 두 번 돈다. main 대상 PR, main push, 손으로 돌릴 때만 (결정 5)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75  # 가장 긴 조각이 약 37분. 두 배를 넘기면 멈춘 것으로 본다 (결정 7)
+    strategy:
+      fail-fast: false  # 한 조각이 실패해도 다른 조각의 결과를 본다 (결정 7)
+      matrix:
+        # 처리량 데이터 파일 하나가 전체의 49%라 둘로 나누면 길이가 비슷하다 (결정 3).
+        # rest는 파일을 나열하지 않는다: 새 데이터 플레인 테스트 파일이 저절로 들어간다 (결정 4)
+        include:
+          - shard: throughput
+            args: backend/tests/e2e/test_throughput_limit_data_live.py
+          - shard: rest
+            args: --ignore=backend/tests/e2e/test_throughput_limit_data_live.py
+    env:
+      OUT: /var/tmp/anf-clone-tests/${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"  # D-01
+
+      # backend 작업과 같은 venv. 실행기가 저장소 주인(runner)의 ~/.venvs/anf-clone을 찾는다 (결정 6)
+      - name: Install
+        run: |
+          python -m venv ~/.venvs/anf-clone
+          ~/.venvs/anf-clone/bin/pip install -e ".[dev]"
+
+      # 러너 이미지가 바뀌면 커널도 바뀐다. 회귀 원인을 가르려고 남긴다. /가 shared인 것이 AC-02의 근거다
+      - name: Runner info
+        run: |
+          echo "image: $ImageOS $ImageVersion"
+          echo "kernel: $(uname -r)"
+          echo "propagation of /: $(findmnt -no PROPAGATION /)"
+
+      # 모듈 로드, 이미지, anf-vnet, fs.leases-enable = 0. WSL과 같은 스크립트다 (결정 10)
+      - name: Set up the data plane
+        run: sudo bash scripts/setup-wsl-dataplane.sh
+
+      # 판정은 실행기의 종료 코드 하나다: 실패·오류·skip·수집 0·남은 것 = 1, 사전 점검 = 2 (결정 8)
+      - name: Data-plane tests (${{ matrix.shard }})
+        run: sudo env ANF_TEST_OUT="$OUT" bash scripts/run-dataplane-tests.sh ${{ matrix.args }}
+
+      # ns 바인드가 /와 다른 peer group(shared:N)이면 ns 아래 마운트가 한 번만 생긴다 (AC-05, S3 Q7)
+      - name: Mount propagation of ns
+        if: always()
+        run: |
+          findmnt -o TARGET,PROPAGATION --mountpoint /var/lib/anf-clone/ns || echo "ns is not a mount point"
+          grep -E ' / / | /var/lib/anf-clone/ns ' /proc/self/mountinfo || true
+
+      # 실행기 출력은 root 소유다. 커널 로그(dmesg_restrict = 1)를 더해 읽을 수 있게 연다 (AC-04)
+      - name: Collect logs
+        if: always()
+        run: |
+          sudo mkdir -p "$OUT"
+          sudo dmesg -T | sudo tee "$OUT/dmesg.txt" > /dev/null
+          sudo chmod -R a+rX /var/tmp/anf-clone-tests
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataplane-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: ${{ env.OUT }}
+          if-no-files-found: warn
+          retention-days: 14

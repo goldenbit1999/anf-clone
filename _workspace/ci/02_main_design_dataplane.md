@@ -65,4 +65,11 @@ NFS 클라이언트가 보는 것은 같지만(S3의 as-is 작업에서 클라�
 
 ## 6. 구현 중 변경
 
-(구현하면서 설계를 바꾸면 여기에 이유와 함께 적는다.)
+설계를 바꾼 것은 없다. 설계가 정하지 않은 세부를 이렇게 정했다 (2026-11-10, feature-implementer).
+
+1. **실행기는 고치지 않았다(결정 4).** `--ignore=<파일>`은 `-`로 시작해 실행기가 pytest 옵션으로 보고, 수집(`--collect-only -m dataplane`)과 파일마다의 실행에 그대로 넘긴다. WSL에서 실행기의 인자 분리·수집 줄(75~90행)을 그대로 돌려 확인했다: `rest`는 12개 파일 106개, 처리량 데이터 파일 0개. `throughput`(경로 인자)은 1개 파일 7개. 합 13개 파일 113개로 인자 없는 수집과 같다.
+2. **`ensure_shared_ns()`는 바인드를 새로 만들었을 때만 `--make-private`를 한다.** 이미 마운트 지점이면 전과 같다(private면 rshared, shared면 아무것도 안 함). 그래서 이미 `/`와 같은 peer group인 바인드는 고치지 않는다(§3 범위 밖). 단위 테스트는 바인드 직후 전파가 shared로 보이는 경우(러너)도 순서가 bind → private → rshared인지 본다.
+3. **ns 전파 기록은 테스트 뒤에 한다.** "Mount propagation of ns" 단계(`if: always()`)가 `findmnt --mountpoint ns`와 `/proc/self/mountinfo`의 `/`·ns 줄(peer group 번호)을 남긴다. 테스트 전에 남기려면 워크플로가 agent보다 먼저 제품 함수를 불러 바인드를 만들어야 해서, agent가 바인드를 만드는 그대로의 조건(AC-02)이 흐려진다. agent는 끝날 때 ns 바인드를 풀지 않으므로 테스트 뒤에도 보인다. `/`의 전파는 테스트 전 "Runner info" 단계에 있다.
+4. **artifact**: 이름 `dataplane-<조각>-<run_attempt>`(다시 돌린 시도와 이름이 겹치지 않게, S3와 같음), `retention-days: 14`(S3와 같음), `if-no-files-found: warn`. 실행기 출력 폴더와 `dmesg.txt`만 올린다(결정 6). S3가 올린 pytest tmp의 agent 로그는 올리지 않는다.
+5. **`workflow_dispatch`는 워크플로 수준 트리거라 손으로 돌리면 backend·frontend도 돈다.** 두 작업에는 조건을 더하지 않았다(결정 5의 "그대로").
+6. **`concurrency`는 그대로다**(`ci-${{ github.ref }}`, `cancel-in-progress`). main에 연달아 merge하면 앞 main push 실행의 data-plane 작업이 취소되고 마지막 것만 끝까지 돈다.

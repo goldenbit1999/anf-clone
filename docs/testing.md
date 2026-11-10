@@ -26,12 +26,13 @@ ANF 클론의 테스트 층, 실행 명령, 그리고 PRD §6.1 수락 기준마
 | WSL, root | `scripts/run-dataplane-tests.sh` (§3) | 통합, 데이터 플레인 e2e | 0이어야 한다. 실행기가 실패로 센다 |
 | CI `backend` 작업 | lint, 위 WSL 일반 사용자 명령과 같은 pytest(`--junitxml`), `python backend/tests/junit_gate.py pytest-results.xml`, 훅 테스트 | 단위, 계약, 컨트롤 플레인 e2e, 훅 | `junit_gate.py`가 실패로 센다 |
 | CI `frontend` 작업 | `frontend/`에서 `npm ci`, `npm run typecheck`, `npm test`, `npm run build` | 프론트엔드 | — |
+| CI `data-plane` 작업 | 호스트 러너에서 `sudo bash scripts/setup-wsl-dataplane.sh` 뒤 위 WSL root 명령을 두 조각으로 (§3 "CI에서") | 통합, 데이터 플레인 e2e | 0이어야 한다. 실행기가 실패로 센다 |
 | Windows, 프론트엔드 | `frontend/`에서 `npm test` | 프론트엔드 | — |
 
 **skip은 PASS가 아니다** (PRD §8, ADR §9.1). pytest는 skip만 있어도 0으로 끝나므로, CI와 데이터 플레인 실행기는 같은
 스크립트 `backend/tests/junit_gate.py`로 JUnit XML을 읽어 수집 0개, skip, 실패, 오류, 읽을 수 없는 XML을 실패로 판정한다.
-CI가 데이터 플레인 테스트를 돌리지 않는 것은 skip이 아니라 마커로 선택에서 뺀 것이다(`-m "not dataplane"`).
-CI의 데이터 플레인 작업은 FR-11(스파이크 S3)에서 정한다.
+CI `backend` 작업은 데이터 플레인 테스트를 skip하지 않고 마커로 선택에서 뺀다(`-m "not dataplane"`).
+그 테스트는 `data-plane` 작업이 실행기로 돌린다.
 
 ## 3. 데이터 플레인 실행기
 
@@ -75,7 +76,7 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 ### 출력
 
 출력 폴더는 WSL 디스크에 둔다. `/mnt/c`(9P)에 바로 쓰면 요청이 많은 e2e가 3~4배 느려지고, `/tmp`는 WSL이 꺼지면 사라진다.
-보관이 필요하면 부르는 쪽(verifier, 나중의 CI)이 복사한다.
+보관이 필요하면 부르는 쪽(verifier, CI)이 복사한다.
 
 | 파일 | 내용 |
 | --- | --- |
@@ -115,6 +116,22 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 
 처리량 데이터 파일이 전체의 43%다. 한도가 걸린 채로 데이터를 실제로 흘려 재는 시험이라 줄일 수 없다. 이렇게 긴 실행은 도구 호출 하나에 붙여 두지 말고 WSL 안에서 분리해 띄운다(`setsid nohup bash scripts/run-dataplane-tests.sh > <로그> 2>&1 &`). Windows 호스트의 메모리가 부족해지면 붙어 있던 명령이 강제 종료되고, 그때 돌던 테스트의 볼륨과 컨테이너가 남는다.
 
+### CI에서
+
+`.github/workflows/ci.yml`의 `data-plane` 작업이 GitHub 호스트 러너(`ubuntu-24.04`)에서 같은 준비 스크립트와 실행기를
+sudo로 돌린다 (FR-11, 스파이크 S3, 설계 `_workspace/ci/02_main_design_dataplane.md`).
+
+- **언제**: main 대상 PR, main push, 손으로 돌릴 때(`workflow_dispatch`). 기능 브랜치 push에서는 돌지 않는다(PR과 겹친다).
+- **두 조각(matrix)**: `throughput`은 `backend/tests/e2e/test_throughput_limit_data_live.py` 하나, `rest`는 그 파일을
+  `--ignore=`로 뺀 나머지 전부다. 조각마다 자기 VM에서 준비부터 하고, 한 조각이 실패해도 다른 조각은 끝까지 돈다.
+  `rest`는 파일을 나열하지 않으므로 새 데이터 플레인 테스트 파일이 저절로 들어간다.
+- **판정**: 실행기의 종료 코드 하나다(위 표). 조각마다 75분이 넘으면 멈춘 것으로 본다.
+- **산출물**: 조각마다 실행기 출력 폴더와 `dmesg.txt`가 artifact `dataplane-<조각>-<시도 번호>`로 14일 남는다.
+- **러너**: 모듈과 패키지가 이미 있어 설치 단계가 없다(S3). 커널은 WSL과 다르다(러너 7.0 azure, WSL 6.18). `/`가
+  systemd 기본값대로 shared라, agent는 ns 바인드를 private로 떼어 낸 뒤 rshared로 만든다. 그러지 않으면 ns 바인드가
+  `/`의 peer group에 들어가 ns 아래 마운트가 호스트 마운트 표에 두 번 나온다(S3 Q7). 작업 로그의 "Runner info"와
+  "Mount propagation of ns" 단계가 이 상태를 남긴다.
+
 ## 4. 수락 기준과 테스트
 
 PRD §6.1 FR-01~FR-08의 수락 기준 문장마다 그것을 확인하는 테스트다. node ID는 저장소 루트 기준이고,
@@ -153,7 +170,5 @@ PRD §6.1 FR-01~FR-08의 수락 기준 문장마다 그것을 확인하는 테�
 - **클라이언트와 서버가 같은 커널이다** (ADR R-08). 클라이언트 컨테이너와 knfsd가 같은 WSL 커널·메모리를 쓴다. 처리량
   측정과 page cache 효과는 실제 ANF(별도 VM, 네트워크)와 다를 수 있다. NFS LOCALIO는 꺼져 있다(S0).
 - **처리량 판정은 게스트 단조 시계로 한다.** WSL 벽시계는 약 30초마다 뒤로 건너뛴다. 실행기의 시간도 `/proc/uptime`으로 잰다.
-- **데이터 플레인 묶음은 아직 CI에서 돌지 않는다.** GitHub 러너에서 커널 모듈과 privileged 마운트가 되는지는 FR-11의
-  스파이크 S3가 정한다. 그때까지 이 묶음의 통과 근거는 WSL에서 실행기를 돌린 기록이다.
 - **데이터 플레인은 기기에 하나다.** VG, IP 대역, 포트 8080·8090을 같이 쓰므로 실행기는 한 번에 하나만 돌고, 파일은
   차례로 돈다. 처리량 시험은 다른 I/O와 겹치면 판정이 흔들린다.
