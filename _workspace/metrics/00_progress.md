@@ -33,3 +33,5 @@
 - 2026-11-10 단계 3 완료 — 커밋 `e2581cd`(agent `/metrics`), `37a341c`(anf-api `/metrics`), `3c403b1`(Prometheus 컨테이너·데이터 e2e·실행기 9090), `290f726`(대시보드 차트), `e80c8e7`(testing.md, 설계 §7). 새 e2e 5 passed·skip 0·359 s(`/var/tmp/anf-clone-tests/fr12-e2e-1`), WSL not-dataplane 1016 passed·skip 0, 프런트엔드 48 tests·build 통과. 기존 데이터 플레인 파일은 다시 돌리지 않음(결정 14: PR CI가 회귀)
 - 2026-11-10 implementer가 올린 두 질문을 메인이 자동 채택으로 정함: (15) 요청 수 출처는 `rpc` 줄 그대로(고부하에서 0.01~0.02% 덜 셈을 문서에 적는다. `rc` 합은 v3·v4.1에서 뜻이 달라 설명이 어렵다), (16) CI의 Prometheus 이미지는 Docker Hub 그대로(pull 한도에 걸리면 그때 quay.io로)
 - 2026-11-10 단계 4 1회차 시작(real-env-verifier), 단계 5 개념 문서(concept-explainer) 병행. 메인이 `CLAUDE.md`·ADR §8·§9.3·§10 S8 갱신
+- 2026-11-10 단계 5 완료 — 개념 문서 `docs/concepts/metrics.md`(Q&A 13개). 검증 결과 자리는 메인이 채움
+- 2026-11-10 단계 4 1회차 완료 — PASS 11, FAIL 1(AC-06, 간헐), AC-12의 CI 부분은 PR 뒤 (`04_verifier_report.md`). AC-06: PATCH 뒤 20 MiB/s 구간에서 Prometheus 값이 한도의 76.7%(3번 중 1번). fio가 실제로 덜 썼다(WSL 스토리지 흔들림) — 메트릭 결함이 아님. AC-08은 headless Chrome으로 PASS(확장 프로그램은 연결돼 있지 않았다). 자동 채택: AC-06 시험을 "Prometheus 대 fio ±5%" + "한도의 101% 이하, PATCH 뒤 중앙값 > PATCH 전 최댓값"으로 나눔. implementer에 수정과 9회 반복(약 23분), `run-prometheus.sh`의 `-v`를 맡김
