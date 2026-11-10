@@ -22,9 +22,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     command: ["bash", "/repo/deploy/init.sh"]
 
-  # S9 Q2의 다섯 조건이 모두 있어야 한다(backend/tests/unit/test_compose.py가 지킨다):
+  # S9 Q2의 조건이 모두 있어야 한다(backend/tests/unit/test_compose.py가 지킨다):
   # 특권·host 네트워크·host pid(P4), /var/lib/anf-clone 비재귀 바인드(P3), ns rshared 바인드(P1, init이 먼저 준비),
-  # /run/lock/lvm 공유(P2), /dev·/lib/modules·docker 소켓. /run/udev는 붙이지 않는다(L3: lvcreate가 udev를 기다리며 멈춘다)
+  # /run/lock/lvm 공유(P2), /dev·/lib/modules·docker 소켓.
+  # LVM은 호스트 프로세스처럼 호스트 udev를 기다린다(L4): /run/udev(ro)와 host IPC를 함께 둔다. /run/udev만 있으면
+  # lvcreate가 컨테이너 IPC의 udev 세마포어를 기다리며 멈추고(L3), 둘 다 없으면 lvcreate 직후 /dev/anf/<lv>가 없을 때가 있다
   storage-agent:
     image: anf-clone-agent:latest
     build:
@@ -36,6 +38,7 @@ services:
     privileged: true
     network_mode: host
     pid: host
+    ipc: host
     volumes:
       - type: bind
         source: /var/lib/anf-clone
@@ -48,6 +51,7 @@ services:
         bind:
           propagation: rshared
       - /run/lock/lvm:/run/lock/lvm
+      - /run/udev:/run/udev:ro
       - /dev:/dev
       - /lib/modules:/lib/modules:ro
       - /var/run/docker.sock:/var/run/docker.sock

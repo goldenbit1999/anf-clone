@@ -122,12 +122,20 @@ def test_agent_binds_ns_rshared_after_init(compose):
     assert agent["depends_on"]["init"]["condition"] == "service_completed_successfully"
 
 
-def test_agent_shares_the_lvm_lock_dir_but_not_udev(compose):
+def test_agent_shares_the_lvm_lock_dir(compose):
     vols = _volumes(compose["services"]["storage-agent"])
     # P2: 호스트 udev의 VG 자동 활성화와 같은 잠금을 써야 vgchange가 경합하지 않는다
     assert vols["/run/lock/lvm"]["source"] == "/run/lock/lvm"
-    # L3: /run/udev를 붙이면 lvcreate가 udev 세마포어를 기다리며 멈춘다
-    assert not [t for t in vols if t.startswith("/run/udev")]
+
+
+def test_agent_waits_for_host_udev_like_a_host_process(compose):
+    agent = compose["services"]["storage-agent"]
+    vols = _volumes(agent)
+    # L4: LVM이 호스트 udev를 보고(/run/udev) 그 처리가 끝날 때까지 기다린다. 기다리지 않으면(L2) lvcreate 직후의
+    # mount가 /dev/anf/<lv>를 못 찾을 때가 있다(FR-13 구현 중 변경). 쿠키 세마포어가 호스트 IPC 네임스페이스에
+    # 있어야 호스트 udev가 풀어 준다. /run/udev만 붙이면 lvcreate가 멈춘다(L3)
+    assert vols["/run/udev"]["read_only"] is True
+    assert agent["ipc"] == "host"
 
 
 def test_agent_has_devices_modules_and_docker_socket(compose):
