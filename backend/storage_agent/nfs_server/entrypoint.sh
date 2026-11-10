@@ -22,6 +22,12 @@ case "$ANF_PROTO" in
   *) log "unknown protocol '$ANF_PROTO'" >&2; exit 1 ;;
 esac
 
+# rpcbind는 자기 마운트 네임스페이스에서 돈다(netns는 같다). nfsd 파일시스템을 마운트하기 전에 띄우고 /export를 떼어 낸다.
+# docker rm -f(SIGKILL)에서 rpcbind가 마지막으로 끝나는 프로세스면, 그 exit가 nfsd 파일시스템을 내려 knfsd 종료가
+# 시작된다. knfsd는 rpcbind에 등록 해제를 보내고, 아직 닫히지 않은 rpcbind 자신의 소켓에서 답을 기다린다(호출마다
+# 10 s, 2~3분). 그동안 컨테이너가 끝나지 않아 docker rm -f가 실패했다 (FR-11 data-plane 검증 2회차).
+# /export를 남기면 그 아래 볼륨 마운트가 rpcbind 쪽에 남아 볼륨 LV를 잡는다 (삭제·되돌리기의 lvremove가 실패한다)
+unshare -m --propagation private sh -c 'umount -l /export && exec rpcbind -w'
 mount -t nfsd nfsd /proc/fs/nfsd
 # ONTAP 기본값: NFSv4 lease 30초, grace 45초 (knfsd 기본값은 90초·90초). knfsd가 돌기 전에만 바꿀 수 있다.
 # 재시작 뒤 클라이언트가 상태를 되찾는 유예 기간이 짧아진다 (스냅샷 결정 1)
@@ -33,7 +39,6 @@ mount -t rpc_pipefs rpc_pipefs /var/lib/nfs/rpc_pipefs
 # 유예 기간이 돌아 그동안 v4.1 OPEN이 막힌다. 있으면 되찾을 클라이언트가 없을 때 유예를 건너뛴다.
 # 기록은 컨테이너 안에 있다: docker stop·start 사이에는 남고, 인스턴스를 다시 만들면 사라진다.
 nfsdcld
-rpcbind -w
 # mp 옵션: /export/<token>이 마운트 지점이 아니면(호스트 마운트 전) export하지 않는다
 exportfs -ra
 rpc.mountd

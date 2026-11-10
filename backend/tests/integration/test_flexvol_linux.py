@@ -449,6 +449,40 @@ def test_nfs41_instance_restarts_with_client_records(mgr, vol, long_client):
     assert wrote.stdout.split() == ["one", "two", "three"]
 
 
+# --- 강제 제거 (FR-11 data-plane 검증 2회차 tp8) ---
+
+
+def mountinfo(pid: str) -> list[tuple[str, str]]:
+    """그 프로세스 마운트 네임스페이스의 (마운트 지점, 파일시스템 종류)."""
+    rows = []
+    for line in Path(f"/proc/{pid}/mountinfo").read_text().splitlines():
+        before, _, after = line.partition(" - ")
+        rows.append((before.split()[4], after.split()[0]))
+    return rows
+
+
+def test_rpcbind_cannot_hold_up_a_killed_instance(mgr, vol):
+    """docker rm -f(SIGKILL)에서 rpcbind가 컨테이너의 마지막 프로세스로 나가면, 그 exit가 nfsd 파일시스템을 내려
+    knfsd 종료가 시작된다. knfsd는 rpcbind에 등록 해제를 보내고, 아직 닫히지 않은 rpcbind 자신의 소켓에서 답을
+    기다린다(호출마다 10 s, 2~3분). 그동안 컨테이너가 끝나지 않아 docker rm -f가 12 s 만에 포기했다.
+    그래서 rpcbind는 nfsd 파일시스템도 볼륨 마운트도 없는 자기 마운트 네임스페이스에서 돈다. 볼륨 마운트가 있으면
+    rpcbind가 LV를 잡아 볼륨 삭제·되돌리기의 lvremove가 실패한다. NFSv3 마운트(포트 매퍼)는 그대로 된다."""
+    vid, token = vol
+    mgr.create(vid, f"/{token}", GIB, 770, "nfs3")
+    ip = mgr.record(vid)["data_lif"]["ip"]["address"]
+    init = sh("docker", "inspect", "-f", "{{.State.Pid}}", container_name(vid)).stdout.strip()
+    top = sh("docker", "top", container_name(vid), "-eo", "pid,comm").stdout.splitlines()[1:]
+    rpcbind = next(pid for pid, comm in (row.split(None, 1) for row in top) if comm.strip() == "rpcbind")
+
+    assert os.readlink(f"/proc/{rpcbind}/ns/mnt") != os.readlink(f"/proc/{init}/ns/mnt")
+    assert os.readlink(f"/proc/{rpcbind}/ns/net") == os.readlink(f"/proc/{init}/ns/net")
+    seen = mountinfo(rpcbind)
+    assert not [m for m in seen if m[1] == "nfsd" or m[0] == "/export" or m[0].startswith("/export/")], seen
+    assert ("/proc/fs/nfsd", "nfsd") in mountinfo(init)
+    wrote = client(ip, token, "3", "echo hello > /m/f")
+    assert wrote.returncode == 0, wrote.stdout + wrote.stderr
+
+
 # --- 스냅샷에서 새 볼륨 (복원 설계 §6.2, 결정 5~11) ---
 
 
