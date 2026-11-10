@@ -14,6 +14,7 @@ Python 표준 라이브러리만 쓰고 root가 필요 없다(docker 그룹이�
 
 import argparse
 import json
+import statistics
 import subprocess
 import sys
 import time
@@ -44,8 +45,10 @@ LOW, HIGH = 0.90, 1.01  # 잰 쓰기 처리량이 한도의 90~101% (FR-08 결�
 CLIENTS = ("anf-demo-client-1", "anf-demo-client-2")
 CLIENT_IMAGE, NETWORK = "anf-nfs-client", "anf-vnet"
 TEXT = "hello from the ANF clone demo"
+# 한도마다 6 s 쓰기를 3회 재고 중앙값으로 본다. 10 MiB/s에서도 한 회가 몇 초 멈춰 38%가 된 적이 있다(FR-13 구현 중)
+FIO_RUNS = 3
 FIO = ("fio --direct=1 --ioengine=libaio --clocksource=clock_gettime --output-format=json --bs=1M --iodepth=16"
-       " --time_based --ramp_time=2 --runtime=10 --name=write --rw=write --size=256M --filename=")
+       " --time_based --ramp_time=1 --runtime=6 --name=write --rw=write --size=256M --filename=")
 
 
 class StepFailed(Exception):
@@ -96,6 +99,11 @@ def fio_mibps(stdout: str) -> tuple[int, float]:
 
 def within(measured: float, limit: float) -> bool:
     return LOW <= round(measured / limit, 4) <= HIGH
+
+
+def throughput_ok(runs: list[float], limit: float) -> bool:
+    """중앙값이 한도의 90~101%이고, 한도는 천장이라 어느 회도 101%를 넘지 않는다."""
+    return within(statistics.median(runs), limit) and max(runs) / limit <= HIGH
 
 
 def prom_value(body: dict) -> float | None:
@@ -219,12 +227,20 @@ class Demo:
                                  f"{(r.stdout + r.stderr).strip()[-200:]}")
             time.sleep(1)
 
-    def fio_write(self, client: str, path: str, limit: float) -> float:
-        error, mibps = fio_mibps(self.sh(client, FIO + path, timeout=180))
-        if error or not within(mibps, limit):
-            raise StepFailed(f"fio write {path}: {mibps} MiB/s ({mibps / limit:.0%} of {limit:g}), errors {error};"
-                             f" expected {LOW:.0%}-{HIGH:.0%}")
-        return mibps
+    def fio_write(self, client: str, path: str, limit: float) -> str:
+        """FIO_RUNS회 재서 판정한다. 반환: 출력할 값들(회마다 MiB/s와 중앙값의 비율)."""
+        runs = []
+        for _ in range(FIO_RUNS):
+            error, mibps = fio_mibps(self.sh(client, FIO + path, timeout=180))
+            if error:
+                raise StepFailed(f"fio write {path}: {error} errors")
+            runs.append(mibps)
+        median = statistics.median(runs)
+        text = f"{', '.join(f'{r:g}' for r in runs)} MiB/s (median {median:g} = {median / limit:.0%})"
+        if not throughput_ok(runs, limit):
+            raise StepFailed(f"fio write {path} with the limit {limit:g} MiB/s: {text}; expected the median in "
+                             f"{LOW:.0%}-{HIGH:.0%} and no run above {HIGH:.0%}")
+        return text
 
     # 단계
 
@@ -298,12 +314,12 @@ class Demo:
         self.step = "6"
         c, name = CLIENTS[0], V41[0]
         first = self.fio_write(c, "/v41/fio", LIMIT)
-        self.say(f"fio write on {name} with the limit {LIMIT:g} MiB/s: {first} MiB/s ({first / LIMIT:.0%})")
+        self.say(f"fio write on {name} with the limit {LIMIT:g} MiB/s: {first}")
         r = self.api("PATCH", arm_path(POOL, name), {"properties": {"throughputMibps": NEW_LIMIT}})
         took = self.wait(r, 202, f"PATCH {name} throughputMibps={NEW_LIMIT:g}")
         self.say(f"PATCH {name} throughputMibps {LIMIT:g} -> {NEW_LIMIT:g} -> {r.status}; Succeeded after {took:.1f} s")
         second = self.fio_write(c, "/v41/fio", NEW_LIMIT)
-        self.say(f"fio write on {name} with the limit {NEW_LIMIT:g} MiB/s: {second} MiB/s ({second / NEW_LIMIT:.0%})")
+        self.say(f"fio write on {name} with the limit {NEW_LIMIT:g} MiB/s: {second}")
 
     def prom(self, query: str) -> float | None:
         r = self.http("GET", f"{DASHBOARD}/prometheus/api/v1/query?" + urllib.parse.urlencode({"query": query}))

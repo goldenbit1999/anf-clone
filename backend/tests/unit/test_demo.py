@@ -30,6 +30,16 @@ def test_within_accepts_90_to_101_percent_of_the_limit(measured, ok):
     assert demo.within(measured, 32.0) is ok
 
 
+@pytest.mark.parametrize("runs, ok", [
+    ([9.84, 9.81, 9.85], True),
+    ([3.76, 9.84, 9.81], True),    # 한 회가 서버 쪽 쓰기 멈춤(S7 Q2)으로 낮아도 중앙값으로 본다
+    ([3.76, 3.9, 9.81], False),
+    ([9.84, 10.2, 9.81], False),   # 한도는 천장이다: 어느 회도 101%를 넘으면 안 된다
+])
+def test_throughput_ok_judges_the_median_and_never_above_the_ceiling(runs, ok):
+    assert demo.throughput_ok(runs, 10.0) is ok
+
+
 def test_prom_value_reads_one_sample_or_none():
     assert demo.prom_value({"status": "success", "data": {"result": []}}) is None
     body = {"status": "success", "data": {"result": [{"metric": {}, "value": [1700000000.0, "16777216"]}]}}
