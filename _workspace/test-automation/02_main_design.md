@@ -119,4 +119,15 @@ scripts/run-dataplane-tests.sh [pytest에 넘길 경로·옵션...]
 
 ## 8. 구현 중 변경
 
-(구현하면서 설계를 바꾸면 여기에 이유와 함께 적는다.)
+구현(feature-implementer, 2026-11-09)에서 정하거나 좁힌 것. 결정 1~13의 뜻은 바뀌지 않았다.
+
+1. **VG 붙이기(결정 8)는 agent의 함수를 그대로 부른다.** 실행기가 venv Python으로 `FlexVolManager(Runner()).ensure_aggregate()`를 부른다. agent가 시작할 때(`recover`의 첫 단계) 부르는 함수라 절차가 같고, 이미지가 없으면 만드는 것까지 같다. agent를 잠깐 띄우는 방법은 버렸다: `recover`가 남은 볼륨의 인스턴스까지 띄워 기준선이 흔들린다. `losetup`·`vgchange`를 스크립트에 다시 쓰는 방법도 버렸다: 같은 절차가 두 곳에 생긴다. 제품 코드는 바뀌지 않는다.
+2. **venv 찾기(§5.1).** `ANF_CLONE_VENV`가 없으면 저장소 주인(`stat -c %u`)의 `~/.venvs/anf-clone`을 쓴다. e2e 도우미가 anf-api 사용자를 venv 주인으로 고르는 것(`dataplane_live.e2e_user`)과 같은 사람을 가리킨다.
+3. **남은 것 검사(결정 10)는 이름 접두사가 아니라 기준선과의 차이로 한다.** 통합 테스트는 볼륨 경로 `it-*`과 컨테이너 `it-client-*`를 써서 `e2ev*`·`anfe2e-cli-*`만 보면 놓친다. LV는 VG `anf`의 LV 이름(`vol_*`·`snap_*`) 전체, 컨테이너는 `docker ps -a` 전체를 실행 전과 비교한다. 다만 실행 전에 있던 볼륨(`vol_<uuid32>`)의 인스턴스 `anf-nfs-<uuid32>`는 세지 않는다. agent와 통합 테스트의 시작 복구가 그 인스턴스를 다시 띄우기 때문이다.
+4. **시간.** 요약 표(§5.2 6)의 초는 JUnit XML의 `time`(pytest가 `perf_counter`로 잰 세션 시간, 단조 시계)이다. 실행기가 따로 재는 파일별·전체 시간은 `/proc/uptime`(단조)이고, 진행 줄과 `files.tsv`, `summary.txt`에 남긴다. bash의 `SECONDS`·`EPOCHREALTIME`은 벽시계라 쓰지 않았다.
+5. **pytest 종료 코드도 본다.** XML이 깨끗해도 pytest가 0이 아닌 코드로 끝난 파일이 있으면 종료 코드 1이다. XML만으로는 내부 오류(pytest 종료 코드 3)를 놓칠 수 있다.
+6. **`ANF_E2E_API_URL`은 설정돼 있지 않을 때만 기본값(`http://127.0.0.1:8080`)으로 채우고, 빈 값은 그대로 둔다** (`${ANF_E2E_API_URL-…}`). 일부러 빈 값을 주면 e2e가 skip하고 판정이 실패로 센다. AC-04 (b)를 그 방법으로 재현할 수 있다.
+7. **실행 옵션.** 파일별 pytest에 `-v`(로그에 테스트마다 한 줄)와 `-p no:cacheprovider`, 환경 `PYTHONDONTWRITEBYTECODE=1`을 더한다. root가 Windows 체크아웃(`/mnt/c`)에 `.pytest_cache`·`__pycache__`를 남기지 않게 하는 것으로, 기존 e2e 실행 명령과 같다.
+8. **경로 인자 구분(§5.1).** `-`로 시작하지 않고 `::` 앞부분이 실제로 있는 인자를 경로(파일, 폴더, node ID)로, 나머지를 pytest 옵션으로 본다. 값이 경로인 옵션은 `--deselect=<node ID>`처럼 `=`로 붙여 써야 한다(`docs/testing.md` §3).
+9. **대응표 검사(결정 11)는 `pytest --collect-only`로 한다.** `test_testing_doc.py`가 표에 나온 파일을 수집해 node ID가 그대로 있는지 본다. 파일과 함수 이름만 보는 것보다 짧고 매개변수 ID까지 맞는다(AC-03이 쓰는 방법과 같다). FR-01~FR-08마다 테스트가 적힌 행이 있는지도 본다.
+10. **빈 곳 채우기(§3의 4)는 할 것이 없었다.** PRD §6.1 FR-01~FR-08의 수락 기준 문장 23개가 모두 묶음의 자동 테스트(데이터 플레인 e2e, 통합, 컨트롤 플레인 e2e, 계약)에 대응해 e2e를 더하지 않았다. 표를 쓰며 남긴 것: 클론에는 `Canceled`로 끝나는 경로가 없다(FR-01). ARM 볼륨에는 한도가 없는 경우가 없어 FR-08의 "제한이 없는 볼륨"은 4,500 MiB/s 볼륨과 한도 없는 agent 볼륨(통합)이다.
