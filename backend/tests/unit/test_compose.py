@@ -122,6 +122,15 @@ def test_agent_binds_ns_rshared_after_init(compose):
     assert agent["depends_on"]["init"]["condition"] == "service_completed_successfully"
 
 
+def test_agent_long_binds_create_a_missing_host_path(compose):
+    # compose는 init을 돌리기 전에 모든 컨테이너를 만든다. 긴 문법 바인드는 원본이 없으면 만들기에서 거절되므로
+    # /var/lib/anf-clone이 아직 없는 새 기기에서는 명령이 실패한다(검증 1회차 판정 밖 관찰 1). 빈 ns가 먼저 생겨도
+    # init.sh가 mkdir -p 뒤 마운트 지점이 아니면 바인드하고 rshared로 만든다
+    vols = _volumes(compose["services"]["storage-agent"])
+    for target in ("/var/lib/anf-clone", "/var/lib/anf-clone/ns"):
+        assert vols[target]["bind"]["create_host_path"] is True, target
+
+
 def test_agent_shares_the_lvm_lock_dir(compose):
     vols = _volumes(compose["services"]["storage-agent"])
     # P2: 호스트 udev의 VG 자동 활성화와 같은 잠금을 써야 vgchange가 경합하지 않는다
