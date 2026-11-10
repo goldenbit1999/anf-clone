@@ -43,11 +43,11 @@
 ## 2부: data-plane 작업 (2026-11-10~)
 
 - 상태: in_progress
-- 마지막 완료 단계: 2 (설계 `02_main_design_dataplane.md`)
-- 재개할 단계: 3 (구현, `feature-implementer`)
+- 마지막 완료 단계: 3 (구현)
+- 재개할 단계: 4 (검증, `real-env-verifier`. PR의 Actions 실행으로 판정)
 - 브랜치: `feature/ci-dataplane` (`main` `7255e3e`에서)
-- 검증 대상 코드: (구현 뒤 기록. 제품 코드 해시가 `f99bc5cf…`에서 바뀐다)
-- implementer 에이전트 ID: aee96ed1b59426045 (스파이크 S3. worktree `.claude/worktrees/agent-aee96ed1b59426045`에서 일했다)
+- 검증 대상 코드: `5cb8b17` (`feature/ci-dataplane`), 제품 코드 내용 해시 `9a023d13b647ba1f0363bfa75a22c66ea362991e5baca42796bef74e6cab92f1` (이전 `f99bc5cf…`. 메인 계산)
+- implementer 에이전트 ID: a187fce0d89195620 (구현, 주 체크아웃). 스파이크 S3는 aee96ed1b59426045(worktree)
 - verifier 에이전트 ID:
 - 미해결: 없음
 
@@ -64,3 +64,5 @@
 
 - 2026-11-10 스파이크 S3 조건부 통과 (`_workspace/spikes/S3.md`): Actions run 42783919456(부분 묶음 43 통과·2 실패), 42785777318(전체: private 113/0/0 4,378 s, as-is 105/8/0). 실패 8개는 전부 스냅샷 마운트 중복. 원격 브랜치 `spike/s3-runner`는 남아 있다(출하 때 지운다)
 - 2026-11-10 단계 2 완료 — 묻는 결정 없음, 결정 1~10 자동 채택 (ns 전파는 제품 수정, 회귀는 전체 묶음, 2개 조각 matrix, PR·main push 트리거)
+- 2026-11-10 단계 3 시작 — 새 feature-implementer(주 체크아웃)에 구현을 맡김: ns 전파 수정(TDD), ci.yml data-plane 작업, WSL 전체 회귀 1회(분리 실행)
+- 2026-11-10 단계 3 완료 — 커밋 `691d93f`(`ensure_shared_ns`: 새 바인드에 `--make-private` 뒤 `--make-rshared`, 단위 테스트 2개), `02f6d7f`(ci.yml `data-plane` 작업, 준비 스크립트 주석, `docs/testing.md` CI 절, 설계 §6), `5cb8b17`(testing.md 테스트 수 989). 제품 코드 내용 해시 `9a023d13…`(메인 계산, HEAD `5cb8b17`). WSL 전체 회귀 `/var/tmp/anf-clone-tests/20261110T102847Z`: 113 통과, skip 0, exit 0, 5,198 s, 남은 것 없음(메인이 summary.txt와 콘솔 `rc=0` 확인). AC-05 손 확인 출력 `/var/tmp/anf-clone-tests/fr11-ac05`. implementer가 push하지 않음
