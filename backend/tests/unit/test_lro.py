@@ -4,7 +4,9 @@ import asyncio
 import time
 
 import pytest
+from prometheus_client.parser import text_string_to_metric_families
 
+from anf_api.api_metrics import ApiMetrics
 from anf_api.lro import Fault, LroWorker, operation_status_body, parse_faults
 from anf_api.state_store import Resource, StateStore
 
@@ -231,6 +233,87 @@ def test_new_worker_resumes_operations_left_in_progress(store):
     op = start(store, "CREATE", "Creating")
     drain(LroWorker(store, handlers(Recorder())))
     assert store.get_operation(op.id).status == "Succeeded"
+
+
+# --- 작업 메트릭 (메트릭 설계 §2.2, AC-02) ---
+
+def metric(m: ApiMetrics, name: str, **labels) -> float | None:
+    for family in text_string_to_metric_families(m.exposition().decode()):
+        for s in family.samples:
+            if s.name == name and s.labels == labels:
+                return s.value
+    return None
+
+
+def counted(m, action="create", result="Succeeded"):
+    return metric(m, "anf_api_operations_total", resource_type="netAppAccounts", action=action, result=result)
+
+
+def running(m, action="create"):
+    return metric(m, "anf_api_operations_in_progress", resource_type="netAppAccounts", action=action)
+
+
+def test_finished_operation_is_counted_once_with_its_duration(store):
+    m = ApiMetrics()
+    start(store, "CREATE", "Creating")
+    drain(LroWorker(store, handlers(Recorder()), metrics=m))
+    assert counted(m) == 1
+    assert metric(m, "anf_api_operation_duration_seconds_count", resource_type="netAppAccounts", action="create",
+                  result="Succeeded") == 1
+    assert running(m) == 0
+    assert running(m, "delete") == 0  # 등록된 처리기는 작업이 없어도 0으로 보인다
+
+
+@pytest.mark.parametrize("faults, handler", [
+    ({"netAppAccounts/create": Fault(fail=True)}, Recorder()),
+    ({}, Recorder(error=RuntimeError("boom"))),
+])
+def test_failed_operation_is_counted_as_failed(store, faults, handler):
+    m = ApiMetrics()
+    start(store, "CREATE", "Creating")
+    drain(LroWorker(store, handlers(handler), faults, metrics=m))
+    assert counted(m, result="Failed") == 1
+    assert counted(m) is None
+    assert running(m) == 0
+
+
+def test_operation_is_in_progress_while_it_runs(store):
+    m = ApiMetrics()
+    start(store, "CREATE", "Creating")
+    worker = LroWorker(store, handlers(Recorder()), {"netAppAccounts/create": Fault(delay_seconds=0.3)}, metrics=m)
+
+    async def go():
+        tasks = worker.start_pending()
+        await asyncio.sleep(0.1)
+        mid = running(m)
+        await asyncio.gather(*tasks)
+        return mid
+
+    assert asyncio.run(go()) == 1
+    assert running(m) == 0
+    assert counted(m) == 1
+
+
+def test_operation_stopped_by_shutdown_is_counted_once_by_the_next_process(store):
+    first = ApiMetrics()
+    start(store, "CREATE", "Creating")
+    worker = LroWorker(store, handlers(Recorder()), {"netAppAccounts/create": Fault(delay_seconds=5)}, metrics=first)
+
+    async def go():
+        loop = asyncio.create_task(worker.run())
+        await asyncio.sleep(0.1)
+        mid = running(first)
+        loop.cancel()  # anf-api 종료: 작업은 끝나지 않은 채 남는다
+        return mid
+
+    assert asyncio.run(go()) == 1
+    assert running(first) == 0
+    assert counted(first) is None
+
+    second = ApiMetrics()  # 다시 뜬 프로세스
+    drain(LroWorker(store, handlers(Recorder()), metrics=second))
+    assert counted(second) == 1
+    assert running(second) == 0
 
 
 # --- 작업 상태 본문 ---

@@ -8,6 +8,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
+from prometheus_client.parser import text_string_to_metric_families
 
 from anf_api.arm_app import create_app
 from anf_api.state_store import Resource
@@ -337,3 +338,80 @@ def test_operation_status_requires_api_version(client):
 def test_invalid_fault_injection_prevents_startup(tmp_path):
     with pytest.raises(ValueError):
         create_app(db_path=tmp_path / "anf.db", fault_injection='{"netAppAccounts/patch": {}}')
+
+
+# --- 메트릭 (메트릭 설계 §2.2, AC-01·AC-02) ---
+
+ACCOUNT_ROUTE = ("/subscriptions/{subscription_id}/resourceGroups/{resource_group}/providers/Microsoft.NetApp"
+                 "/netAppAccounts/{account_name}")
+
+
+def scrape(client) -> dict:
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain; version=")
+    return {(s.name, tuple(sorted(s.labels.items()))): s.value
+            for family in text_string_to_metric_families(r.text) for s in family.samples}
+
+
+def requests(samples, method, route, status) -> float:
+    return samples.get(("anf_api_http_requests_total",
+                        (("method", method), ("route", route), ("status", str(status)))), 0)
+
+
+def operations(samples, action="create", result="Succeeded") -> float:
+    return samples.get(("anf_api_operations_total", (("action", action), ("resource_type", "netAppAccounts"),
+                                                     ("result", result))), 0)
+
+
+def in_progress(samples, action="create") -> float:
+    return samples[("anf_api_operations_in_progress", (("action", action), ("resource_type", "netAppAccounts")))]
+
+
+def test_ac01_requests_are_counted_by_route_template(client):
+    create(client)
+    client.get(ACC)
+    client.get(ACC)
+    client.get(f"/subscriptions/{SUB}/nope")
+    s = scrape(client)
+    assert requests(s, "PUT", ACCOUNT_ROUTE, 201) == 1
+    assert requests(s, "GET", ACCOUNT_ROUTE, 200) == 2
+    assert requests(s, "GET", "unmatched", 404) == 1
+    # 구독 ID와 이름은 라벨에 들어가지 않는다 (경로 템플릿)
+    assert not [key for key in s if SUB in str(key) or "acc1" in str(key)]
+    assert s[("anf_api_http_request_duration_seconds_count", (("method", "GET"), ("route", ACCOUNT_ROUTE)))] == 2
+    # /metrics 자신은 세지 않는다
+    assert not [key for key in scrape(client) if "/metrics" in str(key)]
+
+
+def test_ac02_operation_is_counted_when_it_finishes(make_client):
+    client = make_client('{"netAppAccounts/create": {"delaySeconds": 1.0}}')
+    r = client.put(ACC, json={"location": "westus2"})
+    assert in_progress(scrape(client)) == 1
+    assert operations(scrape(client)) == 0
+    wait_terminal(client, r.headers["Azure-AsyncOperation"])
+    s = scrape(client)
+    assert in_progress(s) == 0
+    assert operations(s) == 1
+    duration = (("action", "create"), ("resource_type", "netAppAccounts"), ("result", "Succeeded"))
+    assert s[("anf_api_operation_duration_seconds_count", duration)] == 1
+    assert s[("anf_api_operation_duration_seconds_sum", duration)] >= 1.0
+
+
+def test_ac02_failed_operation_is_counted_as_failed(make_client):
+    client = make_client('{"netAppAccounts/create": {"fail": true}}')
+    r = client.put(ACC, json={"location": "westus2"})
+    wait_terminal(client, r.headers["Azure-AsyncOperation"])
+    s = scrape(client)
+    assert (operations(s, result="Failed"), operations(s)) == (1, 0)
+
+
+def test_ac02_operation_resumed_after_restart_is_counted_once(tmp_path):
+    db = tmp_path / "anf.db"
+    with TestClient(create_app(db_path=db, fault_injection='{"netAppAccounts/create": {"delaySeconds": 30}}')) as first:
+        r = first.put(ACC, json={"location": "westus2"})
+        assert operations(scrape(first)) == 0
+    with TestClient(create_app(db_path=db, fault_injection="")) as second:
+        wait_terminal(second, r.headers["Azure-AsyncOperation"])
+        s = scrape(second)
+        assert (operations(s), in_progress(s)) == (1, 0)

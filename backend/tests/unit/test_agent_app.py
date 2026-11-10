@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from storage_agent.agent_app import create_app
-from storage_agent.flexvol import VolumeError
+from storage_agent.flexvol import AggregateUsage, VolumeError
 from storage_agent.jobs import JobTable
 from storage_agent.nfs_instance import StartupError
 
@@ -45,6 +45,7 @@ class FakeManager:
         self.error = None  # create·delete가 던질 예외
         self.gate = threading.Event()  # 지우면 create가 기다린다
         self.gate.set()
+        self.usage = AggregateUsage(0, 1 << 40, 0, 8192)
 
     def recover(self):
         self.calls.append("recover")
@@ -90,6 +91,12 @@ class FakeManager:
 
     def snapshot_record(self, volume_uuid, uuid):
         return SNAP1 if (volume_uuid, uuid) == (U1, S1) else None
+
+    def inventory(self):
+        return []  # 볼륨별 계열은 test_volume_metrics.py가 본다
+
+    def aggregate_usage(self):
+        return self.usage
 
 
 @pytest.fixture
@@ -508,3 +515,27 @@ def test_correlation_id_is_logged_with_the_job(client, caplog):
     r = client.post("/api/storage/volumes", json=body(), headers={"x-ms-correlation-request-id": "corr-123"})
     job = r.json()["job"]["uuid"]
     assert any("corr-123" in m and job in m for m in caplog.messages)
+
+
+# --- 메트릭 (메트릭 설계 §2.1, AC-11) ---
+
+
+def test_metrics_reads_the_volume_manager_in_prometheus_text_format(manager):
+    manager.usage = AggregateUsage(data_used=512 << 20, data_size=1 << 40, metadata_used=4096, metadata_size=8192)
+    with TestClient(create_app(manager=manager, jobs=JobTable())) as c:
+        r = c.get("/metrics")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain; version=")
+    assert "anf_aggregate_data_used_bytes 5.36870912e+08" in r.text
+    assert "anf_agent_scrape_errors_total 0.0" in r.text
+
+
+def test_metrics_scrape_does_not_wait_for_a_running_job(manager, client):
+    manager.gate.clear()  # create가 끝나지 않는다
+    r = client.post("/api/storage/volumes", json=body())
+    assert r.status_code == 202
+    start = time.monotonic()
+    assert client.get("/metrics").status_code == 200
+    assert time.monotonic() - start < 1
+    manager.gate.set()
+    assert wait_job(client, r.json()["job"]["_links"]["self"]["href"])["state"] == "success"

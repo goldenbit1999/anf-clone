@@ -1,5 +1,5 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
 import type { TreeNode } from "./armClient";
 import { ResourceTree } from "./ResourceTree";
 
@@ -110,6 +110,22 @@ test("a volume without mountTargets yet shows no mount path", () => {
   render(<ResourceTree tree={sample("Creating")} />);
   expect(row("v1").textContent).not.toContain(":/vol-one");
   expect(row("v1").textContent).toContain("100 GiB");
+});
+
+test("a Succeeded volume's name is a button that selects the volume for its metrics", () => {
+  const onSelect = vi.fn();
+  const tree = sample();
+  render(<ResourceTree tree={tree} onSelect={onSelect} />);
+
+  fireEvent.click(within(row("v1")).getByRole("button", { name: "v1" }));
+  expect(onSelect).toHaveBeenCalledWith(tree[0].children[0].children[0].resource);
+  // 계정·풀·스냅샷에는 메트릭 패널이 없다
+  expect(screen.getAllByRole("button")).toHaveLength(1);
+});
+
+test("a volume that has not succeeded yet cannot be selected (no instance, no series)", () => {
+  render(<ResourceTree tree={sample("Creating")} onSelect={vi.fn()} />);
+  expect(screen.queryByRole("button")).toBeNull();
 });
 
 test("an empty tree says there are no accounts", () => {

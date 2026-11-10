@@ -35,6 +35,7 @@ SNAPSHOT_DIR = ".snapshot"
 # 인스턴스를 지운 뒤에도 knfsd가 잠시 파일시스템을 잡고 있을 수 있다. 0.5초 간격으로 60초까지 다시 시도한다
 UMOUNT_ATTEMPTS = 120
 UMOUNT_RETRY_SECONDS = 0.5
+METADATA_BLOCK = 4096  # dm-thin 메타데이터 블록 크기(바이트). 풀 크기와 무관하게 고정이다 (커널 THIN_METADATA_BLOCK_SIZE)
 
 
 class VolumeError(Exception):
@@ -107,6 +108,29 @@ class _Snapshot:
     def record(self) -> dict:
         """ONTAP 스냅샷 레코드의 부분집합 (스냅샷 설계 §6.1)."""
         return {"uuid": self.uuid, "name": self.name, "create_time": self.create_time, "volume": {"uuid": self.volume}}
+
+
+@dataclass(frozen=True)
+class VolumeInfo:
+    """메트릭 수집기가 보는 볼륨 (메트릭 설계 §2.1). mountpoint는 마운트됐을 때만 있다.
+    마운트되지 않은 마운트 지점에 statvfs를 하면 그 아래 호스트 파일시스템의 값이 나오기 때문이다."""
+
+    uuid: str
+    token: str
+    protocol: str
+    qos: float | None  # MiB/s
+    mountpoint: Path | None
+    snapshots: int
+
+
+@dataclass(frozen=True)
+class AggregateUsage:
+    """씬 풀(aggregate)의 사용량과 크기 (바이트). 스냅샷이 붙든 블록도 여기서 보인다 (R-09, 메트릭 결정 7)."""
+
+    data_used: int
+    data_size: int
+    metadata_used: int
+    metadata_size: int
 
 
 def lv_name(uuid: str) -> str:
@@ -286,6 +310,27 @@ class FlexVolManager:
 
     def record(self, uuid: str) -> dict | None:
         return next((r for r in self.records() if r["uuid"] == uuid), None)
+
+    def inventory(self) -> list[VolumeInfo]:
+        """메트릭 수집기용 볼륨 목록. 태그와 마운트 표만 읽는다."""
+        _, volumes, snapshots = self._report()
+        mounted = self._mounted()
+        return [
+            VolumeInfo(v.uuid, v.token, v.protocol, v.qos,
+                       self._mountpoint(v) if str(self._mountpoint(v)) in mounted else None,
+                       sum(s.volume == v.uuid for s in snapshots))
+            for v in volumes
+        ]
+
+    def aggregate_usage(self) -> AggregateUsage:
+        """`dmsetup status`의 풀 줄 `0 <섹터> thin-pool <tid> <메타 사용>/<메타 전체> <데이터 사용>/<데이터 전체> …`.
+        데이터 블록 크기는 섹터 수 ÷ 전체 블록이다. lvs의 백분율(소수 둘째 자리)보다 정확하고 빠르다 (메트릭 결정 8, S8 Q5)."""
+        fields = self._run(["dmsetup", "status", f"{VG}-{POOL}-tpool"]).stdout.split()
+        size = int(fields[1]) * 512
+        meta_used, meta_total = (int(n) for n in fields[4].split("/"))
+        data_used, data_total = (int(n) for n in fields[5].split("/"))
+        return AggregateUsage(data_used * (size // data_total), size,
+                              meta_used * METADATA_BLOCK, meta_total * METADATA_BLOCK)
 
     # --- 스냅샷 ---
 

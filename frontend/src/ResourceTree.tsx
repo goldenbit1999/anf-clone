@@ -49,26 +49,41 @@ function stateClass(state: string): string {
   return "busy";
 }
 
-function rows(nodes: TreeNode[], depth: number): React.ReactNode[] {
+const VOLUME_DEPTH = 2;
+
+type OnSelect = (volume: ArmResource) => void;
+
+function rows(nodes: TreeNode[], depth: number, onSelect?: OnSelect): React.ReactNode[] {
   return nodes.flatMap(({ resource, children }) => {
     const kind = KINDS[depth];
     const state = resource.properties.provisioningState;
+    // 풀·볼륨·스냅샷의 name은 "계정/풀/..." 형식이라 마지막 조각만 보인다
+    const name = resource.name.split("/").pop();
+    // 성공한 볼륨만 인스턴스가 있어 메트릭 계열이 있다 (메트릭 설계 §3)
+    const selectable = onSelect && depth === VOLUME_DEPTH && state === "Succeeded" && resource.properties.creationToken;
     return [
       <tr key={resource.id} aria-level={depth + 1}>
-        {/* 풀·볼륨·스냅샷의 name은 "계정/풀/..." 형식이라 마지막 조각만 보인다 */}
-        <td style={{ paddingLeft: `${depth * 1.5 + 0.5}rem` }}>{resource.name.split("/").pop()}</td>
+        <td style={{ paddingLeft: `${depth * 1.5 + 0.5}rem` }}>
+          {selectable ? (
+            <button type="button" className="link" onClick={() => onSelect(resource)}>
+              {name}
+            </button>
+          ) : (
+            name
+          )}
+        </td>
         <td>{kind.label}</td>
         <td>
           <span className={`state ${stateClass(state)}`}>{state}</span>
         </td>
         <td>{kind.details(resource).filter(Boolean).join(" · ")}</td>
       </tr>,
-      ...rows(children, depth + 1),
+      ...rows(children, depth + 1, onSelect),
     ];
   });
 }
 
-export function ResourceTree({ tree }: { tree: TreeNode[] }) {
+export function ResourceTree({ tree, onSelect }: { tree: TreeNode[]; onSelect?: OnSelect }) {
   if (tree.length === 0) return <p className="empty">No NetApp accounts in this subscription.</p>;
   return (
     <table role="treegrid">
@@ -80,7 +95,7 @@ export function ResourceTree({ tree }: { tree: TreeNode[] }) {
           <th>Details</th>
         </tr>
       </thead>
-      <tbody>{rows(tree, 0)}</tbody>
+      <tbody>{rows(tree, 0, onSelect)}</tbody>
     </table>
   );
 }

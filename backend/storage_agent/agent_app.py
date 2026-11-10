@@ -15,11 +15,13 @@ import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 
 from storage_agent.flexvol import FlexVolManager, lv_name
 from storage_agent.jobs import JobTable
 from storage_agent.runner import Runner
+from storage_agent.volume_metrics import VolumeCollector
 
 log = logging.getLogger(__name__)
 
@@ -230,5 +232,14 @@ def create_app(manager=None, jobs: JobTable | None = None) -> FastAPI:
     def get_job(uuid: str):
         job = jobs.get(uuid)
         return job if job is not None else _not_found(f"job {uuid} not found")
+
+    # Prometheus 스크레이프 (메트릭 설계 §2.1). job 표를 거치지 않으므로 도는 job을 기다리지 않는다.
+    # 앱마다 레지스트리를 따로 둔다(전역 레지스트리면 앱을 다시 만들 때 이름이 겹친다)
+    registry = CollectorRegistry()
+    registry.register(VolumeCollector(manager))
+
+    @app.get("/metrics")
+    def metrics():
+        return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
     return app

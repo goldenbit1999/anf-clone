@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterable
 
+from anf_api.api_metrics import ApiMetrics
 from anf_api.arm_rules import operation_path
 from anf_api.state_store import Operation, StateStore
 
@@ -26,8 +27,13 @@ class Fault:
     fail: bool = False
 
 
+def _labels(resource_type: str, action: str) -> tuple[str, str]:
+    """(리소스 종류의 마지막 조각, 소문자 작업). 결함 주입 키와 작업 메트릭 라벨이 같은 이름을 쓴다."""
+    return resource_type.rsplit("/", 1)[-1], action.lower()
+
+
 def _key(resource_type: str, action: str) -> str:
-    return f"{resource_type.rsplit('/', 1)[-1]}/{action.lower()}"
+    return "/".join(_labels(resource_type, action))
 
 
 def parse_faults(text: str | None, handler_keys: Iterable[tuple[str, str]]) -> dict[str, Fault]:
@@ -67,7 +73,8 @@ def _fault_key(op: Operation) -> str:
 
 class LroWorker:
     def __init__(self, store: StateStore, handlers: dict[tuple[str, str], Handler],
-                 faults: dict[str, Fault] | None = None, scan_interval: float = 1.0):
+                 faults: dict[str, Fault] | None = None, scan_interval: float = 1.0,
+                 metrics: ApiMetrics | None = None):
         self._store = store
         self._handlers = handlers
         self._faults = faults or {}
@@ -75,6 +82,9 @@ class LroWorker:
         self._wake = asyncio.Event()
         self._running: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
+        self._metrics = metrics or ApiMetrics()
+        for resource_type, action in handlers:
+            self._metrics.declare_operation(*_labels(resource_type, action))
 
     def notify(self) -> None:
         """새 작업이 생겼다고 알린다. API 라우트와 워커는 같은 이벤트 루프에서 돈다."""
@@ -113,6 +123,15 @@ class LroWorker:
                 task.cancel()
 
     async def _process(self, op: Operation) -> None:
+        # 진행 중 수는 이 태스크가 도는 동안이다. 종료로 취소돼도 줄고, 끝 상태 수는 세지 않는다
+        labels = _labels(op.resource_type, op.action)
+        self._metrics.operation_started(*labels)
+        try:
+            await self._run_operation(op)
+        finally:
+            self._metrics.operation_stopped(*labels)
+
+    async def _run_operation(self, op: Operation) -> None:
         fault = self._faults.get(_fault_key(op), Fault())
         if fault.delay_seconds:
             await asyncio.sleep(fault.delay_seconds)
@@ -147,6 +166,9 @@ class LroWorker:
                 res.provisioning_state = "Succeeded" if error is None else "Failed"
                 tx.put_resource(res)
             tx.finish_operation(op.id, "Succeeded" if error is None else "Failed", error)
+        # 끝 상태를 저장한 뒤에 센다. 재시작 뒤 다시 돈 작업도 끝난 프로세스에서 한 번만 세어진다
+        self._metrics.operation_finished(*_labels(op.resource_type, op.action),
+                                         "Succeeded" if error is None else "Failed", op.start_time)
 
 
 def operation_status_body(op: Operation) -> dict:
