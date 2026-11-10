@@ -137,12 +137,14 @@ jobs:
           findmnt -o TARGET,PROPAGATION --mountpoint /var/lib/anf-clone/ns || echo "ns is not a mount point"
           grep -E ' / / | /var/lib/anf-clone/ns ' /proc/self/mountinfo || true
 
-      # 실행기 출력은 root 소유다. 커널 로그(dmesg_restrict = 1)를 더해 읽을 수 있게 연다 (AC-04)
+      # 실행기 출력은 root 소유다. 커널 로그(dmesg_restrict = 1)를 더해 읽을 수 있게 연다 (AC-04).
+      # 링 버퍼(dmesg)는 긴 조각에서 넘쳐 앞부분이 빠진다. journal의 커널 로그는 부팅부터 남는다 (검증 1회차 관찰 6)
       - name: Collect logs
         if: always()
         run: |
           sudo mkdir -p "$OUT"
           sudo dmesg -T | sudo tee "$OUT/dmesg.txt" > /dev/null
+          sudo journalctl -k -b --no-pager | sudo tee "$OUT/kernel-journal.txt" > /dev/null || true
           sudo chmod -R a+rX /var/tmp/anf-clone-tests
 
       - name: Upload logs

@@ -33,7 +33,7 @@ from revert_live import fast_poll, instance_pid, post_revert
 from snapshot_live import create_snapshot
 from throughput_live import (
     HIGH, LOW, RUNS, SECONDS, Sampler, drop_caches, fio, htb_sent, ifb_tx_bytes, in_background, limits, make,
-    matches, measure, measure_mixed, patch_volume, pool_props, quick, tc_state, within,
+    matches, measure, measure_mixed, patch_volume, pool_props, tc_state, within,
 )
 
 pytestmark = [pytest.mark.e2e, pytest.mark.dataplane, live_api.SKIP_UNLESS_LIVE, SKIP_UNLESS_ROOT]
@@ -107,6 +107,11 @@ def test_ac02_ac03_manual_volume_data_and_shared_read_write(agent, api, clients)
 
 CHANGES = [("PATCH", 30), ("PATCH", 5), ("PUT", 10)]
 SETTLE = 12  # 바꾼 뒤 다음 변경까지 (s)
+# 하한을 보는 창: Succeeded 뒤 1~5 s에 시작하는 1초 창들의 중앙값. 한도를 올리면 흐름이 새 한도까지 오르는 데
+# 1 s 안팎 걸리고(러너에서 첫 창이 30의 0.880), 공유 러너에서는 한 창이 떨어지기도 한다(FR-11 검증 1회차 AC-01).
+# 5 s에서 끊는 것은 전의 2 s 창과 같은 이유다: WSL의 30 MiB/s 쓰기는 몇 초 뒤 서버 쪽에서 약 12 MiB/s로 떨어질 때가
+# 있다(+6.5 s부터 본 실행이 있다, 제한기 원인이 아니다). 상한은 전처럼 Succeeded 뒤 2 s의 모든 창에 건다
+SETTLED = (1, 5)
 
 
 def test_ac04_limit_changes_during_io(agent, api, clients):
@@ -146,8 +151,13 @@ def test_ac04_limit_changes_during_io(agent, api, clients):
         io = wait()
         windows = s.stop()
         active = [w for w in windows if t_start + 3 <= w[0] <= t_last - 1]
+        previous = 10  # 만들 때의 한도
         for ch in changes:
+            ch["previous"], previous = previous, ch["mibps"]
             ch["windows_2s"] = [w for w in windows if ch["t_ok"] <= w[0] <= ch["t_ok"] + 2]
+            settled = [d for t, d in windows if ch["t_ok"] + SETTLED[0] <= t <= ch["t_ok"] + SETTLED[1]]
+            ch["settled_median"] = statistics.median(settled) if settled else None
+            ch["settled_ratio"] = None if not settled else round(ch["settled_median"] / ch["mibps"], 4)
         results[name] = {"rw": rw, "vers": vers, "changes": changes, "fio": io, "lowest_active_window": min(
             active, key=lambda w: w[1]), "remounted": mounts(c) != mounts_before, "tc_end": tc_state(fsid),
             "windows": windows}
@@ -161,7 +171,12 @@ def test_ac04_limit_changes_during_io(agent, api, clients):
         for ch in x["changes"]:
             want = (202, "Patching", "PATCH") if ch["how"] == "PATCH" else (200, "Updating", "UPDATE")
             assert (ch["status"], ch["state"], ch["action"]) == want and ch["final"] == "Succeeded", (name, ch)
-            assert ch["windows_2s"] and all(within(w[1] / ch["mibps"]) for w in ch["windows_2s"]), (name, ch)
+            # 상한: Succeeded 뒤 2 s의 창이 모두 새 한도의 101% 이하다. 내린 경우는 이것으로 곧바로 바뀐 것도 보인다
+            assert ch["windows_2s"] and all(w[1] <= ch["mibps"] * HIGH for w in ch["windows_2s"]), (name, ch)
+            # 올린 경우 곧바로 바뀐 것: 첫 창이 이미 옛 한도의 101%를 넘는다
+            assert ch["mibps"] < ch["previous"] or ch["windows_2s"][0][1] > ch["previous"] * HIGH, (name, ch)
+            # 하한: 1~5 s 창의 중앙값이 새 한도의 90~101%다 (SETTLED)
+            assert ch["settled_ratio"] is not None and within(ch["settled_ratio"]), (name, ch)
         assert matches(x["tc_end"], 10), (name, x["tc_end"])
 
 
@@ -361,7 +376,7 @@ def test_ac07_limit_survives_lifecycle(agent, api, clients):
     c2 = clients()
     c2.mount(mount_ip(r2), t2, "3")
     e_manual = {"values": limits("l2", "ul"), "tc": tc_state(fsid_of(r2)),
-                "write": quick(c2, "/m/f", 20, mibps * SECONDS)}  # 스냅샷에 있는 f (150 MiB)
+                "write": measure(c2, "write", "/m/f", 20)}  # 스냅샷에 있는 f(150 MiB)를 늘리는 첫 회는 버린다
     _, _, seen3, r3 = restore_volume("l3", t3, snap["id"], pool="ula")
     e_auto = {"values": limits("l3", "ula"), "tc": tc_state(fsid_of(r3))}
     note("AC-07", step="e restore", manual=e_manual, auto=e_auto)
@@ -411,7 +426,7 @@ def test_ac09_auto_to_manual_keeps_the_limit(agent, api, clients):
     assert p.status == 202, p.raw
     final_p, seen_p = poll(p.headers["azure-asyncoperation"], 60)
     changed = {"values": limits("x40", "ux"), "tc": tc_state(fsid_of(big)),
-               "write": quick(c, "/m/f", 20, round(5.0 * SECONDS))}  # 앞의 측정이 만든 f (75 MiB)
+               "write": measure(c, "write", "/m/f", 20)}  # 앞의 측정이 만든 f(75 MiB)를 늘리는 첫 회는 버린다
     note("AC-09", before=before, write_before=w_before, pool_patch=r.json()["properties"], seen=seen,
          final=final["status"], after=after, write_after=w_after, volume_patch_seen=seen_p,
          volume_patch_final=final_p["status"], changed=changed)

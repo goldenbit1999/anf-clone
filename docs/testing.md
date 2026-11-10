@@ -126,7 +126,8 @@ sudo로 돌린다 (FR-11, 스파이크 S3, 설계 `_workspace/ci/02_main_design_
   `--ignore=`로 뺀 나머지 전부다. 조각마다 자기 VM에서 준비부터 하고, 한 조각이 실패해도 다른 조각은 끝까지 돈다.
   `rest`는 파일을 나열하지 않으므로 새 데이터 플레인 테스트 파일이 저절로 들어간다.
 - **판정**: 실행기의 종료 코드 하나다(위 표). 조각마다 75분이 넘으면 멈춘 것으로 본다.
-- **산출물**: 조각마다 실행기 출력 폴더와 `dmesg.txt`가 artifact `dataplane-<조각>-<시도 번호>`로 14일 남는다.
+- **산출물**: 조각마다 실행기 출력 폴더와 커널 로그가 artifact `dataplane-<조각>-<시도 번호>`로 14일 남는다.
+  `dmesg.txt`는 링 버퍼라 긴 조각에서는 앞부분이 빠지고, `kernel-journal.txt`(`journalctl -k -b`)는 부팅부터 남는다.
 - **러너**: 모듈과 패키지가 이미 있어 설치 단계가 없다(S3). 커널은 WSL과 다르다(러너 7.0 azure, WSL 6.18). `/`가
   systemd 기본값대로 shared라, agent는 ns 바인드를 private로 떼어 낸 뒤 rshared로 만든다. 그러지 않으면 ns 바인드가
   `/`의 peer group에 들어가 ns 아래 마운트가 호스트 마운트 표에 두 번 나온다(S3 Q7). 작업 로그의 "Runner info"와
@@ -161,7 +162,7 @@ PRD §6.1 FR-01~FR-08의 수락 기준 문장마다 그것을 확인하는 테�
 | FR-07 | 새 볼륨이 스냅샷 시점의 내용을 갖는다. | `backend/tests/e2e/test_restore_new_volume_data_live.py::test_ac02_ac03_ac04a_content_and_independence[AC-02-NFSv3-3-None]`<br>`backend/tests/e2e/test_restore_new_volume_data_live.py::test_ac02_ac03_ac04a_content_and_independence[AC-04a-NFSv4.1-4.1-0755]`<br>`backend/tests/integration/test_flexvol_linux.py::test_volume_from_snapshot_has_its_content_and_is_independent[nfs3]` | `S2`로 만든 새 볼륨을 마운트한 클라이언트가 보는 트리가 `S2`와 같다(지운 `A`가 있고 덮어쓴 `K`는 `S2` 내용). `S2` 뒤에 만든 파일은 없고, `.snapshot`에는 base 스냅샷 `S2`만 있다 |
 | FR-07 | 새 볼륨에 써도 원본 볼륨과 스냅샷은 바뀌지 않는다. | `backend/tests/e2e/test_restore_new_volume_data_live.py::test_ac02_ac03_ac04a_content_and_independence[AC-02-NFSv3-3-None]`<br>`backend/tests/e2e/test_restore_new_volume_data_live.py::test_ac06_new_volume_survives_source_revert_delete_and_agent_restart` | 새 볼륨에 쓴 뒤 원본의 트리, 원본 클라이언트가 보는 `S2`, 새 볼륨의 base 스냅샷이 그대로다. 반대로 원본에 써도 새 볼륨은 그대로다. 원본을 되돌리고, 원본 스냅샷과 원본을 지우고, agent를 다시 띄워도 새 볼륨의 클라이언트는 읽고 쓴다 |
 | FR-08 | 클라이언트에서 잰 처리량이 제한 이하다(허용 오차는 설계 단계에서 정한다). | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac01b_auto_volume_data`<br>`backend/tests/e2e/test_throughput_limit_data_live.py::test_ac02_ac03_manual_volume_data_and_shared_read_write` | 클라이언트 컨테이너의 `fio --direct=1` 순차 쓰기·읽기를 6회 돌려 첫 회를 버린 5회의 중앙값이 한도의 90~101%다(처리량 설계 결정 15). Auto(Ultra 40 GiB = 5 MiB/s)와 Manual(10·20 MiB/s) 모두, 같은 볼륨의 읽기와 쓰기를 함께 돌리면 그 합이 한도 안이다 |
-| FR-08 | 제한을 바꾸면 잰 값도 바뀐다. | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac04_limit_changes_during_io` | I/O를 멈추지 않고 PATCH로 10 → 30 → 5 MiB/s, 다시 PUT으로 10 MiB/s로 바꾸면 2 s 창마다 잰 값이 새 한도의 90~101%로 따라간다. fio 오류 0, 다시 마운트 없음 |
+| FR-08 | 제한을 바꾸면 잰 값도 바뀐다. | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac04_limit_changes_during_io` | I/O를 멈추지 않고 PATCH로 10 → 30 → 5 MiB/s, 다시 PUT으로 10 MiB/s로 바꾼다. 매번 `Succeeded` 뒤 2 s의 1초 창이 모두 새 한도의 101% 이하이고(올렸을 때는 첫 창이 이미 옛 한도의 101%를 넘는다), 1~5 s 창의 중앙값이 새 한도의 90~101%다. fio 오류 0, 다시 마운트 없음 |
 | FR-08 | 제한이 없는 볼륨과의 차이가 측정으로 드러난다. | `backend/tests/e2e/test_throughput_limit_data_live.py::test_ac05_unlimited_volume_next_to_a_limited_one`<br>`backend/tests/integration/test_flexvol_linux.py::test_volume_without_a_limit_has_no_tc` | 같은 클라이언트가 10 MiB/s 볼륨 A와 4,500 MiB/s(Manual 최대) 볼륨 B를 함께 읽으면 B가 A의 10배 이상이고, A는 혼자 읽을 때와 같은 범위다. ARM 볼륨에는 한도가 없는 경우가 없어서(Auto는 할당량으로, Manual은 필수 값으로 정해진다) 4,500 MiB/s를 쓴다. 한도 없이 만든 agent 볼륨에는 tc가 걸리지 않는다(통합) |
 | FR-09 | 생성 중인 리소스가 완료 상태로 바뀌는 과정이 새로 고침 없이 보인다. | 프론트엔드 `frontend/src/useResourceTree.test.tsx`("loads at once, then again every 2 s without a page reload")와 브라우저 검증(`_workspace/dashboard/04_verifier_report.md`) | pytest 대상이 아니다. 대시보드 사이클에서 같은 탭이 새로 고침 없이 `Creating` → `Succeeded`를 보였다 |
 

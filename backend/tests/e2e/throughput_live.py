@@ -264,12 +264,5 @@ def measure_mixed(c, read_path: str, write_path: str, mibps: float) -> dict:
     return {"limit": mibps, "runs": runs, "median": round(median, 3), "ratio": round(median / mibps, 4)}
 
 
-def quick(c, path: str, mibps: float, size_mib: int, seconds: int = SECONDS) -> dict:
-    """측정 한 번: 이미 있는 파일(size_mib)에 시간 기반 쓰기. 파일을 늘리지 않는다."""
-    r = fio(c, "write", path, size_mib, runtime=seconds)
-    assert r["error"] == 0, r
-    return {"limit": mibps, "write": r["write"], "ratio": round(r["write"] / mibps, 4)}
-
-
 def within(ratio: float) -> bool:
     return LOW <= ratio <= HIGH
