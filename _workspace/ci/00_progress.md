@@ -39,3 +39,28 @@
 - 2026-11-07 단계 4 2회차 시작 — 사용자 요청으로 main 대상 PR #6을 열었다(head `3fd6511`). `pull_request` run 42446223916이 success로 끝났다. 같은 verifier(a3e582af3fd57d42c)에 AC-01b만 재판정을 맡겼다.
 - 2026-11-07 단계 4 2회차 완료 — PASS 1 / FAIL 0 / UNVERIFIED 0 (`04_verifier_report_r2.md`). 체크아웃 ref `refs/pull/6/merge`(merge 커밋 `86b20aa`, 트리 `c26d3131…`가 `3fd6511`과 같음), 342 passed / skip 0, 훅 25 passed, `gh pr checks 6`에 push·PR 두 체크가 모두 통과로 표시. 1·2회차 합계 8/8 PASS. 개념 문서의 AC-01b 서술을 갱신했다. 관찰: main이 앞서 나간 뒤 PR이 다시 돌면 새 merge 커밋이 검증 대상이 된다.
 - 2026-11-07 단계 6 완료 — 상태 `partial`(위 상태 줄의 이유). `docs/feature-status.md` 갱신.
+
+## 2부: data-plane 작업 (2026-11-10~)
+
+- 상태: in_progress
+- 마지막 완료 단계: 2 (설계 `02_main_design_dataplane.md`)
+- 재개할 단계: 3 (구현, `feature-implementer`)
+- 브랜치: `feature/ci-dataplane` (`main` `7255e3e`에서)
+- 검증 대상 코드: (구현 뒤 기록. 제품 코드 해시가 `f99bc5cf…`에서 바뀐다)
+- implementer 에이전트 ID: aee96ed1b59426045 (스파이크 S3. worktree `.claude/worktrees/agent-aee96ed1b59426045`에서 일했다)
+- verifier 에이전트 ID:
+- 미해결: 없음
+
+| 기준 ID | 기준 | 최신 결과 | 근거 보고서 | 검증 대상 코드 |
+| --- | --- | --- | --- | --- |
+| AC-01 | PR에서 두 조각 success, 합 113 통과·skip 0 | | | |
+| AC-02 | ns 우회 단계 없이 `/`가 shared인 러너에서 통과 | | | |
+| AC-03 | 실패하면 조각 failure, artifact는 올라옴 | | | |
+| AC-04 | artifact | | | |
+| AC-05 | WSL에서 마운트 한 번, 클라이언트에서 보임 | | | |
+| AC-06 | WSL 전체 회귀 113 통과 | | | |
+| AC-07 | backend·frontend 통과 | | | |
+| AC-08 | 조각마다 50분 안 | | | |
+
+- 2026-11-10 스파이크 S3 조건부 통과 (`_workspace/spikes/S3.md`): Actions run 42783919456(부분 묶음 43 통과·2 실패), 42785777318(전체: private 113/0/0 4,378 s, as-is 105/8/0). 실패 8개는 전부 스냅샷 마운트 중복. 원격 브랜치 `spike/s3-runner`는 남아 있다(출하 때 지운다)
+- 2026-11-10 단계 2 완료 — 묻는 결정 없음, 결정 1~10 자동 채택 (ns 전파는 제품 수정, 회귀는 전체 묶음, 2개 조각 matrix, PR·main push 트리거)
