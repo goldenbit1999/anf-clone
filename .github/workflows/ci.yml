@@ -1,5 +1,5 @@
 # FR-11 CI: backend 작업 (설계 _workspace/ci/02_main_design.md).
-# frontend 작업은 대시보드(FR-09) 뒤, data-plane 작업은 스파이크 S3 뒤에 더한다 (ADR §9.3).
+# frontend 작업은 대시보드(FR-09)에서 더했다. data-plane 작업은 스파이크 S3 뒤에 더한다 (ADR §9.3).
 name: ci
 
 on:
@@ -62,3 +62,31 @@ jobs:
 
       - name: Hook tests
         run: python -m pytest .claude/hooks/tests
+
+  # FR-09 대시보드 (설계 _workspace/dashboard/02_main_design.md §6). Python GREEN은 이 작업을 대신하지 않는다.
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"  # 개발 환경(Windows Node 22)과 같게 (설계 결정 10)
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

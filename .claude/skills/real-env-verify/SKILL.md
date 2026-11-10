@@ -19,6 +19,7 @@ description: ANF 클론에 구현한 기능이 WSL2·Docker 실환경에서 실�
 | WSL 배포판 | WSL에서 실행하는 모든 항목 | `wsl -l -v`에서 Ubuntu가 실행 중인지 확인한다 |
 | 커널 모듈 | 볼륨 이후의 데이터 플레인 기능 | 필요한 모듈(nfsd, btrfs 등)이 로드됐는지 `wsl -d Ubuntu -- lsmod`로 확인한다 |
 | Docker | 클라이언트 컨테이너로 마운트하는 항목 | Ubuntu 안 Docker Engine을 쓴다 (ADR D-10). `wsl -d Ubuntu -- docker version`이 서버 버전과 `Os=linux`를 돌려주고, `wsl -d Ubuntu -- readlink /usr/bin/docker`가 비어 있는지(Docker Desktop 연동 링크가 아닌지) 확인한다. 엔진이 멈춰 있으면 `wsl -d Ubuntu -u root -- systemctl start docker`로 띄운다. 그래도 안 되거나 Desktop 연동이 다시 켜져 있으면 리더에게 보고한다 |
+| 대시보드와 브라우저 | 대시보드 화면을 관찰하는 항목 | `frontend/`에서 `npm ci`가 끝나 있고, 대시보드 서버(`CLAUDE.md`의 명령)가 `http://127.0.0.1:5173`(dev) 또는 `4173`(preview)에서 `200`을 준다. Windows에서 `curl "http://127.0.0.1:8080/subscriptions/x/providers/Microsoft.NetApp/netAppAccounts?api-version=2026-08-01"`이 `200`이다(WSL의 anf-api가 Windows에 보이는지). 브라우저 도구(Claude in Chrome, `mcp__claude-in-chrome__*`)가 새 탭을 열고 페이지 글자를 읽을 수 있다. 브라우저 도구가 없으면 화면 항목은 UNVERIFIED다. 대신 curl로 API만 보고 PASS로 하지 않는다 |
 
 ## 1. 검증 항목 만들기
 
@@ -46,6 +47,7 @@ description: ANF 클론에 구현한 기능이 WSL2·Docker 실환경에서 실�
 | 처리량(QoS) | fio 같은 도구로 순차 쓰기·읽기를 여러 번 측정한다. | 측정값이 한도 이하다(허용 오차를 명시한다). 한도를 바꾸면 측정값도 바뀐다. |
 | export policy | 허용한 IP와 허용하지 않은 IP의 클라이언트에서 각각 마운트한다. | 허용한 쪽만 성공한다. |
 | 삭제 | 볼륨을 삭제한 뒤 마운트를 시도한다. | 마운트가 실패하고 저장 공간이 회수된다. |
+| 대시보드 화면 | 브라우저 탭을 한 번 열고, 그 뒤로는 이동도 새로 고침도 하지 않는다. API로 상태를 바꾸면서(결함 주입의 지연으로 진행 중 상태를 길게 만든다) 같은 탭의 글자를 시각과 함께 여러 번 읽는다. 같은 순간의 API GET 응답도 함께 남긴다. | 화면의 계층·이름·`provisioningState`가 API와 같고, 설계의 제한 시간 안에 바뀐 상태가 보인다. 탭을 다시 읽지 않았다는 근거(같은 탭 ID, `performance.getEntriesByType("navigation")`이 하나이고 `type`이 `navigate`)를 남긴다. |
 
 컨테이너 안에서 NFS를 마운트하려면 보통 `--privileged`나 `--cap-add SYS_ADMIN`이 필요하다.
 

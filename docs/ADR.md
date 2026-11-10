@@ -346,7 +346,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
   - 볼륨별 처리량은 볼륨 인스턴스 netns 안의 카운터에서 얻는다 (D-12, §7.3). 값이 다른 둘이 있다. 호스트에서 `/proc/<인스턴스 pid>/net/dev`로 읽는 `ifb0` 송신 바이트는 skb 길이라 데이터 바이트에 가깝다(0.5% 안팎 크다). `nsenter … tc -s class show dev ifb0`의 HTB Sent 바이트는 GSO 묶음을 세그먼트마다 헤더를 더해 센 wire 바이트이고, 한도가 이 값에 걸린다. `ifb0` 송신보다 4.2~4.4% 크다 (S7, FR-08 e2e). 어느 값을 메트릭으로 할지는 FR-12에서 정한다.
   - 메트릭 이름을 ANF의 Azure Monitor 메트릭과 어떻게 대응시킬지는 FR-12 조사에서 정한다.
 - **로그.** JSON 구조 로그를 쓴다. ARM 관례인 `x-ms-request-id`, `x-ms-correlation-request-id` 헤더를 받거나 새로 만든다. 그 값을 워커와 storage agent 호출까지 넘긴다.
-- **대시보드.** 리소스는 anf-api에서, 시계열은 Prometheus 쿼리 API에서 읽는다 (D-08).
+- **대시보드.** 리소스는 anf-api에서, 시계열은 Prometheus 쿼리 API에서 읽는다 (D-08). 리소스는 목록 GET을 2초마다 다시 읽고, 브라우저는 Vite 프록시를 거쳐 anf-api를 부른다(anf-api에 CORS를 두지 않는다). 읽기 전용이다 (FR-09, `_workspace/dashboard/02_main_design.md`). 차트는 FR-12에서 더한다.
 
 ## 9. 테스트와 CI
 
@@ -375,7 +375,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | 작업 | 트리거 | 내용 |
 | --- | --- | --- |
 | backend | push, PR | 린트(ruff 0.14.0 기본 규칙), 단위·계약 테스트, 컨트롤 플레인 라이브 API e2e(테스트가 uvicorn을 직접 띄움, root 불필요), TDD 훅 테스트(`python -m pytest .claude/hooks/tests`). `dataplane` 마커 테스트는 선택에서 뺀다. skip이 하나라도 있으면 실패한다. `ubuntu-24.04`, Python 3.12. 구현: `.github/workflows/ci.yml`, 설계: `_workspace/ci/02_main_design.md` |
-| frontend | push, PR | 타입 검사, 빌드, 단위 테스트 |
+| frontend | push, PR | `frontend/`에서 `npm ci`, 타입 검사(`tsc --noEmit`), 단위 테스트(Vitest), 빌드. `ubuntu-24.04`, Node 22. 설계: `_workspace/dashboard/02_main_design.md` |
 | data-plane | S3 통과 뒤 추가 | ubuntu 러너에서 모듈을 로드하고 storage agent를 띄운 뒤 통합·E2E 테스트 |
 
 ## 10. 위험과 스파이크
