@@ -342,7 +342,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 
 - **메트릭 (Prometheus 형식).**
   - anf-api: 요청 수와 지연 시간(경로 템플릿, 메서드, 상태 코드별), 작업 수와 소요 시간(종류, 결과별), 진행 중 작업 수
-  - storage agent: 볼륨 사용량(파일시스템에서 읽은 실제 값), 스냅샷 수, 볼륨별 처리량과 IOPS, knfsd 전체 통계(`/proc/net/rpc/nfsd`)
+  - storage agent: 볼륨 사용량(파일시스템에서 읽은 실제 값), 스냅샷 수, 볼륨별 처리량과 IOPS(인스턴스 netns의 `/proc/net/rpc/nfsd`. 모든 netns의 합인 `proc3`·`proc4` 줄은 내지 않는다), aggregate(thin 풀) 사용량
   - 볼륨별 처리량은 볼륨 인스턴스 netns 안의 카운터에서 얻는다 (D-12, §7.3). 값이 다른 둘이 있다. 호스트에서 `/proc/<인스턴스 pid>/net/dev`로 읽는 `ifb0` 송신 바이트는 skb 길이라 데이터 바이트에 가깝다(0.5% 안팎 크다). `nsenter … tc -s class show dev ifb0`의 HTB Sent 바이트는 GSO 묶음을 세그먼트마다 헤더를 더해 센 wire 바이트이고, 한도가 이 값에 걸린다. `ifb0` 송신보다 4.2~4.4% 크다 (S7, FR-08 e2e). **FR-12에서 정했다(S8)**: 볼륨별 처리량 메트릭은 이 둘이 아니라 인스턴스 netns의 knfsd `io` 줄(`/proc/<인스턴스 pid>/net/rpc/nfsd`)이다. 데이터 바이트이고 읽기·쓰기가 나뉘며 fio가 보고한 바이트와 같다. `ifb0`·HTB 값은 읽기·쓰기의 합이라 메트릭으로 쓰지 않는다. IOPS 합계는 같은 파일의 `rpc` 줄, 읽기·쓰기 연산 수는 `proc4ops`(NFSv4.1 볼륨만. `proc3`는 모든 netns의 합이다)에서 얻는다.
   - 메트릭 이름은 Prometheus 관례(`anf_*`, 기본 단위, 누적은 `_total`)를 따르고 Azure Monitor REST 이름과의 대응은 표로 남긴다(`_workspace/metrics/02_main_design.md` §2, `docs/concepts/metrics.md`). 원시 카운터를 내고 `rate()`로 초당 값을 만든다. 값은 스크레이프 때 읽는다.
   - Prometheus는 컨테이너(`prom/prometheus:v3.15.1`, host 네트워크, `127.0.0.1:9090`, 5 s 수집)로 띄운다(`scripts/run-prometheus.sh`). 지연과 한도 도달 메트릭은 내지 않는다(knfsd에 지연 카운터가 없고, HTB `overlimits`는 부하와 무관하게 는다).

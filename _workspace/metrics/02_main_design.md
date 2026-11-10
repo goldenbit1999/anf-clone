@@ -89,6 +89,7 @@ storage agent ───────┘  statvfs(ns/<token>), LVM 태그, dmsetup
 | 8 | 수집 시점 | 스크레이프 때 읽는다. 인스턴스 pid는 Docker API 소켓으로(1.7 ms), 풀은 `dmsetup status`(5.6 ms) | 백그라운드 주기 수집(상태·스레드가 늘어남), `docker inspect` CLI(호출마다 150 ms), `lvs` 백분율(소수 둘째 자리) |
 | 9 | 볼륨 식별 라벨 | `volume_uuid`, `creation_token`, `protocol`. ARM 이름은 붙이지 않고 대시보드가 `creationToken`으로 잇는다 | anf-api가 info 메트릭으로 ARM 이름 매핑을 냄(이번 차트에는 필요 없음), agent가 ARM ID를 앎(agent는 ONTAP 쪽 계층이라 ARM을 모른다) |
 | 10 | 라이브러리 | `prometheus_client`(anf-api의 counter·histogram, agent의 사용자 정의 collector) | 텍스트 형식을 직접 씀(히스토그램·이스케이프를 다시 만들게 됨) |
+| 10a | 내보내는 형식 | Prometheus `/metrics` | agent가 ONTAP REST의 `metric.*`·`statistics.*_raw` 필드로 내고(D-06의 ONTAP 부분집합) anf-api가 변환(수집 경로가 하나 더 늘고 D-08의 Prometheus가 직접 긁을 수 없다. NetApp Harvest도 ONTAP 값을 Prometheus로 바꿔 낸다) |
 | 11 | Prometheus 운영 | 컨테이너 + 저장소의 설정 파일 + 스크립트 하나, 5 s 수집, 데이터는 버림 | WSL에 패키지 설치(기기 설정 변경), 이름 있는 볼륨에 보존(데모에 필요 없음) |
 | 12 | 차트 | 의존성 없는 SVG, `rate(...[20s])`, 최근 5분 | 차트 라이브러리(캔버스 기반은 jsdom 테스트가 어렵고 의존성이 늘어남), `irate`(더 빠르지만 들쭉날쭉) |
 | 13 | ANF와의 시간 단위 차이 | 클론은 5 s 수집·20 s 창. ANF는 최소 5분 평균. 같은 값은 `rate(...[5m])`로 얻는다고 문서에 적는다 | 5분 창을 기본으로(부하가 그래프에 나타나기까지 분 단위가 걸림) |
