@@ -137,9 +137,10 @@ storage agent가 ARM 개념을 모르게 하는 이유: 실제 ONTAP도 ARM을 �
   - agent는 이 루트 아래의 경로만 쓴다. 볼륨 경로는 `creationToken` 패턴으로 다시 검사한다.
   - 호스트 knfsd에는 export를 두지 않는다. export는 볼륨 인스턴스 안에만 있다 (§7.4, D-12).
 - **바인딩.** 서비스는 localhost에만 바인딩한다. 예외는 NFS다. 볼륨 인스턴스가 `anf-vnet`의 자기 IP에서 요청을 받는다.
-- **root 작업.** root로 도는 것은 storage agent뿐이다. 커널 명령은 셸을 거치지 않고 인자 목록으로 실행한다. 리소스 이름은 anf-api가 ARM 이름 규칙으로 먼저 검증한다(예: 계정 이름 `^[a-zA-Z0-9][a-zA-Z0-9\-_]{0,127}$`, 계정 브리프). agent도 스토리지 루트 아래의 경로만 받는다.
+- **root 작업.** root로 도는 것은 storage agent뿐이다(compose 스택에서는 한 번 돌고 끝나는 `init` 서비스도 호스트 root로 준비 스크립트를 돌린다). 커널 명령은 셸을 거치지 않고 인자 목록으로 실행한다. 리소스 이름은 anf-api가 ARM 이름 규칙으로 먼저 검증한다(예: 계정 이름 `^[a-zA-Z0-9][a-zA-Z0-9\-_]{0,127}$`, 계정 브리프). agent도 스토리지 루트 아래의 경로만 받는다.
 - **네트워크.** 클라이언트 컨테이너와 볼륨 인스턴스는 사용자 정의 Docker 네트워크 `anf-vnet`(172.30.0.0/24)에 붙는다. 클라이언트는 `--ip-range 172.30.0.0/25`에서 동적으로 IP를 받고, 볼륨 인스턴스는 agent가 172.30.0.128/25에서 고른 고정 IP를 받는다. 그 IP가 볼륨의 마운트 대상 IP다 (볼륨 설계 결정 18). Docker Engine은 S0 결과에 따라 Ubuntu 안에 둔다 (D-10). 그래야 브리지가 Ubuntu 네트워크에 있고 서버가 컨테이너마다 다른 IP를 본다.
-- **메모리.** 컨트롤 플레인과 agent, Prometheus, 클라이언트 컨테이너 몇 개면 WSL 7GB 안에 충분히 들어갈 것으로 본다 [추론]. 실제 사용량은 FR-13 때 재고, Kubernetes를 띄우는 FR-14 때 다시 잰다.
+- **메모리.** 컨트롤 플레인과 agent, Prometheus, 클라이언트 컨테이너 몇 개면 WSL 7GB 안에 충분히 들어갈 것으로 본다 [추론]. 실제 사용량은 FR-13에서 쟀다: compose 스택 전체와 볼륨 3개, 클라이언트 2개로 데모를 도는 동안 used가 최대 1,095 MiB였다(agent 96, anf-api 60, Prometheus 38, 대시보드 12 MiB). Kubernetes를 띄우는 FR-14 때 다시 잰다.
+- **컨테이너 배치 (FR-13, S9).** 위 구성요소를 `deploy/compose.yaml` 하나로 띄운다(`docker compose -f deploy/compose.yaml up -d --build --wait`). 모두 host 네트워크에 localhost 바인딩이다. 한 번 도는 특권 `init` 서비스가 호스트 준비(`scripts/setup-wsl-dataplane.sh`, `ns`의 rshared 바인드)를 해서 sudo가 필요 없다. storage agent는 특권 컨테이너로 돌고 `pid: host`, 재귀하지 않는 `/var/lib/anf-clone` 바인드, `ns`의 rshared 바인드, `/run/lock/lvm`, `/run/udev:ro` + `ipc: host`, `/dev`, `/lib/modules`, Docker 소켓이 모두 있어야 한다(하나씩 빠질 때의 실패는 S9). anf-api는 일반 사용자로 돌고 SQLite를 이름 있는 볼륨에 둔다. 대시보드는 nginx가 빌드 결과를 내면서 anf-api와 Prometheus를 프록시한다(8081). 볼륨 인스턴스와 `anf-vnet`은 compose 밖에 있어 `down` 뒤에도 데이터 서비스가 계속되고 다음 `up`에서 agent가 복구한다. 설계: `_workspace/containers/02_main_design.md`.
 
 ## 6. 컨트롤 플레인
 
@@ -396,6 +397,7 @@ S2(`_workspace/spikes/S2.md`)에서 정했다. 판정 기준은 ANF 문서의 �
 | S6 | 볼륨 인스턴스 구조에서 스냅샷으로 새 볼륨 만들기 (FR-07): 읽기 전용 스냅샷 LV의 쓰기 가능 스냅샷, ext4 UUID 중복, `.snapshot`에 남은 원본의 마운트 지점, 원본보다 큰 크기, 다른 프로토콜, 원본 스냅샷·볼륨 삭제와 되돌리기 뒤의 독립성, base 스냅샷 | 새 볼륨 복원 설계 전 (`_workspace/spikes/S6.md`) | — |
 | S7 | agent 볼륨 인스턴스(`anf-nfs-<uuid>`)에서 처리량 제한 (FR-08): S2 T1n(veth clsact → IFB → HTB)을 실제 인스턴스에 걸 때의 veth 찾기, v3·v4.1 정확도, 실시간 변경, 작은 볼륨의 낮은 한도(0.0625~3.125 MiB/s)에서 NFS 동작, 인스턴스 재시작·되돌리기 창·복구와 tc 수명, 헤더 보정. **조건부 통과 (2026-11-09, `_workspace/spikes/S7.md`)**: 실제 인스턴스에서 v3·v4.1 모두 설정의 92~95%(보정하면 98~99%, 모든 회 한도 이하), 읽기+쓰기 합산, 1초 안의 실시간 변경, 볼륨 독립, 되돌리기 창과 공존. 인스턴스가 다시 뜰 때마다 tc를 다시 걸어야 한다. 0.0625 MiB/s에서도 오류는 없지만 같은 연결의 메타데이터가 1분을 넘는다. tc를 인스턴스 netns 안에 두는 변형도 같은 결과였다 | 처리량 설계 전 (`_workspace/spikes/S7.md`) | — |
 | S8 | 메트릭의 Linux 출처 (FR-12): knfsd 통계가 netns(볼륨)별로 나뉘는가, 처리량 출처 비교, IOPS, 한도 도달 신호, 사용량, 수집 비용, Prometheus 컨테이너. **조건부 통과 (2026-11-10, `_workspace/spikes/S8.md`)**: `/proc/<pid>/net/rpc/nfsd`의 `io`·`rpc`·`proc4ops`는 netns별이고 `io`는 fio 바이트와 같다. 조건: `proc3`·`proc4`는 모든 netns의 합이라 v3 볼륨의 읽기·쓰기 연산 수는 볼륨별로 얻지 못한다. HTB `overlimits`는 절반 부하에서도 늘어 한도 도달 신호가 못 된다. `docker inspect` CLI는 호출마다 약 150 ms라 Docker API 소켓을 쓴다. 인스턴스가 다시 뜨면 카운터가 0부터 시작한다 | 메트릭 설계 전 (`_workspace/spikes/S8.md`) | — |
+| S9 | 구성요소를 컨테이너로 (FR-13): compose가 있는가, storage agent를 컨테이너로 돌릴 때의 최소 설정, anf-api·대시보드 컨테이너, 한 번에 띄우기, 메모리, 데모 대본 시간. **조건부 통과 (2026-11-10, `_workspace/spikes/S9.md`)**: 전부 컨테이너로 떠서 데모 1~6단계가 62 s, sudo 없이 돌았다. 조건: 이 기기에 compose가 없었다(사용자 결정으로 `docker-compose-v2`·`docker-buildx` 설치). agent 컨테이너는 `pid: host`, 재귀하지 않는 바인드, `ns` rshared 바인드, `/run/lock/lvm`이 모두 필요하다. udev는 구현 중 `/run/udev:ro` + `ipc: host`로 정했다(없으면 `lvcreate` 직후 mount가 경합하고, `/run/udev`만 붙이면 `lvcreate`가 4분 넘게 멈춘다) | 컨테이너 설계 전 (`_workspace/spikes/S9.md`) | — |
 
 ### 위험
 

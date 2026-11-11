@@ -22,8 +22,8 @@ SETUP_HINT="run scripts/setup-wsl-dataplane.sh as root"
 
 precheck_failed() { echo "precheck failed: $*" >&2; exit 2; }
 uptime_s() { cut -d' ' -f1 /proc/uptime; }  # 단조 시계. WSL 벽시계는 뒤로 건너뛴다 (ADR §7.3)
-# anf-api, storage agent, Prometheus (메트릭 e2e가 띄우는 anf-prometheus 컨테이너, FR-12)
-listeners() { ss -Hltnp '( sport = :8080 or sport = :8090 or sport = :9090 )' | awk '{print $4, $6}'; }
+# anf-api, storage agent, Prometheus (메트릭 e2e가 띄우는 anf-prometheus 컨테이너, FR-12), compose 스택의 대시보드 (FR-13)
+listeners() { ss -Hltnp '( sport = :8080 or sport = :8081 or sport = :8090 or sport = :9090 )' | awk '{print $4, $6}'; }
 lv_names() { lvs --noheadings -o lv_name anf 2>/dev/null | awk '$1 != "aggr0" {print $1}' | LC_ALL=C sort; }
 containers() { docker ps -a --format '{{.Names}}' | LC_ALL=C sort; }
 
@@ -49,7 +49,8 @@ grep -q '^nfsd ' /proc/modules || precheck_failed "kernel module nfsd is not loa
 [ "$(sysctl -n fs.leases-enable)" = 0 ] ||
   precheck_failed "fs.leases-enable is not 0 (NFSv4 delegations are on): $SETUP_HINT"
 busy="$(listeners)"
-[ -z "$busy" ] || precheck_failed "port 8080, 8090, or 9090 is in use, maybe by another session's data plane:" $busy
+[ -z "$busy" ] || precheck_failed "port 8080, 8081, 8090, or 9090 is in use, maybe by the compose stack" \
+  "(stop it: docker compose -f deploy/compose.yaml down) or by another session's data plane:" $busy
 
 # --- 2. VG 붙이기 (결정 8) ---
 # WSL이 다시 뜨면 loop 장치가 사라져 VG anf가 보이지 않는다. agent가 시작할 때 부르는 같은 함수로 붙인다

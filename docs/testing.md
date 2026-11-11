@@ -7,15 +7,15 @@ ANF 클론의 테스트 층, 실행 명령, 그리고 PRD §6.1 수락 기준마
 
 | 층 | 위치 | 마커 | 확인하는 것 | 필요 조건 |
 | --- | --- | --- | --- | --- |
-| 단위 | `backend/tests/unit` (17개 파일) | 없음 | 본문 규칙, 상태 전이, 용량·처리량 계산, agent의 명령 순서, 메트릭 수집(knfsd 통계 읽기, 볼륨별 실패 격리). 커널 명령은 가짜 실행기로 바꾼다 | 없음 |
+| 단위 | `backend/tests/unit` (19개 파일) | 없음 | 본문 규칙, 상태 전이, 용량·처리량 계산, agent의 명령 순서, 메트릭 수집(knfsd 통계 읽기, 볼륨별 실패 격리), compose 파일의 agent 조건, 데모 스크립트의 판정과 종료 코드. 커널 명령은 가짜 실행기로 바꾼다 | 없음 |
 | API 계약 | `backend/tests/contract` (6개) | 없음 | ARM 경로, 응답 코드, 헤더, LRO 흐름. FastAPI TestClient와 가짜 storage agent | 없음 |
 | 컨트롤 플레인 e2e | `backend/tests/e2e/test_netapp_account_*`, `test_capacity_pool_*` (4개) | `e2e` | 실제 uvicorn 프로세스에 HTTP로 계약, 상태 전이, 결함 주입, SIGKILL 재시작 | `ANF_E2E_API_URL` |
 | 통합 | `backend/tests/integration` (1개) | `integration`, `dataplane` | storage agent의 볼륨 관리자가 실제 LVM·ext4·knfsd 인스턴스·tc로 볼륨, 스냅샷, 되돌리기, 새 볼륨, 처리량 한도를 만들고 클라이언트 컨테이너가 마운트한다 | Linux, root, 데이터 플레인 준비 |
-| 데이터 플레인 e2e | `backend/tests/e2e/test_volume_*`, `test_snapshot_*`, `test_restore_*`, `test_throughput_*`, `test_metrics_*` (13개) | `e2e`, `dataplane` | anf-api(일반 사용자)와 agent(root)를 띄우고 ARM으로 만든 볼륨을 클라이언트 컨테이너가 마운트해 PRD 수락 기준의 데이터 효과를 본다. 메트릭 e2e는 Prometheus 컨테이너도 띄워 그 값을 클라이언트가 한 일과 맞춘다 | 위 조건과 `ANF_E2E_API_URL`. 메트릭 e2e는 이미지 `prom/prometheus`(없으면 Docker Hub에서 받는다)와 빈 포트 9090 |
+| 데이터 플레인 e2e | `backend/tests/e2e/test_volume_*`, `test_snapshot_*`, `test_restore_*`, `test_throughput_*`, `test_metrics_*`, `test_compose_*` (14개) | `e2e`, `dataplane` | anf-api(일반 사용자)와 agent(root)를 띄우고 ARM으로 만든 볼륨을 클라이언트 컨테이너가 마운트해 PRD 수락 기준의 데이터 효과를 본다. 메트릭 e2e는 Prometheus 컨테이너도 띄워 그 값을 클라이언트가 한 일과 맞춘다. compose e2e는 프로세스 대신 compose 스택(프로젝트 `anf-clone-e2e`)을 일반 사용자로 띄우고 `scripts/demo.py`를 돌린다 | 위 조건과 `ANF_E2E_API_URL`. 메트릭 e2e는 이미지 `prom/prometheus`(없으면 Docker Hub에서 받는다)와 빈 포트 9090. compose e2e는 `docker compose`·`docker buildx`와 빈 포트 8081, 바탕 이미지(없으면 받는다) |
 | 훅 | `.claude/hooks/tests` | 없음 | TDD 훅의 판정 | 없음 (기본 `testpaths` 밖) |
 | 프론트엔드 | `frontend/src/*.test.ts(x)` | — | 대시보드의 읽기, 2초 폴링, 렌더링, 메트릭 차트(Prometheus 범위 쿼리, 5초 폴링, SVG 선) (Vitest) | Node 22 (Windows) |
 
-`dataplane` 마커가 붙은 테스트는 119개다(통합 31, 데이터 플레인 e2e 88). 나머지 `python -m pytest`의 대상은 1,016개다.
+`dataplane` 마커가 붙은 테스트는 124개다(통합 31, 데이터 플레인 e2e 93). 나머지 `python -m pytest`의 대상은 1,051개다.
 
 ## 2. 어디서 무엇이 도는가
 
@@ -52,15 +52,16 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 ### 순서
 
 1. **사전 점검.** Linux, root, venv와 pytest, Docker Engine, 이미지 `anf-nfs-server`·`anf-nfs-client`, 네트워크
-   `anf-vnet`(172.30.0.0/24, ip-range /25), `nfsd` 모듈, `fs.leases-enable = 0`, 포트 8080·8090·9090이 비어 있음.
-   하나라도 빠지면 원인 한 줄을 쓰고 테스트를 돌리지 않는다(종료 코드 2). 포트가 차 있으면 다른 세션이 데이터 플레인을
-   쓰고 있을 수 있으므로 건드리지 않는다.
+   `anf-vnet`(172.30.0.0/24, ip-range /25), `nfsd` 모듈, `fs.leases-enable = 0`, 포트 8080·8081·8090·9090이 비어 있음.
+   하나라도 빠지면 원인 한 줄을 쓰고 테스트를 돌리지 않는다(종료 코드 2). 포트가 차 있으면 compose 스택이 떠 있거나
+   다른 세션이 데이터 플레인을 쓰고 있을 수 있으므로 건드리지 않는다. 스택은 테스트 전에 내린다
+   (`docker compose -f deploy/compose.yaml down`).
 2. **VG `anf` 붙이기.** WSL이 다시 뜨면 loop 장치가 사라져 VG가 보이지 않고, 그대로 두면 모든 e2e가 setup 오류다.
    붙어 있지 않으면 agent가 시작할 때 부르는 `FlexVolManager.ensure_aggregate()`를 그대로 불러 붙인다.
 3. **기준선.** 실행 전의 LV와 컨테이너를 `baseline.txt`에 남긴다.
 4. **파일마다 pytest 한 번.** 그 전에 `sync`와 `echo 3 > /proc/sys/vm/drop_caches`로 page cache를 비운다. 한 프로세스로
    이어 돌리면 page cache가 6.8 GB까지 차서 호스트가 실행기를 죽인 적이 있다(FR-08). 실패한 파일이 있어도 끝까지 돈다.
-5. **남은 것 검사.** 기준선에 없던 LV, 컨테이너, 8080·8090·9090 리스너를 출력하고 실패로 센다. 지우지는 않는다(정리 결함의
+5. **남은 것 검사.** 기준선에 없던 LV, 컨테이너, 8080·8081·8090·9090 리스너를 출력하고 실패로 센다. 지우지는 않는다(정리 결함의
    단서다). 실행 전에 있던 볼륨의 인스턴스(`anf-nfs-<uuid>`)는 시작 복구가 다시 띄운 것이라 세지 않는다. 메트릭 e2e가
    띄운 Prometheus 컨테이너 `anf-prometheus`가 남으면 컨테이너와 9090 리스너로 잡힌다.
 6. **판정.** `junit_gate.py`가 파일별·합계 표(수집, 통과, 실패, 오류, skip, 초)를 출력한다.
@@ -116,7 +117,8 @@ scripts/run-dataplane-tests.sh [경로·pytest 옵션...]
 | `e2e/test_volume_data_live.py` | 7 | 214 |
 | `e2e/test_volume_recovery_live.py` | 7 | 161 |
 
-그 뒤에 더한 `e2e/test_metrics_data_live.py`(FR-12)는 단독 실행으로 5개 343초다(2026-11-10). 전체 실행은 14개 파일, 약 94분이 된다.
+그 뒤에 더한 `e2e/test_metrics_data_live.py`(FR-12)는 단독 실행으로 5개 343초다(2026-11-10). `e2e/test_compose_stack_live.py`(FR-13)는
+이미지가 있을 때 단독 실행으로 5개 252초다(2026-11-10. 이미지가 없으면 처음 빌드가 더해진다). 전체 실행은 15개 파일, 약 98분이 된다.
 
 처리량 데이터 파일이 전체의 43%다. 한도가 걸린 채로 데이터를 실제로 흘려 재는 시험이라 줄일 수 없다. 이렇게 긴 실행은 도구 호출 하나에 붙여 두지 말고 WSL 안에서 분리해 띄운다(`setsid nohup bash scripts/run-dataplane-tests.sh > <로그> 2>&1 &`). Windows 호스트의 메모리가 부족해지면 붙어 있던 명령이 강제 종료되고, 그때 돌던 테스트의 볼륨과 컨테이너가 남는다.
 
@@ -139,7 +141,7 @@ sudo로 돌린다 (FR-11, 스파이크 S3, 설계 `_workspace/ci/02_main_design_
 
 ## 4. 수락 기준과 테스트
 
-PRD §6.1 FR-01~FR-09와 FR-12의 수락 기준 문장마다 그것을 확인하는 테스트다. node ID는 저장소 루트 기준이고,
+PRD §6.1 FR-01~FR-09, FR-12, FR-13의 수락 기준 문장과 §9의 데모 대본 기준마다 그것을 확인하는 테스트다. node ID는 저장소 루트 기준이고,
 `backend/tests/unit/test_testing_doc.py`가 모두 수집되는지 확인한다. 데이터 플레인 테스트(`dataplane` 마커)는
 §3의 실행기로, 나머지는 §2의 WSL 일반 사용자 명령으로 돈다. 판정 근거는 각 테스트의 단언과 `.jsonl`의 `evidence` 기록이다.
 
@@ -172,11 +174,13 @@ PRD §6.1 FR-01~FR-09와 FR-12의 수락 기준 문장마다 그것을 확인하
 | FR-12 | Prometheus에서 조회할 수 있다. | `backend/tests/e2e/test_metrics_data_live.py::test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac03_ac04_ac05_usage_throughput_and_iops_per_volume`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac09_series_across_instance_restart_and_volume_delete`<br>`backend/tests/e2e/test_metrics_data_live.py::test_ac10_snapshot_overwrite_grows_the_aggregate_not_the_volume`<br>`backend/tests/contract/test_arm_app.py::test_ac01_requests_are_counted_by_route_template`<br>`backend/tests/contract/test_arm_app.py::test_ac02_operation_is_counted_when_it_finishes` | `scripts/run-prometheus.sh` 뒤 두 대상(anf-api, storage-agent)이 `up == 1`이고, 범위 쿼리가 볼륨의 계열 하나를 돌려준다. 값은 클라이언트가 한 일과 맞는다: 256 MiB를 쓰면 used가 그만큼 늘고 `df`와 1% 안이며, 바이트 카운터가 fio 바이트와 1% 안(다른 볼륨은 0), v4.1 READ 연산 수가 fio 연산 수와 2% 안이다. 인스턴스를 다시 띄워도 계열이 이어지고(`rate` ≥ 0) 볼륨을 지우면 사라지며, 스냅샷 뒤 덮어쓰면 aggregate만 는다. anf-api는 요청을 경로 템플릿별로, 비동기 작업을 끝날 때 한 번 센다(계약) |
 | FR-12 | 대시보드가 차트로 보여 준다. | 프론트엔드 `frontend/src/MetricsPanels.test.tsx`, `LineChart.test.tsx`, `App.test.tsx`("choosing a volume opens its metrics panel, which closes when the volume leaves the tree")와 브라우저 검증(메트릭 검증 보고서 AC-08) | pytest 대상이 아니다. 성공한 볼륨의 이름을 누르면 처리량(MiB/s, 한도는 점선), IOPS(요청 수, v4.1이면 읽기·쓰기 연산 수), 사용량(GiB) 차트가 열리고, 아래에 anf-api의 상태 코드별 요청률과 진행 중 작업 수 차트가 있다. Prometheus를 읽지 못하면 차트 자리에 오류를 보이고 트리는 계속 갱신된다 |
 | FR-12 | 클라이언트에서 부하를 걸면 그래프에 나타난다. | `backend/tests/e2e/test_metrics_data_live.py::test_ac06_ac07_prometheus_shows_the_load_and_follows_the_limit`와 브라우저 검증(메트릭 검증 보고서 AC-08) | 10 MiB/s 볼륨에 쓰기를 걸면 부하 전 0이던 `rate(...[20s])`가 15 s 안에 0보다 커진다. Prometheus가 저장한 카운터 표본을 게스트 단조 시계로 옮겨 보면, 한도가 정해지고 10 s 뒤부터의 구간에서 카운터 증가가 같은 시각 사이 fio가 끝낸 바이트(I/O별 완료 기록)의 ±5%이고, 20 s 처리량이 모두 한도 gauge(X × 1,048,576)의 101% 이하다. 부하 중 PATCH로 20 MiB/s로 올리면 gauge가 바뀌고 20 s 처리량 중앙값이 PATCH 전 최댓값보다 커진다. 저장 장치가 한도만큼 쓰는지는 FR-08 행이 본다. 대시보드의 처리량 차트가 같은 계열을 그린다 |
+| FR-13 | 문서에 적힌 명령 하나로 전체를 띄울 수 있다. | `backend/tests/e2e/test_compose_stack_live.py::test_one_command_starts_the_stack_as_a_regular_user`<br>`backend/tests/e2e/test_compose_stack_live.py::test_rerun_and_down_up_keep_volumes_and_client_io`<br>`backend/tests/e2e/test_compose_stack_live.py::test_agent_kill_during_writes_keeps_volumes_and_revert_and_delete_work`<br>`backend/tests/unit/test_compose.py::test_agent_waits_for_host_udev_like_a_host_process` | docker 그룹의 일반 사용자가 README의 `docker compose -f deploy/compose.yaml up -d --build --wait`(시험은 프로젝트 이름 `anf-clone-e2e`를 더한다)를 실행하면 0으로 끝나고 네 서비스가 healthy, `init`이 0으로 끝나며 네 포트가 127.0.0.1에만 열린다. 같은 명령을 다시 실행하고, `down` 뒤 10 s 동안 클라이언트의 1 MiB 직접 쓰기가 오류 없이 이어지고, 다시 `up`하면 API가 같은 볼륨·스냅샷·한도를 보이고 볼륨 인스턴스가 다시 뜨지 않는다. 쓰는 중에 agent 컨테이너를 `docker kill`해도 쓰기 오류가 0이고, 다시 뜬 뒤 netns의 tc 한도가 그대로이며 되돌리기·삭제가 성공한다. agent 컨테이너의 조건(S9)은 단위 테스트가 compose 파일에서 지킨다 |
+| §9 | §5의 데모 대본을 스크립트 하나로 처음부터 끝까지 재현할 수 있다. | `backend/tests/e2e/test_compose_stack_live.py::test_demo_replays_steps_1_to_7_cleans_up_and_fits_in_memory`<br>`backend/tests/unit/test_demo.py::test_failed_volume_stops_at_step_1_shows_the_error_and_cleans_up`<br>`backend/tests/unit/test_demo.py::test_stack_down_exits_2_with_the_start_command_and_sends_nothing_else`<br>`backend/tests/unit/test_demo.py::test_step6_shows_slow_storage_as_a_note_not_a_failure`<br>`backend/tests/unit/test_demo.py::test_step6_fails_when_a_run_goes_above_the_limit`<br>`backend/tests/unit/test_demo.py::test_step6_fails_when_the_throughput_does_not_follow_the_new_limit` | 일반 사용자의 `python3 scripts/demo.py`가 1~7단계를 3분 안에 끝내고 0으로 끝난다. 출력에 단계마다 클라이언트가 본 근거가 있다: `.snapshot/snap1/hello.txt`의 내용, 되돌린 뒤 다시 읽은 파일, 새 볼륨에서 읽은 파일과 원본의 목록, 20 → 5 MiB/s에서 3회씩 잰 fio MiB/s(어느 회도 그 한도의 101%에 6 s 창의 1 MiB I/O 하나(0.167 MiB/s)를 더한 값을 넘지 않고, 내린 뒤 중앙값은 5 MiB/s의 101% 이하, 내리기 전에는 가장 빠른 회가 5 MiB/s의 천장(5.217)을 넘는다. 한도까지 얼마나 가까운지는 FR-08 행이 보고, 중앙값이 90% 아래면 데모는 안내만 한 줄 붙인다), Prometheus의 쓰기 rate와 한도 계열, 대시보드 페이지와 두 프록시. 끝나면 계정·볼륨·인스턴스·LV·클라이언트가 남지 않고, 그동안 WSL 사용 메모리가 7 GiB 아래다. 단계가 어긋나면 그 단계를 보이며 1로, 스택이 없으면 시작 명령을 보이며 2로 끝난다(단위) |
 
 ## 5. 알려진 한계
 
 - **클라이언트와 서버가 같은 커널이다** (ADR R-08). 클라이언트 컨테이너와 knfsd가 같은 WSL 커널·메모리를 쓴다. 처리량
   측정과 page cache 효과는 실제 ANF(별도 VM, 네트워크)와 다를 수 있다. NFS LOCALIO는 꺼져 있다(S0).
 - **처리량 판정은 게스트 단조 시계로 한다.** WSL 벽시계는 약 30초마다 뒤로 건너뛴다. 실행기의 시간도 `/proc/uptime`으로 잰다.
-- **데이터 플레인은 기기에 하나다.** VG, IP 대역, 포트 8080·8090·9090을 같이 쓰므로 실행기는 한 번에 하나만 돌고, 파일은
-  차례로 돈다. 처리량 시험은 다른 I/O와 겹치면 판정이 흔들린다.
+- **데이터 플레인은 기기에 하나다.** VG, IP 대역, 포트 8080·8081·8090·9090을 같이 쓰므로 실행기는 한 번에 하나만 돌고, 파일은
+  차례로 돈다. compose 스택도 같은 것을 쓰므로 테스트 전에 내린다. 처리량 시험은 다른 I/O와 겹치면 판정이 흔들린다.

@@ -2,3 +2,8 @@
 # CRLF이면 /bin/sh가 스크립트를 읽지 못하고, nfs.conf 값 끝에 \r이 붙는다.
 *.sh text eol=lf
 backend/storage_agent/nfs_server/** text eol=lf
+# compose 스택의 빌드 입력(FR-13). .dockerignore 패턴 끝에 \r이 붙으면 맞는 파일이 없어진다
+deploy/** text eol=lf
+.dockerignore text eol=lf
+# 데모 스크립트는 WSL의 python3로 돈다(shebang 줄 끝에 \r이 붙지 않게)
+scripts/demo.py text eol=lf
