@@ -40,14 +40,16 @@ RESTORED = ("vol-restored", "demo-restored", "NFSv3")  # 프로토콜은 원본(
 SNAP = "snap1"
 # MiB/s. 6단계는 한도가 천장인지(어느 회도 ceiling 이하)와 한도를 내리면 잰 값이 따라 내려가는지만 판정한다. 스토리지가
 # 가끔 몇 초씩 한도보다 느리게 써서(S7 Q2, 제한기 원인 아님) 한도 아래쪽은 흔들린다. 그 정확도(90~101%)는 FR-08의
-# 데이터 시험이 본다. 이 환경에서 잰 쓰기 한 회의 가장 낮은 비율은 36%였고, 20의 36%도 5의 101%보다 크다
+# 데이터 시험이 본다. 수정 뒤 20회에서 20 MiB/s 쓰기 한 회의 최저는 3.68(18%), 3회 중앙값의 최저는 7.25(36%)였지만
+# 3회 중 가장 빠른 회는 가장 낮을 때도 16.14(81%)라 5의 천장(5.217)보다 컸다. follows_limit()은 그 가장 빠른 회를 본다
 LIMIT, NEW_LIMIT = 20.0, 5.0
 HIGH = 1.01  # 한도의 101%까지는 측정 여유 (FR-08 결정 15와 같은 위쪽 허용 오차)
 SLOW = 0.90  # 중앙값이 한도의 90% 아래면 "이번에는 스토리지가 느렸다"는 안내를 붙인다(실패 아님)
 CLIENTS = ("anf-demo-client-1", "anf-demo-client-2")
 CLIENT_IMAGE, NETWORK = "anf-nfs-client", "anf-vnet"
 TEXT = "hello from the ANF clone demo"
-# 한도마다 6 s 쓰기를 3회 재고, 따라 바뀌었는지는 중앙값으로 본다. 한 회가 몇 초 멈춰 낮게 나와도 흔들리지 않는다
+# 한도마다 6 s 쓰기를 3회 잰다. 따라 바뀌었는지는 내리기 전의 가장 빠른 회와 내린 뒤의 중앙값으로 본다.
+# 스토리지가 몇 초 멈춰 낮게 나온 회가 섞여도 흔들리지 않는다
 FIO_RUNS = 3
 FIO_BS_MIB, FIO_RUNTIME_S = 1, 6  # I/O 크기(MiB)와 측정 창(s). ceiling()도 이 값을 쓴다
 FIO = ("fio --direct=1 --ioengine=libaio --clocksource=clock_gettime --output-format=json"
@@ -114,8 +116,9 @@ def under_ceiling(runs: list[float], limit: float) -> bool:
 
 
 def follows_limit(before: list[float], after: list[float], new_limit: float) -> bool:
-    """한도를 내린 뒤의 중앙값은 새 한도의 101% 이하이고, 내리기 전의 중앙값은 그보다 크다(옛 한도에서 더 빨랐다)."""
-    return round(statistics.median(after) / new_limit, 4) <= HIGH < round(statistics.median(before) / new_limit, 4)
+    """한도를 내린 뒤의 중앙값은 새 한도의 101% 이하이고, 내리기 전에는 어느 한 회가 새 한도의 천장(ceiling)보다
+    빨랐다(새 한도로는 낼 수 없는 속도). 내리기 전은 스토리지가 느린 회가 섞여도 흔들리지 않게 가장 빠른 회를 본다."""
+    return round(statistics.median(after) / new_limit, 4) <= HIGH and max(before) > ceiling(new_limit)
 
 
 def prom_value(body: dict) -> float | None:
@@ -334,13 +337,15 @@ class Demo:
         took = self.wait(r, 202, f"PATCH {name} throughputMibps={NEW_LIMIT:g}")
         self.say(f"PATCH {name} throughputMibps {LIMIT:g} -> {NEW_LIMIT:g} -> {r.status}; Succeeded after {took:.1f} s")
         after = self.fio_write(c, name, "/v41/fio", NEW_LIMIT)
-        medians = (f"median {statistics.median(before):g} MiB/s under {LIMIT:g} MiB/s -> "
-                   f"{statistics.median(after):g} MiB/s under {NEW_LIMIT:g} MiB/s")
+        medians = (f"median {statistics.median(before):g} MiB/s (fastest run {max(before):g}) under {LIMIT:g} MiB/s -> "
+                   f"median {statistics.median(after):g} MiB/s under {NEW_LIMIT:g} MiB/s")
+        fast = ceiling(NEW_LIMIT)
         if not follows_limit(before, after, NEW_LIMIT):
             raise StepFailed(f"the measured write throughput did not follow the limit change: {medians}; expected "
-                             f"the median above {HIGH:.0%} of {NEW_LIMIT:g} MiB/s before and at most that after")
-        self.say(f"the measured write throughput followed the limit: {medians}; "
-                 f"no run went above its ceiling ({CEILING_RULE})")
+                             f"the fastest run before above {fast:.2f} MiB/s (the ceiling of {NEW_LIMIT:g} MiB/s) "
+                             f"and the median after at most {HIGH:.0%} of {NEW_LIMIT:g} MiB/s")
+        self.say(f"the measured write throughput followed the limit: {medians}; the fastest run before was above "
+                 f"{fast:.2f} MiB/s, the ceiling of the new limit; no run went above its own ceiling ({CEILING_RULE})")
 
     def prom(self, query: str) -> float | None:
         r = self.http("GET", f"{DASHBOARD}/prometheus/api/v1/query?" + urllib.parse.urlencode({"query": query}))

@@ -45,21 +45,24 @@ def test_the_ceiling_uses_the_io_size_and_window_of_the_fio_command():
     assert demo.ceiling(5.0) == pytest.approx(5.0 * 1.01 + demo.FIO_BS_MIB / demo.FIO_RUNTIME_S)
 
 
+AFTER = [4.97, 4.96, 4.97]
+
+
 @pytest.mark.parametrize("before, after, ok", [
-    ([19.7, 19.8, 19.8], [4.97, 4.96, 4.97], True),
-    ([14.3, 12.48, 19.9], [4.97, 4.96, 4.97], True),   # 내리기 전이 느렸어도 새 한도보다는 빨랐다
-    ([5.0, 5.05, 19.8], [4.97, 4.96, 4.97], False),    # 내리기 전 중앙값이 새 한도의 101%(5.05)를 넘지 않는다
-    ([19.7, 19.8, 19.8], [4.97, 5.1, 5.1], False),     # 내린 뒤 중앙값이 새 한도의 101%를 넘는다
+    ([19.7, 19.8, 19.8], AFTER, True),
+    ([16.14, 5.93, 7.25], AFTER, True),   # HEAD 반복 run-8: 중앙값 36%여도 가장 빠른 회가 새 천장 5.217을 넘는다
+    ([3.68, 4.9, 16.0], AFTER, True),     # 중앙값 4.9는 5.05 아래지만(옛 판정은 실패) 16.0은 새 한도로 낼 수 없다
+    ([4.9, 5.1, 5.2], AFTER, False),      # 가장 빠른 회 5.2 ≤ 5.217: 새 한도에서도 나올 수 있는 속도다
+    ([19.7, 19.8, 19.8], [4.97, 5.1, 5.1], False),   # 내린 뒤 중앙값이 새 한도의 101%(5.05)를 넘는다
 ])
-def test_follows_limit_needs_the_median_above_the_new_limit_before_and_within_it_after(before, after, ok):
+def test_follows_limit_needs_a_run_before_faster_than_the_new_ceiling_and_the_median_after_within_it(before, after, ok):
     assert demo.follows_limit(before, after, 5.0) is ok
 
 
 def test_the_limit_pair_leaves_room_for_the_slowest_write_seen():
-    # 이 환경에서 잰 쓰기 한 회의 가장 낮은 비율은 한도의 36%다(수정 확인 10회차, 20 MiB/s에서 7.22. 그 전에는
-    # 구현 중 10 MiB/s에서 3.76, 38%). 첫 한도에서 그만큼 느려져도 "따라 바뀜"(내리기 전 중앙값 > 새 한도의 101%)이
-    # 깨지지 않아야 한다
-    assert 0.36 * demo.LIMIT > demo.NEW_LIMIT * demo.HIGH
+    # 수정 뒤 실제 20회(20 MiB/s 3회씩)에서 한 회 최저는 3.68(18%), 3회 중앙값 최저는 7.25(36%), 3회 중 가장 빠른 회의
+    # 최저는 16.14(81%)였다. "따라 바뀜"은 가장 빠른 회를 보므로, 그 최저 비율에서도 새 한도의 천장보다 빨라야 한다
+    assert 16.14 / 20 * demo.LIMIT > demo.ceiling(demo.NEW_LIMIT)
 
 
 def test_prom_value_reads_one_sample_or_none():
@@ -173,8 +176,10 @@ def test_step6_shows_slow_storage_as_a_note_not_a_failure(capsys):
     assert "[6]   the storage wrote slower than the limit this time" in out
     assert f"[6] fio write on vol-v41 with the limit {demo.NEW_LIMIT:g} MiB/s: 4.97, 4.96, 4.97 MiB/s" in out
     assert out.count("slower than the limit") == 1  # 99%인 두 번째 측정에는 붙지 않는다
-    assert f"followed the limit: median {slow[0]:g} MiB/s under {demo.LIMIT:g} MiB/s -> 4.97 MiB/s under " in out
-    assert "no run went above its ceiling (101% of the limit plus one 1 MiB I/O in the 6 s window)" in out
+    assert (f"the measured write throughput followed the limit: median {slow[0]:g} MiB/s (fastest run {slow[2]:g}) "
+            f"under {demo.LIMIT:g} MiB/s -> median 4.97 MiB/s under {demo.NEW_LIMIT:g} MiB/s") in out
+    assert "the fastest run before was above 5.22 MiB/s, the ceiling of the new limit" in out
+    assert "no run went above its own ceiling (101% of the limit plus one 1 MiB I/O in the 6 s window)" in out
 
 
 def test_step6_fails_when_a_run_goes_above_the_limit():
@@ -186,6 +191,6 @@ def test_step6_fails_when_a_run_goes_above_the_limit():
 
 
 def test_step6_fails_when_the_throughput_does_not_follow_the_new_limit():
-    # 내리기 전 중앙값이 새 한도의 101% 이하라 한도를 바꾼 효과가 보이지 않는다
-    with pytest.raises(demo.StepFailed, match="did not follow"):
-        demo.Demo(FakeApi(), FakeFio(5.0, 4.9, demo.LIMIT, 4.97, 4.96, 4.97)).step6()
+    # 내리기 전 가장 빠른 회도 새 한도의 천장 이하라 한도를 바꾼 효과가 보이지 않는다
+    with pytest.raises(demo.StepFailed, match=r"did not follow .*expected the fastest run before above 5\.22 MiB/s"):
+        demo.Demo(FakeApi(), FakeFio(4.9, 5.1, 5.2, 4.97, 4.96, 4.97)).step6()
