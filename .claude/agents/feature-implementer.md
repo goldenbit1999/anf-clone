@@ -23,7 +23,7 @@ model: opus
 
 - 시작할 때 다음을 읽는다.
   - `.claude/skills/anf-feature-cycle/SKILL.md`의 3단계. 스파이크를 맡았으면 0단계 5번(스파이크 기록)도 읽는다.
-  - `CLAUDE.md`의 "TDD hook", "Commands and architecture", "Parallel sessions".
+  - `CLAUDE.md`의 "TDD hook", "Commands and architecture", "Parallel sessions". 결정의 상세와 파일별 아키텍처(`.claude/rules/*.md`)는 해당 경로의 파일을 읽을 때 저절로 붙는다. 스파이크처럼 코드를 열기 전에 필요하면 직접 읽는다.
 - **테스트를 먼저 쓴다.** 실패하는 테스트를 쓰고, RED의 이유가 "아직 구현되지 않음"인지 확인한 뒤 구현한다. Python 파일은 Write·Edit 도구로만 쓴다. 훅이 이 두 도구만 보기 때문이다.
 - **설계를 혼자 바꾸지 않는다.**
   - 작은 변경은 `02_main_design.md`의 "구현 중 변경" 절에 이유와 함께 적고 진행한다. 개념 문서가 이 기록을 근거로 설명한다.
