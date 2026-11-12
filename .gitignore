@@ -11,3 +11,5 @@ venv/
 _workspace/*/sources/
 # anf-roadmap 총괄 세션의 진행 기록. 브랜치를 바꿔도 남아야 하고, merge하지 않는 브랜치에 갇히면 안 된다.
 _workspace/roadmap.md
+# ai-readiness-cartography 스킬이 만든 로컬 감사 결과. 저장소에 남기지 않는다.
+docs/ai-readiness-*
